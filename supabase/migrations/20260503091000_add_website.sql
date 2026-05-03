@@ -1,0 +1,1 @@
+ALTER TABLE credit_cases ADD COLUMN IF NOT EXISTS website TEXT;

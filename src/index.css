@@ -1,0 +1,162 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Bloomberg Terminal inspired design system. All colors HSL. */
+
+@layer base {
+  :root {
+    /* Terminal palette — amber on near-black */
+    --background: 0 0% 4%;
+    --foreground: 38 100% 62%;
+
+    --surface: 0 0% 7%;
+    --surface-2: 0 0% 10%;
+    --surface-3: 0 0% 13%;
+
+    --card: 0 0% 6%;
+    --card-foreground: 38 100% 62%;
+
+    --popover: 0 0% 7%;
+    --popover-foreground: 38 100% 62%;
+
+    --primary: 38 100% 55%;            /* amber */
+    --primary-foreground: 0 0% 4%;
+
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 38 100% 62%;
+
+    --muted: 0 0% 11%;
+    --muted-foreground: 40 20% 55%;
+
+    --accent: 195 100% 50%;            /* cyan ticker */
+    --accent-foreground: 0 0% 4%;
+
+    --destructive: 0 84% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 145 80% 45%;
+    --success-foreground: 0 0% 4%;
+
+    --warning: 45 100% 55%;
+    --warning-foreground: 0 0% 4%;
+
+    --border: 38 40% 22%;
+    --input: 0 0% 10%;
+    --ring: 38 100% 55%;
+
+    --grid-line: 38 30% 15%;
+
+    --radius: 0px;
+
+    --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+
+    --shadow-glow: 0 0 0 1px hsl(38 100% 55% / 0.4), 0 0 20px hsl(38 100% 55% / 0.15);
+    --shadow-panel: inset 0 0 0 1px hsl(var(--border));
+
+    --gradient-scan: linear-gradient(180deg, transparent 0%, hsl(38 100% 55% / 0.04) 50%, transparent 100%);
+
+    --sidebar-background: 0 0% 5%;
+    --sidebar-foreground: 38 100% 62%;
+    --sidebar-primary: 38 100% 55%;
+    --sidebar-primary-foreground: 0 0% 4%;
+    --sidebar-accent: 0 0% 10%;
+    --sidebar-accent-foreground: 38 100% 62%;
+    --sidebar-border: 38 40% 22%;
+    --sidebar-ring: 38 100% 55%;
+  }
+
+  .dark {
+    /* same — terminal is always dark */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-mono antialiased;
+    font-family: var(--font-mono);
+    background-image:
+      linear-gradient(hsl(var(--grid-line) / 0.4) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--grid-line) / 0.4) 1px, transparent 1px);
+    background-size: 32px 32px;
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.4);
+    color: hsl(var(--primary-foreground));
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: hsl(var(--surface)); }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--primary) / 0.5); }
+}
+
+@layer components {
+  .terminal-panel {
+    @apply bg-card border border-border relative;
+    box-shadow: var(--shadow-panel);
+  }
+
+  .terminal-panel-header {
+    @apply flex items-center justify-between px-3 py-1.5 border-b border-border bg-surface text-xs uppercase tracking-widest text-primary/80;
+  }
+
+  .terminal-label {
+    @apply text-[10px] uppercase tracking-[0.2em] text-muted-foreground;
+  }
+
+  .terminal-value {
+    @apply text-primary font-mono;
+  }
+
+  .scanlines::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 2px,
+      hsl(0 0% 0% / 0.25) 3px,
+      transparent 4px
+    );
+    z-index: 1;
+  }
+
+  .ticker-blink {
+    animation: blink 1s steps(2) infinite;
+  }
+
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+
+  @keyframes scan {
+    0% { transform: translateY(-100%); }
+    100% { transform: translateY(100%); }
+  }
+
+  .scan-line {
+    position: absolute;
+    inset: 0;
+    background: var(--gradient-scan);
+    pointer-events: none;
+    animation: scan 4s linear infinite;
+  }
+
+  .glow {
+    text-shadow: 0 0 8px hsl(var(--primary) / 0.6);
+  }
+}
