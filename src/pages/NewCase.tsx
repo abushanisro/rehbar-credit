@@ -453,7 +453,7 @@ export default function NewCase() {
           </Panel>
 
           {/* AI Document Scan */}
-          <Panel title="AI DOCUMENT SCAN" ticker="GEMINI/2.5PRO" status="ok">
+          <Panel title="AI DOCUMENT SCAN" ticker="GEMINI/2.5PRO" status="live">
             <div className="space-y-3 text-xs">
 
               <p className="text-foreground/60 leading-relaxed">

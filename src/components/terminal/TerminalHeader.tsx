@@ -1,16 +1,285 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/features/auth/AuthProvider";
+import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 
-const fmt = (d: Date) =>
+const fmtClock = (d: Date) =>
   d.toLocaleTimeString("en-US", { hour12: false }) + " IST";
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+function calcCountdown(dueDateStr: string): { text: string; urgent: boolean } {
+  const due = new Date(dueDateStr + "T00:00:00");
+  const now  = new Date();
+  const diffMs = due.getTime() - now.getTime();
+  if (diffMs <= 0) return { text: "OVERDUE", urgent: true };
+  const days  = Math.floor(diffMs / 86_400_000);
+  const hours = Math.floor((diffMs % 86_400_000) / 3_600_000);
+  const mins  = Math.floor((diffMs % 3_600_000) / 60_000);
+  const secs  = Math.floor((diffMs % 60_000) / 1_000);
+  if (days > 1)  return { text: `${days}d ${hours}h`, urgent: false };
+  if (days === 1) return { text: `1d ${hours}h ${mins}m`, urgent: true };
+  if (hours > 0)  return { text: `${hours}h ${mins}m ${secs}s`, urgent: true };
+  return { text: `${mins}m ${secs}s`, urgent: true };
+}
+
+// ── types ─────────────────────────────────────────────────────────────────────
+type Notif = {
+  id: string; case_id: string; case_code: string; client_name: string;
+  emi_number: number; due_date: string; emi_amount: number;
+  kind: "overdue" | "due_today" | "due_soon";
+};
+
+// ── NotificationBell ──────────────────────────────────────────────────────────
+function NotificationBell({ userId }: { userId: string }) {
+  const [notifs, setNotifs]     = useState<Notif[]>([]);
+  const [open, setOpen]         = useState(false);
+  const [loading, setLoading]   = useState(false);
+  const [tick, setTick]         = useState(0);          // drives countdown re-render
+  const panelRef                = useRef<HTMLDivElement>(null);
+  const navigate                = useNavigate();
+
+  // countdown ticker — every second
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const today   = new Date().toISOString().split("T")[0];
+  const in7Days = new Date(Date.now() + 7 * 86_400_000).toISOString().split("T")[0];
+
+  const fetchNotifs = useCallback(async () => {
+    setLoading(true);
+    const { data } = await (supabase
+      .from("emi_payments")
+      .select("id, case_id, emi_number, due_date, emi_amount, status, credit_cases(case_code, client_name)")
+      .eq("user_id", userId)
+      .neq("status", "paid")
+      .lte("due_date", in7Days)
+      .order("due_date") as ReturnType<typeof supabase.from>);
+
+    if (data) {
+      setNotifs((data as never[]).map((r: {
+        id: string; case_id: string; emi_number: number; due_date: string; emi_amount: number;
+        credit_cases: { case_code: string; client_name: string } | null;
+      }) => ({
+        id: r.id, case_id: r.case_id,
+        case_code: r.credit_cases?.case_code ?? r.case_id.slice(0, 8),
+        client_name: r.credit_cases?.client_name ?? "Unknown",
+        emi_number: r.emi_number, due_date: r.due_date, emi_amount: r.emi_amount,
+        kind: r.due_date < today ? "overdue" : r.due_date === today ? "due_today" : "due_soon",
+      })));
+    }
+    setLoading(false);
+  }, [userId, today, in7Days]);
+
+  // initial fetch
+  useEffect(() => { fetchNotifs(); }, [fetchNotifs]);
+
+  // polling fallback every 5 min
+  useEffect(() => {
+    const t = setInterval(fetchNotifs, 5 * 60_000);
+    return () => clearInterval(t);
+  }, [fetchNotifs]);
+
+  // ── REAL-TIME subscription ──────────────────────────────────────────────────
+  useEffect(() => {
+    const channel = supabase
+      .channel(`emi-bell-${userId}`)
+      .on("postgres_changes", {
+        event: "*", schema: "public", table: "emi_payments",
+        filter: `user_id=eq.${userId}`,
+      }, () => { fetchNotifs(); })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [userId, fetchNotifs]);
+
+  // close on outside click
+  useEffect(() => {
+    const h = (e: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  const overdueCount  = notifs.filter(n => n.kind === "overdue").length;
+  const todayCount    = notifs.filter(n => n.kind === "due_today").length;
+  const soonCount     = notifs.filter(n => n.kind === "due_soon").length;
+  const urgentCount   = overdueCount + todayCount;
+  const total         = notifs.length;
+
+  // nearest upcoming (not overdue) for countdown
+  const nextPending = notifs.find(n => n.kind !== "overdue");
+  const countdown   = nextPending ? calcCountdown(nextPending.due_date) : null;
+  // force re-compute every tick
+  void tick;
+
+  const fmtAmt = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+
+  const kindStyle = {
+    overdue:   { label: "OVERDUE",   badge: "bg-destructive text-white",       row: "border-destructive/20 bg-destructive/5",   tag: "border-destructive/40 text-destructive bg-destructive/10" },
+    due_today: { label: "DUE TODAY", badge: "bg-warning text-black",           row: "border-warning/20 bg-warning/5",           tag: "border-warning/40 text-warning bg-warning/10" },
+    due_soon:  { label: "DUE SOON",  badge: "bg-accent/80 text-accent-foreground", row: "border-border/30",                     tag: "border-accent/40 text-accent bg-accent/10" },
+  };
+
+  return (
+    <div ref={panelRef} className="relative flex items-center gap-2">
+
+      {/* ── countdown chip next to bell ─────────────────────────────────── */}
+      {countdown && (
+        <div className={cn(
+          "hidden sm:flex items-center gap-1 text-[9px] font-bold tracking-widest px-1.5 py-0.5 border",
+          countdown.urgent
+            ? "border-destructive/50 text-destructive bg-destructive/10 animate-pulse"
+            : "border-accent/40 text-accent bg-accent/10"
+        )}>
+          <span>⏱</span>
+          <span>{countdown.text}</span>
+        </div>
+      )}
+
+      {/* ── bell button ─────────────────────────────────────────────────── */}
+      <button
+        onClick={() => { setOpen(o => !o); if (!open) fetchNotifs(); }}
+        className="relative flex items-center justify-center w-7 h-7 hover:bg-surface-2 border border-transparent hover:border-border transition-colors"
+        title={total > 0 ? `${total} EMI notification${total !== 1 ? "s" : ""}` : "No notifications"}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+          stroke={urgentCount > 0 ? "#ef4444" : total > 0 ? "#f59e0b" : "currentColor"}
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+          className={urgentCount > 0 ? "animate-[wiggle_1s_ease-in-out_infinite]" : ""}
+        >
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+
+        {/* badge */}
+        {total > 0 && (
+          <span className={cn(
+            "absolute -top-1.5 -right-1.5 min-w-[16px] h-[16px] text-[8px] font-bold flex items-center justify-center px-0.5 rounded-sm leading-none",
+            urgentCount > 0 ? "bg-destructive text-white" : "bg-warning text-black"
+          )}>
+            {total > 99 ? "99+" : total}
+          </span>
+        )}
+      </button>
+
+      {/* ── dropdown ────────────────────────────────────────────────────── */}
+      {open && (
+        <div className="absolute right-0 top-10 w-84 bg-surface border border-border shadow-2xl z-50 flex flex-col"
+          style={{ width: 340, maxHeight: "80vh" }}>
+
+          {/* header */}
+          <div className="border-b border-border bg-card px-3 py-2 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold tracking-widest text-primary">NOTIFICATIONS</span>
+              <div className="flex gap-1.5">
+                {overdueCount > 0 && <span className="text-[9px] font-bold px-1.5 py-0.5 bg-destructive text-white">{overdueCount} OVERDUE</span>}
+                {todayCount > 0   && <span className="text-[9px] font-bold px-1.5 py-0.5 bg-warning text-black">{todayCount} TODAY</span>}
+                {soonCount > 0    && <span className="text-[9px] font-bold px-1.5 py-0.5 border border-accent/40 text-accent">{soonCount} SOON</span>}
+              </div>
+            </div>
+
+            {/* next-due countdown bar */}
+            {nextPending && (() => {
+              const cd = calcCountdown(nextPending.due_date);
+              return (
+                <div className={cn(
+                  "flex items-center justify-between border px-2 py-1.5",
+                  cd.urgent ? "border-destructive/40 bg-destructive/5" : "border-accent/30 bg-accent/5"
+                )}>
+                  <div>
+                    <div className="text-[8px] tracking-widest text-muted-foreground">NEXT DUE · {nextPending.client_name}</div>
+                    <div className="text-[10px] font-bold text-primary mt-0.5">EMI #{nextPending.emi_number} · ₹{fmtAmt(nextPending.emi_amount)} Cr</div>
+                    <div className="text-[9px] text-muted-foreground">{nextPending.due_date}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[8px] tracking-widest text-muted-foreground mb-0.5">COUNTDOWN</div>
+                    <div className={cn(
+                      "text-[18px] font-bold tabular-nums leading-none font-mono",
+                      cd.urgent ? "text-destructive" : "text-accent"
+                    )}>{cd.text}</div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* stats row */}
+            {total > 0 && (
+              <div className="grid grid-cols-3 gap-1 text-center">
+                <div className="border border-destructive/20 bg-destructive/5 py-1">
+                  <div className="text-[14px] font-bold text-destructive">{overdueCount}</div>
+                  <div className="text-[8px] text-destructive/70 tracking-wider">OVERDUE</div>
+                </div>
+                <div className="border border-warning/20 bg-warning/5 py-1">
+                  <div className="text-[14px] font-bold text-warning">{todayCount}</div>
+                  <div className="text-[8px] text-warning/70 tracking-wider">DUE TODAY</div>
+                </div>
+                <div className="border border-accent/20 bg-accent/5 py-1">
+                  <div className="text-[14px] font-bold text-accent">{soonCount}</div>
+                  <div className="text-[8px] text-accent/70 tracking-wider">DUE SOON</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* list */}
+          <div className="overflow-y-auto flex-1">
+            {loading && (
+              <div className="px-3 py-6 text-[10px] text-muted-foreground text-center tracking-widest animate-pulse">SYNCING…</div>
+            )}
+            {!loading && total === 0 && (
+              <div className="px-3 py-8 text-center space-y-2">
+                <div className="text-success text-2xl">✓</div>
+                <div className="text-[10px] text-muted-foreground tracking-wider">All EMIs on track — no overdue or upcoming payments</div>
+              </div>
+            )}
+            {!loading && notifs.map(n => {
+              const s = kindStyle[n.kind];
+              const cd = calcCountdown(n.due_date);
+              return (
+                <button
+                  key={n.id}
+                  onClick={() => { navigate(`/case/${n.case_id}`); setOpen(false); }}
+                  className={cn("w-full text-left border-b border-border/30 px-3 py-2 hover:bg-surface-2 transition-colors", s.row)}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-bold text-primary truncate">{n.client_name}</div>
+                      <div className="text-[9px] text-muted-foreground">{n.case_code} · EMI #{n.emi_number}</div>
+                    </div>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <span className={cn("text-[8px] font-bold tracking-widest border px-1.5 py-0.5", s.tag)}>{s.label}</span>
+                      <span className={cn("text-[9px] font-bold font-mono tabular-nums", cd.urgent ? "text-destructive" : "text-accent")}>{cd.text}</span>
+                    </div>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between">
+                    <span className="text-[9px] text-muted-foreground">Due: {n.due_date}</span>
+                    <span className="text-[10px] font-bold text-primary tabular-nums">₹{fmtAmt(n.emi_amount)} Cr</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* footer */}
+          <div className="border-t border-border px-3 py-1.5 flex items-center justify-between">
+            <span className="text-[9px] text-muted-foreground tracking-wider">REAL-TIME · UPDATES LIVE</span>
+            <button onClick={fetchNotifs} className="text-[9px] text-accent hover:underline tracking-wider">REFRESH</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── TerminalHeader ────────────────────────────────────────────────────────────
 export const TerminalHeader = () => {
-  const [now, setNow] = useState(new Date());
+  const [now, setNow]   = useState(new Date());
   const { user, signOut } = useAuth();
-  const loc = useLocation();
-  const navigate = useNavigate();
+  const loc             = useLocation();
+  const navigate        = useNavigate();
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -20,13 +289,10 @@ export const TerminalHeader = () => {
   const navItem = (to: string, label: string, code: string) => {
     const active = loc.pathname === to || (to !== "/" && loc.pathname.startsWith(to));
     return (
-      <Link
-        to={to}
-        className={cn(
-          "px-3 py-1 text-xs tracking-widest border-r border-border transition-colors",
-          active ? "bg-primary text-primary-foreground" : "text-primary/80 hover:bg-surface-2"
-        )}
-      >
+      <Link to={to} className={cn(
+        "px-3 py-1 text-xs tracking-widest border-r border-border transition-colors",
+        active ? "bg-primary text-primary-foreground" : "text-primary/80 hover:bg-surface-2"
+      )}>
         <span className="text-muted-foreground mr-2">{code}</span>{label}
       </Link>
     );
@@ -34,19 +300,22 @@ export const TerminalHeader = () => {
 
   return (
     <>
-      <div className="border-b border-border bg-surface text-[11px] flex items-center justify-between px-3 h-7">
+      <div className="border-b border-border bg-surface text-[11px] flex items-center justify-between px-3 h-9">
         <div className="flex items-center gap-4">
+          <img src="/Rehbar_logo.png" alt="Rehbar" className="h-6 w-auto object-contain" />
           <span className="text-primary font-bold tracking-widest glow">REHBAR//CAS · CREDIT TERMINAL</span>
-          <span className="text-muted-foreground">v3.0.0</span>
+          <span className="text-muted-foreground">v1.0.0</span>
           <span className="text-success ticker-blink">● LIVE</span>
-          <span className="text-muted-foreground">GEMINI 2.5 PRO</span>
+          <span className="text-muted-foreground">AI ENGINE</span>
         </div>
-        <div className="flex items-center gap-4 text-muted-foreground">
-          <span>{user?.email}</span>
-          <span className="text-primary">{fmt(now)}</span>
-          <button onClick={async () => { await signOut(); navigate("/auth"); }} className="text-destructive hover:underline">
-            [LOGOUT]
-          </button>
+        <div className="flex items-center gap-3 text-muted-foreground">
+          <span className="hidden md:block">{user?.email}</span>
+          <span className="text-primary">{fmtClock(now)}</span>
+          {user && <NotificationBell userId={user.id} />}
+          <button
+            onClick={async () => { await signOut(); navigate("/auth"); }}
+            className="text-destructive hover:underline"
+          >[LOGOUT]</button>
         </div>
       </div>
       <nav className="border-b border-border bg-card flex items-center h-9">
@@ -58,7 +327,7 @@ export const TerminalHeader = () => {
           <span className="ticker-blink text-primary">█</span>
         </div>
       </nav>
-      <div className="border-b border-border bg-surface-2 h-6 overflow-hidden relative flex items-center px-3 text-[10px] tracking-widest">
+      <div className="border-b border-border bg-surface-2 h-6 overflow-hidden flex items-center px-3 text-[10px] tracking-widest">
         <span className="text-warning">⚠ AI-GENERATED DRAFTS REQUIRE ANALYST REVIEW · NO AUTO CREDIT VERDICTS · DSCR FORMULA IS FINANCE-LOCKED</span>
       </div>
     </>

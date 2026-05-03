@@ -29,6 +29,7 @@ interface ExtractInput {
   statement_type: StatementType | "all_in_one";
   fiscal_year?: number | null;
   excel_text?: string; // optional pre-parsed sheet text from client
+  unit_only?: boolean; // detect unit from doc without re-extracting line items
 }
 
 function imageMimeFromName(name: string): string {
@@ -51,10 +52,10 @@ Deno.serve(async (req) => {
     }
 
     const body: ExtractInput = await req.json();
-    const { case_id, document_id, statement_type } = body;
+    const { case_id, document_id, statement_type, unit_only } = body;
     let { fiscal_year } = body;
 
-    if (!case_id || !document_id || !statement_type) {
+    if (!case_id || !document_id || (!unit_only && !statement_type)) {
       return new Response(JSON.stringify({ error: "Missing required fields" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -125,6 +126,44 @@ Deno.serve(async (req) => {
       userContent = [{ type: "image_url", image_url: { url: `data:${mime};base64,${base64}` } }];
     }
 
+    // ── Unit-only mode: detect unit from doc, update all rows for this case ──
+    if (unit_only) {
+      const geminiKey = Deno.env.get("GEMINI_API_KEY");
+      if (!geminiKey) throw new Error("GEMINI_API_KEY not configured");
+      const unitBody = JSON.stringify({
+        model: "gemini-2.5-flash",
+        messages: [
+          { role: "system", content: "You are a financial document analyzer. Reply with ONLY a single unit name — no extra words." },
+          { role: "user", content: [
+            { type: "text", text: 'What unit are ALL the financial figures in this document? Reply with EXACTLY one of: "Crores", "Lakhs", "Thousands", "Millions", "USD Millions", "USD"' },
+            ...(Array.isArray(userContent) ? userContent : [userContent]),
+          ]},
+        ],
+        max_tokens: 10,
+      });
+      let unitRes: Response | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        unitRes = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${geminiKey}`, "Content-Type": "application/json" },
+          body: unitBody,
+        });
+        if (unitRes.status !== 429) break;
+        await new Promise((r) => setTimeout(r, [5000, 15000, 30000][attempt] ?? 30000));
+      }
+      const unitJson = await unitRes!.json();
+      const detectedUnit = (unitJson.choices?.[0]?.message?.content ?? "").trim().replace(/[^a-zA-Z ]/g, "") || null;
+      if (detectedUnit) {
+        await supabase.from("extracted_financials")
+          .update({ unit: detectedUnit })
+          .eq("case_id", case_id);
+      }
+      await supabase.from("financial_documents").update({ extraction_status: "done" }).eq("id", document_id);
+      return new Response(JSON.stringify({ ok: true, unit: detectedUnit }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const isAllInOne = statement_type === "all_in_one";
     const targetTypes: StatementType[] = isAllInOne
       ? ["profit_loss", "balance_sheet", "cash_flow", "projections"]
@@ -135,21 +174,23 @@ Deno.serve(async (req) => {
     ).join("\n\n");
 
     const fyHint = isAllInOne
-      ? `Detect every fiscal year present in the document. For projection rows where no specific FY is stated, use ${fiscal_year} as a placeholder.`
+      ? `Detect EVERY fiscal year present in the document (e.g. 2022, 2023, 2024, 2025). Return one statements entry per (statement_type, fiscal_year) combination — do NOT merge multiple years into one. For projection rows where no specific FY is stated, use ${fiscal_year} as a placeholder.`
       : statement_type === "projections"
         ? `Projections may not be tied to a specific fiscal year — detect it from the document; if absent, use ${fiscal_year} as a placeholder.`
-        : `Auto-detect the fiscal year from the document (look for headings, labels, dates, e.g. "FY 2024-25" = 2024, "Year ended March 2023" = 2023). Do NOT assume a fixed year.`;
+        : `Detect EVERY fiscal year present in the document for this statement type (look for headings, labels, dates, e.g. "FY 2024-25" = 2024, "Year ended March 2023" = 2023). Return one statements entry per fiscal year found — do NOT merge or skip any year. If the document has 3 years of data, return 3 separate entries.`;
 
     const systemPrompt = `You are a senior financial data extraction engine for Rehbar Financial Services.
 You extract structured financial data from audited statements, projections, or workbooks.
 
 CRITICAL RULES:
-1. Return ONE value per (statement_type, fiscal_year, line item).
-2. Keep values in the SAME UNIT as the document. State the unit (Lakhs / Crores / INR / USD).
-3. For each field provide a confidence 0–100 (legibility, label match, computational consistency).
-4. NEVER include personal info about promoters, directors, partners (no PAN, no CIBIL, no addresses, no phone numbers).
-5. If a line item is genuinely absent, omit it (do not invent zeros).
-6. Validate computational consistency (e.g., Total Assets = Total Liabilities + Net Worth) and reflect issues in the confidence.`;
+1. Return ONE entry per (statement_type, fiscal_year) pair — if a document has 3 years of P&L data, return 3 separate statements entries, one per year.
+2. NEVER merge multiple fiscal years into a single entry. Extract ALL years visible in the document.
+3. Keep values in the SAME UNIT as the document. State the unit (Lakhs / Crores / INR / USD).
+4. For each field provide a confidence 0–100 (legibility, label match, computational consistency).
+5. NEVER include personal info about promoters, directors, partners (no PAN, no CIBIL, no addresses, no phone numbers).
+6. Map each document line item to the CLOSEST standard label from the provided list. If nothing fits, use the document's own label verbatim — never omit a line item just because its name differs slightly.
+7. If a line item is genuinely absent from the document (not just differently named), omit it (do not invent zeros).
+8. Validate computational consistency (e.g., Total Assets = Total Liabilities + Net Worth) and reflect issues in the confidence.`;
 
     const userPrompt = `Extract the following statements:\n\n${itemsBlock}\n\n${fyHint}\nNegative figures (or values in parentheses) must be returned as negative numbers.`;
 
@@ -162,82 +203,89 @@ CRITICAL RULES:
       ],
     };
 
-    const allowedLabels = Array.from(new Set(targetTypes.flatMap((t) => STANDARD_LINE_ITEMS[t])));
+    const preferredLabels = Array.from(new Set(targetTypes.flatMap((t) => STANDARD_LINE_ITEMS[t])));
 
     const geminiKey = Deno.env.get("GEMINI_API_KEY");
     if (!geminiKey) throw new Error("GEMINI_API_KEY not configured");
 
-    const aiRes = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${geminiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "gemini-2.5-flash",
-        messages: [{ role: "system", content: systemPrompt }, userMsg],
-        tools: [{
-          type: "function",
-          function: {
-            name: "submit_extraction",
-            description: "Submit structured financial data extraction.",
-            parameters: {
-              type: "object",
-              properties: {
-                unit: { type: "string" },
-                statements: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      statement_type: { type: "string", enum: targetTypes },
-                      fiscal_year: { type: "integer" },
-                      line_items: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            label: { type: "string", enum: allowedLabels },
-                            value: { type: ["number", "null"] },
-                            confidence: { type: "number", minimum: 0, maximum: 100 },
-                            note: { type: "string" },
+    const geminiBody = JSON.stringify({
+      model: "gemini-2.5-flash",
+      messages: [{ role: "system", content: systemPrompt }, userMsg],
+      tools: [{
+        type: "function",
+        function: {
+          name: "submit_extraction",
+          description: "Submit structured financial data extraction.",
+          parameters: {
+            type: "object",
+            properties: {
+              unit: { type: "string" },
+              statements: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    statement_type: { type: "string", enum: targetTypes },
+                    fiscal_year: { type: "integer" },
+                    line_items: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          label: {
+                            type: "string",
+                            description: `Preferred labels: ${preferredLabels.join(", ")}. Use the closest match; if none fit, use the document's own label.`,
                           },
-                          required: ["label", "value", "confidence"],
-                          additionalProperties: false,
+                          value: { type: ["number", "null"] },
+                          confidence: { type: "number", minimum: 0, maximum: 100 },
+                          note: { type: "string" },
                         },
+                        required: ["label", "value", "confidence"],
+                        additionalProperties: false,
                       },
                     },
-                    required: ["statement_type", "fiscal_year", "line_items"],
-                    additionalProperties: false,
                   },
+                  required: ["statement_type", "fiscal_year", "line_items"],
+                  additionalProperties: false,
                 },
               },
-              required: ["unit", "statements"],
-              additionalProperties: false,
             },
+            required: ["unit", "statements"],
+            additionalProperties: false,
           },
-        }],
-        tool_choice: { type: "function", function: { name: "submit_extraction" } },
-      }),
+        },
+      }],
+      tool_choice: { type: "function", function: { name: "submit_extraction" } },
     });
 
-    if (aiRes.status === 429) {
-      await supabase.from("financial_documents").update({
-        extraction_status: "failed", extraction_error: "Rate limited",
-      }).eq("id", document_id);
-      return new Response(JSON.stringify({ error: "Rate limit exceeded" }), {
-        status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    // Retry up to 3 times on 429 with exponential backoff (5s, 15s, 30s)
+    let aiRes: Response | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      aiRes = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${geminiKey}`, "Content-Type": "application/json" },
+        body: geminiBody,
       });
+      if (aiRes.status !== 429) break;
+      const waitMs = [5000, 15000, 30000][attempt] ?? 30000;
+      console.warn(`Gemini 429 on attempt ${attempt + 1}, retrying in ${waitMs}ms`);
+      await new Promise((r) => setTimeout(r, waitMs));
     }
-    if (!aiRes.ok) {
-      const txt = await aiRes.text();
-      console.error("AI gateway error", aiRes.status, txt);
+
+    if (!aiRes!.ok) {
+      const txt = await aiRes!.text();
+      const isRateLimit = aiRes!.status === 429;
+      console.error("AI gateway error", aiRes!.status, txt);
       await supabase.from("financial_documents").update({
-        extraction_status: "failed", extraction_error: `AI error ${aiRes.status}: ${txt.slice(0, 300)}`,
+        extraction_status: "failed",
+        extraction_error: isRateLimit ? "Rate limited after retries — try again in a minute" : `AI error ${aiRes!.status}: ${txt.slice(0, 300)}`,
       }).eq("id", document_id);
-      return new Response(JSON.stringify({ error: "Extraction failed", detail: txt }), {
-        status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      return new Response(JSON.stringify({ error: isRateLimit ? "Rate limit exceeded" : "Extraction failed", detail: txt }), {
+        status: aiRes!.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const aiJson = await aiRes.json();
+    const aiJson = await aiRes!.json();
     const toolCall = aiJson.choices?.[0]?.message?.tool_calls?.[0];
     if (!toolCall) throw new Error("No tool call in AI response");
     const args = JSON.parse(toolCall.function.arguments);
@@ -259,6 +307,7 @@ CRITICAL RULES:
         .upsert({
           case_id, user_id: user.id, document_id, fiscal_year: fy,
           statement_type: stmt.statement_type, line_items: lineItems, confirmed: false,
+          unit: args.unit ?? null,
         }, { onConflict: "case_id,fiscal_year,statement_type" });
       if (upErr) {
         console.error("upsert error", upErr);
@@ -286,8 +335,9 @@ CRITICAL RULES:
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
   } catch (e) {
-    console.error("extract-financials error", e);
-    return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("extract-financials unhandled error:", msg, e);
+    return new Response(JSON.stringify({ error: msg }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }

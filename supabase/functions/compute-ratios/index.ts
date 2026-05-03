@@ -86,10 +86,20 @@ Deno.serve(async (req) => {
     });
 
     const { data: financials } = await supabase.from("extracted_financials").select("*").eq("case_id", case_id);
-    const { data: thresholds } = await supabase.from("ratio_thresholds").select("*").eq("industry", "default");
 
-    const tMap: Record<string, { green_min: number | null; amber_min: number | null; peer_median: number | null; higher_is_better: boolean }> = {};
-    for (const t of thresholds ?? []) tMap[t.ratio_name] = t;
+    // Fetch default thresholds + industry-specific overrides in one query
+    const industry = cc.industry ?? "default";
+    const { data: thresholds } = await supabase
+      .from("ratio_thresholds")
+      .select("*")
+      .in("industry", ["default", industry]);
+
+    const tMap: Record<string, { green_min: number | null; amber_min: number | null; peer_median: number | null; higher_is_better: boolean; formula_note: string | null }> = {};
+    // Load defaults first, then overwrite with industry-specific values
+    for (const t of (thresholds ?? []).filter((t) => t.industry === "default")) tMap[t.ratio_name] = t;
+    if (industry !== "default") {
+      for (const t of (thresholds ?? []).filter((t) => t.industry === industry)) tMap[t.ratio_name] = t;
+    }
 
     // Group by year
     const yearMap = new Map<number, { pl: Record<string, number|null>; bs: Record<string, number|null>; cf: Record<string, number|null> }>();
@@ -131,6 +141,7 @@ Deno.serve(async (req) => {
       const cash = safe(bs["Cash & Bank"]);
       const debtors = safe(bs["Trade Receivables"]);
       const creditors = safe(bs["Trade Payables"]);
+      const reservesSurplus = safe(bs["Reserves & Surplus"]);
       const turnover = safe(pl["Turnover"]);
       const cogs = safe(pl["Cost of Goods Sold"]);
       const grossProfit = safe(pl["Gross Profit"]);
@@ -140,29 +151,51 @@ Deno.serve(async (req) => {
       const interest = safe(pl["Interest Expense"]) ?? 0;
       const pat = safe(pl["PAT"]);
 
+      // R' Score components (Rehbar's modified Altman model)
+      const wc = ca !== null && cl !== null ? ca - cl : null;
+      const outsideLiab = totalAssets !== null && networth !== null ? totalAssets - networth : null;
+      const rsWcTa   = wc !== null && totalAssets !== null && totalAssets !== 0 ? wc / totalAssets : null;
+      const rsReTa   = reservesSurplus !== null && totalAssets !== null && totalAssets !== 0 ? reservesSurplus / totalAssets : null;
+      const rsEbitdaTa = ebitda !== null && totalAssets !== null && totalAssets !== 0 ? ebitda / totalAssets : null;
+      const rsEquityOl = networth !== null && outsideLiab !== null && outsideLiab !== 0 ? networth / outsideLiab : null;
+      const rsComposite =
+        rsWcTa !== null && rsReTa !== null && rsEbitdaTa !== null && rsEquityOl !== null
+          ? 6 * rsWcTa + 3 * rsReTa + 7 * rsEbitdaTa + rsEquityOl
+          : null;
+
       const calc: Array<[string, string, number | null, string]> = [
-        ["liquidity","current_ratio", div(ca, cl), "Current Assets / Current Liabilities"],
-        ["liquidity","quick_ratio", div(ca !== null ? ca - inv : null, cl), "(CA - Inventory) / CL"],
-        ["liquidity","cash_ratio", div(cash, cl), "Cash / Current Liabilities"],
-        ["liquidity","working_capital", ca !== null && cl !== null ? ca - cl : null, "CA - CL"],
-        ["leverage","debt_to_equity", negEq ? null : div(totalDebt, networth), "Debt / Net Worth"],
-        ["leverage","total_liab_to_networth", negEq ? null : div(totalLiab, networth), "Total Liab / Net Worth"],
-        ["leverage","interest_coverage", div(ebit, interest || null), "EBIT / Interest"],
-        ["coverage","dscr", div((pat ?? 0) + dep + interest, interest + (principalPerYear || 0) || null), "STANDARDISED: (PAT + Dep + Int) / (Int + Principal)"],
-        ["efficiency","asset_turnover", div(turnover, totalAssets), "Turnover / Total Assets"],
-        ["efficiency","capital_employed_turnover", div(turnover, capEmployed), "Turnover / Capital Employed"],
-        ["efficiency","debtor_days", debtors !== null && turnover ? (debtors / turnover) * 365 : null, "(Debtors / Turnover) × 365"],
-        ["efficiency","creditor_days", creditors !== null && cogs ? (creditors / cogs) * 365 : null, "(Creditors / COGS) × 365"],
-        ["efficiency","inventory_turnover", div(cogs, inv || null), "COGS / Inventory"],
-        ["profitability","gross_margin", div(grossProfit, turnover), "Gross Profit / Turnover"],
-        ["profitability","ebitda_margin", div(ebitda, turnover), "EBITDA / Turnover"],
-        ["profitability","pat_margin", div(pat, turnover), "PAT / Turnover"],
-        ["profitability","roe", negEq ? null : div(pat, networth), "PAT / Net Worth"],
-        ["profitability","roce", div(ebit, capEmployed), "EBIT / Capital Employed"],
+        ["liquidity",     "current_ratio",             div(ca, cl),                                                                     "Current Assets / Current Liabilities"],
+        ["liquidity",     "quick_ratio",               div(ca !== null ? ca - inv : null, cl),                                          "(CA - Inventory) / CL"],
+        ["liquidity",     "cash_ratio",                div(cash, cl),                                                                   "Cash / Current Liabilities"],
+        ["liquidity",     "working_capital",           wc,                                                                              "CA - CL"],
+        ["solvency",      "debt_to_equity",            negEq ? null : div(totalDebt, networth),                                         "Debt / Net Worth"],
+        ["solvency",      "debt_to_assets",            div(totalDebt, totalAssets),                                                     "Total Debt / Total Assets"],
+        ["solvency",      "total_liab_to_networth",    negEq ? null : div(totalLiab, networth),                                         "Total Liab / Net Worth"],
+        ["solvency",      "interest_coverage",         div(ebit, interest || null),                                                     "EBIT / Interest"],
+        ["coverage",      "dscr",                      div((pat ?? 0) + dep + interest, interest + (principalPerYear || 0) || null),    "STANDARDISED: (PAT + Dep + Int) / (Int + Principal)"],
+        ["efficiency",    "asset_turnover",            div(turnover, totalAssets),                                                      "Turnover / Total Assets"],
+        ["efficiency",    "receivables_turnover",      div(turnover, debtors),                                                          "Turnover / Trade Receivables"],
+        ["efficiency",    "capital_employed_turnover", div(turnover, capEmployed),                                                      "Turnover / Capital Employed"],
+        ["efficiency",    "debtor_days",               debtors !== null && turnover ? (debtors / turnover) * 365 : null,                "(Debtors / Turnover) × 365"],
+        ["efficiency",    "creditor_days",             creditors !== null && cogs ? (creditors / cogs) * 365 : null,                   "(Creditors / COGS) × 365"],
+        ["efficiency",    "inventory_turnover",        div(cogs, inv || null),                                                          "COGS / Inventory"],
+        ["profitability", "gross_margin",              div(grossProfit, turnover),                                                      "Gross Profit / Turnover"],
+        ["profitability", "ebitda_margin",             div(ebitda, turnover),                                                           "EBITDA / Turnover"],
+        ["profitability", "net_profit_margin",         div(pat, turnover),                                                              "PAT / Turnover"],
+        ["profitability", "roa",                       div(pat, totalAssets),                                                           "PAT / Total Assets"],
+        ["profitability", "roe",                       negEq ? null : div(pat, networth),                                               "PAT / Net Worth"],
+        ["return",        "roce",                      div(ebit, capEmployed),                                                          "EBIT / Capital Employed"],
+        ["return",        "roic",                      negEq ? null : div(pat, capEmployed),                                            "PAT / Capital Employed"],
+        ["return",        "ronw",                      negEq ? null : div(pat, networth),                                               "PAT / Net Worth"],
+        ["r_score",       "r_score_wc_ta",             rsWcTa,                                                                          "Working Capital / Total Assets"],
+        ["r_score",       "r_score_re_ta",             rsReTa,                                                                          "Retained Earnings / Total Assets"],
+        ["r_score",       "r_score_ebitda_ta",         rsEbitdaTa,                                                                      "EBITDA / Total Assets"],
+        ["r_score",       "r_score_equity_ol",         rsEquityOl,                                                                      "Equity / Outside Liabilities"],
+        ["r_score",       "r_score_composite",         rsComposite,                                                                     "6×(WC/TA) + 3×(RE/TA) + 7×(EBITDA/TA) + Equity/OL"],
       ];
 
       for (const [cat, name, val, formula] of calc) {
-        const reviewRequired = negEq && ["debt_to_equity","total_liab_to_networth","roe"].includes(name);
+        const reviewRequired = negEq && ["debt_to_equity","total_liab_to_networth","roe","ronw"].includes(name);
         rows.push({
           case_id, user_id: user.id,
           fiscal_year: fy,
@@ -171,7 +204,7 @@ Deno.serve(async (req) => {
           ratio_value: val,
           benchmark: tMap[name]?.peer_median ?? null,
           threshold_status: applyThreshold(val, tMap[name], reviewRequired),
-          formula_note: formula,
+          formula_note: tMap[name]?.formula_note ?? formula,
         });
       }
     }

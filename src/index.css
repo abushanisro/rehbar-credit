@@ -2,69 +2,76 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Bloomberg Terminal inspired design system. All colors HSL. */
+/* Rehbar Financial Services — brand-aligned terminal theme.
+   Primary palette extracted from logo: navy #1C2B6E, orange #E8721C,
+   gold #F5A428, red #CE3425, light-gold #F2CF68. All colors HSL. */
 
 @layer base {
   :root {
-    /* Terminal palette — amber on near-black */
-    --background: 0 0% 4%;
-    --foreground: 38 100% 62%;
+    /* Backgrounds — deep brand navy */
+    --background: 229 58% 5%;        /* #060A18 very dark navy */
+    --foreground: 36 88% 72%;        /* warm gold text — readable on navy */
 
-    --surface: 0 0% 7%;
-    --surface-2: 0 0% 10%;
-    --surface-3: 0 0% 13%;
+    --surface:   229 52% 8%;         /* #0B1028 */
+    --surface-2: 229 48% 11%;        /* #101829 */
+    --surface-3: 229 44% 14%;        /* #16203A */
 
-    --card: 0 0% 6%;
-    --card-foreground: 38 100% 62%;
+    --card:             229 55% 7%;  /* #090F22 */
+    --card-foreground:  36 88% 72%;
 
-    --popover: 0 0% 7%;
-    --popover-foreground: 38 100% 62%;
+    --popover:            229 52% 8%;
+    --popover-foreground: 36 88% 72%;
 
-    --primary: 38 100% 55%;            /* amber */
-    --primary-foreground: 0 0% 4%;
+    /* Primary — Rehbar orange (#E8721C) */
+    --primary:            25 82% 51%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 0 0% 12%;
-    --secondary-foreground: 38 100% 62%;
+    --secondary:            229 40% 15%;
+    --secondary-foreground: 36 88% 72%;
 
-    --muted: 0 0% 11%;
-    --muted-foreground: 40 20% 55%;
+    --muted:            229 40% 12%;
+    --muted-foreground: 220 18% 52%;
 
-    --accent: 195 100% 50%;            /* cyan ticker */
-    --accent-foreground: 0 0% 4%;
+    /* Accent — brand gold (#F5A428) */
+    --accent:            36 91% 56%;
+    --accent-foreground: 229 58% 6%;
 
-    --destructive: 0 84% 55%;
+    /* Destructive — brand red (#CE3425) */
+    --destructive:            5 69% 48%;
     --destructive-foreground: 0 0% 100%;
 
-    --success: 145 80% 45%;
+    /* Success — keep green (approved/verified states) */
+    --success:            145 80% 42%;
     --success-foreground: 0 0% 4%;
 
-    --warning: 45 100% 55%;
-    --warning-foreground: 0 0% 4%;
+    /* Warning — light brand gold (#F2CF68) */
+    --warning:            45 84% 68%;
+    --warning-foreground: 229 58% 8%;
 
-    --border: 38 40% 22%;
-    --input: 0 0% 10%;
-    --ring: 38 100% 55%;
+    --border: 229 38% 20%;           /* muted navy border */
+    --input:  229 48% 9%;
+    --ring:   25 82% 51%;
 
-    --grid-line: 38 30% 15%;
+    --grid-line: 229 40% 16%;        /* subtle navy grid */
 
     --radius: 0px;
 
     --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
     --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
 
-    --shadow-glow: 0 0 0 1px hsl(38 100% 55% / 0.4), 0 0 20px hsl(38 100% 55% / 0.15);
+    --shadow-glow: 0 0 0 1px hsl(25 82% 51% / 0.4), 0 0 20px hsl(25 82% 51% / 0.15);
     --shadow-panel: inset 0 0 0 1px hsl(var(--border));
 
-    --gradient-scan: linear-gradient(180deg, transparent 0%, hsl(38 100% 55% / 0.04) 50%, transparent 100%);
+    --gradient-scan: linear-gradient(180deg, transparent 0%, hsl(25 82% 51% / 0.04) 50%, transparent 100%);
 
-    --sidebar-background: 0 0% 5%;
-    --sidebar-foreground: 38 100% 62%;
-    --sidebar-primary: 38 100% 55%;
-    --sidebar-primary-foreground: 0 0% 4%;
-    --sidebar-accent: 0 0% 10%;
-    --sidebar-accent-foreground: 38 100% 62%;
-    --sidebar-border: 38 40% 22%;
-    --sidebar-ring: 38 100% 55%;
+    --sidebar-background:        229 58% 4%;
+    --sidebar-foreground:        36 88% 72%;
+    --sidebar-primary:           25 82% 51%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent:            229 48% 10%;
+    --sidebar-accent-foreground: 36 88% 72%;
+    --sidebar-border:            229 38% 20%;
+    --sidebar-ring:              25 82% 51%;
   }
 
   .dark {

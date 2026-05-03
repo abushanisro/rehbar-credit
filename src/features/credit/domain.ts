@@ -255,34 +255,56 @@ export const STANDARD_LINE_ITEMS: Record<StatementType, string[]> = {
 };
 
 export const RATIO_DISPLAY_NAMES: Record<string, string> = {
+  // Liquidity
   current_ratio: "Current Ratio",
   quick_ratio: "Quick Ratio",
   cash_ratio: "Cash Ratio",
   working_capital: "Working Capital",
-  debt_to_equity: "Debt / Equity",
+  // Solvency
+  debt_to_equity: "Debt-to-Equity Ratio",
+  debt_to_assets: "Debt-to-Assets Ratio",
   total_liab_to_networth: "Total Liab / Net Worth",
-  interest_coverage: "Interest Coverage",
+  interest_coverage: "Interest Coverage Ratio",
+  // Coverage
   dscr: "DSCR",
-  asset_turnover: "Asset Turnover",
+  // Efficiency
+  asset_turnover: "Asset Turnover Ratio",
+  receivables_turnover: "Receivables Turnover Ratio",
   capital_employed_turnover: "Cap Employed Turnover",
   debtor_days: "Debtor Days",
   creditor_days: "Creditor Days",
-  inventory_turnover: "Inventory Turnover",
-  gross_margin: "Gross Margin",
+  inventory_turnover: "Inventory Turnover Ratio",
+  // Profitability
+  gross_margin: "Gross Profit Margin",
   ebitda_margin: "EBITDA Margin",
-  pat_margin: "PAT Margin",
-  roe: "ROE",
-  roce: "ROCE",
+  net_profit_margin: "Net Profit Margin",
+  roa: "Return on Assets (ROA)",
+  roe: "Return on Equity (ROE)",
+  // Return
+  roce: "Return on Capital Employed (ROCE)",
+  roic: "Return on Invested Capital (ROIC)",
+  ronw: "Return on Net Worth (RONW)",
+  // R' Score
+  r_score_wc_ta: "WC Cushion / Total Assets (×6)",
+  r_score_re_ta: "Retained Earnings / Total Assets (×3)",
+  r_score_ebitda_ta: "EBITDA / Total Assets (×7)",
+  r_score_equity_ol: "Equity / Outside Liabilities (×1)",
+  r_score_composite: "R' Score (Composite)",
 };
+
+const PCT_RATIOS = new Set([
+  "gross_margin", "ebitda_margin", "net_profit_margin", "pat_margin",
+  "roa", "roe", "roce", "roic", "ronw",
+]);
+const R_SCORE_RATIOS = new Set([
+  "r_score_composite", "r_score_wc_ta", "r_score_re_ta", "r_score_ebitda_ta", "r_score_equity_ol",
+]);
 
 export function formatRatio(name: string, value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "N/A";
   if (["debtor_days", "creditor_days"].includes(name)) return value.toFixed(0);
-  if (["working_capital"].includes(name)) {
-    return value.toLocaleString("en-IN", { maximumFractionDigits: 0 });
-  }
-  if (["gross_margin", "ebitda_margin", "pat_margin", "roe", "roce"].includes(name)) {
-    return (value * 100).toFixed(1) + "%";
-  }
+  if (name === "working_capital") return value.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+  if (PCT_RATIOS.has(name)) return (value * 100).toFixed(1) + "%";
+  if (R_SCORE_RATIOS.has(name)) return value.toFixed(2);
   return value.toFixed(2) + "x";
 }

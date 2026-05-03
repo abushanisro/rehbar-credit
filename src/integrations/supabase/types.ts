@@ -136,6 +136,7 @@ export type Database = {
           id: string
           line_items: Json
           statement_type: Database["public"]["Enums"]["statement_type"]
+          unit: string | null
           updated_at: string
           user_id: string
         }
@@ -149,6 +150,7 @@ export type Database = {
           id?: string
           line_items?: Json
           statement_type: Database["public"]["Enums"]["statement_type"]
+          unit?: string | null
           updated_at?: string
           user_id: string
         }
@@ -162,6 +164,7 @@ export type Database = {
           id?: string
           line_items?: Json
           statement_type?: Database["public"]["Enums"]["statement_type"]
+          unit?: string | null
           updated_at?: string
           user_id?: string
         }
@@ -180,6 +183,121 @@ export type Database = {
             referencedRelation: "financial_documents"
             referencedColumns: ["id"]
           },
+        ]
+      }
+      bank_statement_data: {
+        Row: {
+          id: string; case_id: string; document_id: string | null; user_id: string
+          month: string; bank_name: string | null; account_number: string | null
+          opening_balance: number | null; closing_balance: number | null
+          total_credits: number | null; total_debits: number | null
+          credit_count: number | null; debit_count: number | null
+          avg_balance: number | null; min_balance: number | null; max_balance: number | null
+          bounce_inward: number | null; bounce_outward: number | null
+          emi_outflows: number | null; remarks: string | null
+          created_at: string; updated_at: string
+        }
+        Insert: {
+          id?: string; case_id: string; document_id?: string | null; user_id: string
+          month: string; bank_name?: string | null; account_number?: string | null
+          opening_balance?: number | null; closing_balance?: number | null
+          total_credits?: number | null; total_debits?: number | null
+          credit_count?: number | null; debit_count?: number | null
+          avg_balance?: number | null; min_balance?: number | null; max_balance?: number | null
+          bounce_inward?: number | null; bounce_outward?: number | null
+          emi_outflows?: number | null; remarks?: string | null
+        }
+        Update: {
+          opening_balance?: number | null; closing_balance?: number | null
+          total_credits?: number | null; total_debits?: number | null
+          avg_balance?: number | null; min_balance?: number | null; max_balance?: number | null
+          bounce_inward?: number | null; bounce_outward?: number | null
+          emi_outflows?: number | null; remarks?: string | null; updated_at?: string
+        }
+        Relationships: []
+      }
+      gst_return_data: {
+        Row: {
+          id: string; case_id: string; document_id: string | null; user_id: string
+          period: string; return_type: string | null; gstin: string | null
+          taxable_turnover: number | null; exempt_turnover: number | null; total_turnover: number | null
+          output_tax: number | null; itc_claimed: number | null; net_tax_paid: number | null
+          filing_date: string | null; filing_status: string
+          created_at: string; updated_at: string
+        }
+        Insert: {
+          id?: string; case_id: string; document_id?: string | null; user_id: string
+          period: string; return_type?: string | null; gstin?: string | null
+          taxable_turnover?: number | null; exempt_turnover?: number | null; total_turnover?: number | null
+          output_tax?: number | null; itc_claimed?: number | null; net_tax_paid?: number | null
+          filing_date?: string | null; filing_status?: string
+        }
+        Update: {
+          taxable_turnover?: number | null; exempt_turnover?: number | null; total_turnover?: number | null
+          output_tax?: number | null; itc_claimed?: number | null; net_tax_paid?: number | null
+          filing_date?: string | null; filing_status?: string; updated_at?: string
+        }
+        Relationships: []
+      }
+      emi_payments: {
+        Row: {
+          id: string
+          case_id: string
+          user_id: string
+          emi_number: number
+          due_date: string
+          emi_amount: number
+          principal_component: number
+          interest_component: number
+          outstanding_balance: number
+          status: string
+          paid_amount: number | null
+          paid_date: string | null
+          remarks: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          case_id: string
+          user_id: string
+          emi_number: number
+          due_date: string
+          emi_amount: number
+          principal_component: number
+          interest_component: number
+          outstanding_balance: number
+          status?: string
+          paid_amount?: number | null
+          paid_date?: string | null
+          remarks?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          case_id?: string
+          user_id?: string
+          emi_number?: number
+          due_date?: string
+          emi_amount?: number
+          principal_component?: number
+          interest_component?: number
+          outstanding_balance?: number
+          status?: string
+          paid_amount?: number | null
+          paid_date?: string | null
+          remarks?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "emi_payments_case_id_fkey"
+            columns: ["case_id"]
+            isOneToOne: false
+            referencedRelation: "credit_cases"
+            referencedColumns: ["id"]
+          }
         ]
       }
       financial_documents: {
