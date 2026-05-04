@@ -13,11 +13,11 @@ export default defineConfig(({ mode }) => ({
     chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
-        manualChunks: {
-          "vendor-react":     ["react", "react-dom", "react-router-dom"],
-          "vendor-supabase":  ["@supabase/supabase-js"],
-          "vendor-liveblocks": ["@liveblocks/client", "@liveblocks/react"],
-          "vendor-ui":        ["@tanstack/react-query", "sonner", "zod"],
+        manualChunks: (id: string) => {
+          if (id.includes("node_modules/react") || id.includes("node_modules/react-dom") || id.includes("node_modules/react-router-dom")) return "vendor-react";
+          if (id.includes("node_modules/@supabase")) return "vendor-supabase";
+          if (id.includes("node_modules/@liveblocks")) return "vendor-liveblocks";
+          if (id.includes("node_modules/@tanstack") || id.includes("node_modules/sonner") || id.includes("node_modules/zod")) return "vendor-ui";
         },
       },
     },
