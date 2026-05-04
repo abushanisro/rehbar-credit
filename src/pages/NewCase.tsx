@@ -6,6 +6,7 @@ import { TerminalLayout } from "@/components/terminal/TerminalLayout";
 import { Panel } from "@/components/terminal/Panel";
 import { PRODUCTS, type ProductType } from "@/features/credit/domain";
 import { toast } from "sonner";
+import { getModelPreference } from "@/hooks/useModelPreference";
 
 const INDUSTRIES = [
   "Agriculture & Food Processing",
@@ -221,7 +222,7 @@ export default function NewCase() {
       }, 500);
 
       const { data, error } = await supabase.functions.invoke("extract-case-meta", {
-        body: { file_path: path, file_type: fileType, file_name: file.name, excel_text: excelText },
+        body: { file_path: path, file_type: fileType, file_name: file.name, excel_text: excelText, model_preference: getModelPreference() },
       });
       clearInterval(tick);
 

@@ -257,10 +257,83 @@ ${JSON.stringify(ratios, null, 2)}
 ━━━ FULL FINANCIAL DATA (for cash flow section VIII and context) ━━━
 ${JSON.stringify(financials, null, 2)}`;
 
+    const modelPref: string = (body as Record<string, unknown>).model_preference as string ?? "gemini";
+    const useClaude = modelPref === "claude";
+
+    let aiRes: Response;
+    if (useClaude) {
+      const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+      if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY not configured");
+      aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 8192,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userPrompt }],
+          tools: [{
+            name: "submit_ic_note",
+            description: "Submit the IC note. Sections V/VI/VII must start with the pre-built table from the user message, copied verbatim. Zero prose sentences anywhere.",
+            input_schema: {
+              type: "object",
+              properties: {
+                sections: {
+                  type: "object",
+                  properties: Object.fromEntries(
+                    SECTION_IDS.map((id) => [id, {
+                      type: "object",
+                      properties: { markdown: { type: "string" } },
+                      required: ["markdown"],
+                      additionalProperties: false,
+                    }])
+                  ),
+                  required: SECTION_IDS,
+                  additionalProperties: false,
+                },
+                risks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      category: { type: "string", enum: ["business","industry","financial","transaction"] },
+                      risk:     { type: "string" },
+                      mitigant: { type: "string" },
+                      severity: { type: "string", enum: ["high","medium","low"] },
+                    },
+                    required: ["category","risk","mitigant","severity"],
+                    additionalProperties: false,
+                  },
+                },
+                conditions_precedent: { type: "array", items: { type: "string" } },
+                swot: {
+                  type: "object",
+                  properties: {
+                    strengths:     { type: "array", items: { type: "string" } },
+                    weaknesses:    { type: "array", items: { type: "string" } },
+                    opportunities: { type: "array", items: { type: "string" } },
+                    threats:       { type: "array", items: { type: "string" } },
+                  },
+                  required: ["strengths","weaknesses","opportunities","threats"],
+                  additionalProperties: false,
+                },
+              },
+              required: ["sections","risks","conditions_precedent","swot"],
+              additionalProperties: false,
+            },
+          }],
+          tool_choice: { type: "tool", name: "submit_ic_note" },
+        }),
+      });
+    } else {
     const geminiKey = Deno.env.get("GEMINI_API_KEY");
     if (!geminiKey) throw new Error("GEMINI_API_KEY not configured");
 
-    const aiRes = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+    aiRes = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${geminiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -340,6 +413,7 @@ ${JSON.stringify(financials, null, 2)}`;
         tool_choice: { type: "function", function: { name: "submit_ic_note" } },
       }),
     });
+    } // end else gemini
 
     if (aiRes.status === 429) return new Response(JSON.stringify({ error: "Rate limit exceeded — retry in a moment" }), {
       status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -347,15 +421,23 @@ ${JSON.stringify(financials, null, 2)}`;
     if (!aiRes.ok) {
       const txt = await aiRes.text();
       console.error("AI gateway error", aiRes.status, txt);
-      return new Response(JSON.stringify({ error: "Narrative generation failed" }), {
+      return new Response(JSON.stringify({ error: "Narrative generation failed", detail: txt.slice(0, 300) }), {
         status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const aiJson = await aiRes.json();
-    const toolCall = aiJson.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) throw new Error("No tool call in AI response");
-    const args = JSON.parse(toolCall.function.arguments);
+    // Parse response — Claude uses content[].type=tool_use, Gemini uses choices[].message.tool_calls
+    let args: Record<string, unknown>;
+    if (useClaude) {
+      const toolUse = aiJson.content?.find((c: { type: string }) => c.type === "tool_use");
+      if (!toolUse) throw new Error("No tool_use in Claude response");
+      args = toolUse.input;
+    } else {
+      const toolCall = aiJson.choices?.[0]?.message?.tool_calls?.[0];
+      if (!toolCall) throw new Error("No tool call in AI response");
+      args = JSON.parse(toolCall.function.arguments);
+    }
 
     // If the AI didn't copy the tables (safety net): inject them directly
     if (tables.sectionV && !args.sections?.historical_financial?.markdown?.includes("|")) {

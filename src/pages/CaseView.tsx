@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { RoomProvider } from "@/liveblocks.config";
 import { CollabAvatarStack, TabPresenceDots, LiveCursors } from "@/components/collab/CollabPresence";
 import { useMyPresence } from "@/components/collab/useMyPresence";
+import { getModelPreference } from "@/hooks/useModelPreference";
 import { ShareDialog } from "@/components/collab/ShareDialog";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/features/auth/AuthProvider";
@@ -264,7 +265,7 @@ function CaseViewInner() {
       setProgress(70);
 
       // Stage 4: AI extraction — smart retry using Gemini's own retryDelay; bail immediately on daily quota
-      const extractBody = { case_id: cc.id, document_id: doc.id, statement_type, fiscal_year, excel_text: excelText };
+      const extractBody = { case_id: cc.id, document_id: doc.id, statement_type, fiscal_year, excel_text: excelText, model_preference: getModelPreference() };
       const fnUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-financials`;
       const { data: { session } } = await supabase.auth.getSession();
       const fnHeaders = {
@@ -515,7 +516,7 @@ function CaseViewInner() {
       setProgressLabel(LABELS[Math.min(Math.floor(p / 20), LABELS.length - 1)]);
     }, 600);
     try {
-      const { error } = await supabase.functions.invoke("generate-narrative", { body: { case_id: cc.id } });
+      const { error } = await supabase.functions.invoke("generate-narrative", { body: { case_id: cc.id, model_preference: getModelPreference() } });
       clearInterval(tick);
       if (error) throw error;
       setProgress(100);
