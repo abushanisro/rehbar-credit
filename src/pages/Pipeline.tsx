@@ -88,9 +88,10 @@ export default function Pipeline() {
     const c = cases.find(x => x.id === id);
     if (!window.confirm(`Delete "${c?.client_name}"? This cannot be undone.`)) return;
     setCases(prev => prev.filter(x => x.id !== id));
-    const { error } = await supabase.from("credit_cases").delete().eq("id", id);
-    if (error) { toast.error("Delete failed"); load(); }
-    else toast.success("Case deleted");
+    const { data: deleted, error } = await supabase.from("credit_cases").delete().eq("id", id).select("id");
+    if (error) { toast.error("Delete failed: " + error.message); load(); return; }
+    if (!deleted || deleted.length === 0) { toast.error("Delete blocked by database — run the RLS fix migration"); load(); return; }
+    toast.success("Case deleted");
   };
 
   return (

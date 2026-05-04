@@ -286,6 +286,16 @@ export const TerminalHeader = () => {
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "F1") { e.preventDefault(); navigate("/"); }
+      if (e.key === "F2") { e.preventDefault(); navigate("/new"); }
+      if (e.key === "F3") { e.preventDefault(); navigate("/companies"); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [navigate]);
+
   const navItem = (to: string, label: string, code: string) => {
     const active = loc.pathname === to || (to.length > 1 && loc.pathname.startsWith(to));
     return (
@@ -293,7 +303,7 @@ export const TerminalHeader = () => {
         "px-3 py-1 text-xs tracking-widest border-r border-border transition-colors",
         active ? "bg-primary text-primary-foreground" : "text-primary/80 hover:bg-surface-2"
       )}>
-        <span className="text-muted-foreground mr-2">{code}</span>{label}
+        <span className={cn("mr-2 text-[9px] font-bold border px-0.5", active ? "border-primary-foreground/40 text-primary-foreground/70" : "border-border text-muted-foreground")}>{code}</span>{label}
       </Link>
     );
   };
