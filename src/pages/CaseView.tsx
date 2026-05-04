@@ -641,7 +641,7 @@ export default function CaseView() {
               actions={<button onClick={openHeaderEdit} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[EDIT]</button>}
             >
               <div className="grid grid-cols-3 gap-3 text-sm">
-                <div><div className="terminal-label">AMOUNT</div><div className="text-primary">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")}</div></div>
+                <div><div className="terminal-label">AMOUNT</div><div className="text-primary">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")} Cr</div></div>
                 <div><div className="terminal-label">TENURE</div><div className="text-primary">{cc.tenure_months ?? "—"}M</div></div>
                 <div><div className="terminal-label">IRR</div><div className="text-primary">{cc.expected_irr ?? "—"}%</div></div>
               </div>
@@ -3498,7 +3498,7 @@ function ICSummaryPanel({ cc, ratios }: { cc: CaseRow; ratios: RatioRow[] }) {
           </tr>
           <tr className="border-b border-border/30">
             <td className="py-0.5 text-muted-foreground">Amount</td>
-            <td className="text-primary">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")}</td>
+            <td className="text-primary">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")} Cr</td>
             <td className="text-muted-foreground">Tenure</td>
             <td className="text-primary">{cc.tenure_months ?? "—"}M</td>
           </tr>

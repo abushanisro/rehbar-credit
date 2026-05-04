@@ -184,7 +184,7 @@ export default function Pipeline() {
                           <div className="text-accent text-[10px] mt-1">{PRODUCTS[c.product_type].short}</div>
                           {c.deal_amount && (
                             <div className="text-success text-[10px]">
-                              ₹{Number(c.deal_amount).toLocaleString("en-IN")}
+                              ₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr
                             </div>
                           )}
                         </Link>
