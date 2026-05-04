@@ -35,6 +35,37 @@ interface LineItem {
 
 const STATEMENT_TYPES: StatementType[] = ["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"];
 
+// ── Balance sheet auto-computation ────────────────────────────────────────────
+// Defines which labels are aggregate totals and what they sum from.
+// Order matters: dependencies must come before the rows that depend on them.
+const BS_AGGREGATIONS: [string, string[]][] = [
+  ["Current Assets",      ["Inventory", "Trade Receivables", "Cash & Bank", "Other Current Assets"]],
+  ["Total Assets",        ["Fixed Assets (Net)", "Current Assets"]],
+  ["Net Worth",           ["Share Capital", "Reserves & Surplus"]],
+  ["Total Debt",          ["Long Term Borrowings", "Short Term Borrowings"]],
+  ["Current Liabilities", ["Trade Payables", "Other Current Liabilities"]],
+  ["Total Liabilities",   ["Net Worth", "Total Debt", "Current Liabilities"]],
+  ["Capital Employed",    ["Net Worth", "Total Debt"]],
+];
+const BS_TOTAL_LABELS = new Set(BS_AGGREGATIONS.map(([label]) => label));
+
+function recomputeBS(items: LineItem[]): LineItem[] {
+  const result = items.map(i => ({ ...i }));
+  const getVal = (label: string): number => {
+    const it = result.find(i => i.label === label);
+    return it != null ? (it.override_value ?? it.value ?? 0) : 0;
+  };
+  for (const [totalLabel, components] of BS_AGGREGATIONS) {
+    const idx = result.findIndex(i => i.label === totalLabel);
+    if (idx === -1) continue; // don't create rows that don't exist
+    const hasComponents = components.some(c => result.some(i => i.label === c && (i.override_value ?? i.value) != null));
+    if (!hasComponents) continue;
+    const sum = components.reduce((acc, c) => acc + getVal(c), 0);
+    result[idx] = { ...result[idx], override_value: parseFloat(sum.toFixed(2)) };
+  }
+  return result;
+}
+
 export default function CaseView() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
@@ -317,11 +348,12 @@ export default function CaseView() {
   const updateCellValue = async (stmtType: string, fy: number, label: string, rawValue: string) => {
     const row = extracted.find(r => r.statement_type === stmtType && r.fiscal_year === fy);
     if (!row) return;
-    const items = (row.line_items as unknown as LineItem[]).slice();
+    let items = (row.line_items as unknown as LineItem[]).slice();
     const idx = items.findIndex(i => i.label === label);
     const v = rawValue === "" ? null : Number(rawValue);
     if (idx === -1) items.push({ label, value: v, confidence: 100, reviewed: true, override_value: null, note: "manual" });
-    else items[idx] = { ...items[idx], value: v, reviewed: true };
+    else items[idx] = { ...items[idx], value: v, override_value: null, reviewed: true };
+    if (stmtType === "balance_sheet") items = recomputeBS(items);
     await patchItems(row.id, items);
   };
 
@@ -835,7 +867,7 @@ export default function CaseView() {
                             return (n && n !== "manual" && n !== "auto-derived") ? n : "";
                           }, "");
                           return (
-                            <tr key={label} className="border-b border-border/30 group">
+                            <tr key={label} className={`border-b border-border/30 group ${type === "balance_sheet" && BS_TOTAL_LABELS.has(label) ? "bg-surface/60 font-semibold" : ""}`}>
                               <td className="py-0.5 pr-3">
                                 {isEditingLabel ? (
                                   <input
@@ -913,6 +945,42 @@ export default function CaseView() {
                       </tbody>
                     </table>
                   </div>
+
+                  {/* ── Balance sheet tally check ────────────────────────── */}
+                  {type === "balance_sheet" && (
+                    <div className="mt-3 border border-border/50 bg-surface p-3 space-y-2">
+                      <div className="text-[9px] text-muted-foreground tracking-widest mb-1">
+                        BALANCE CHECK &nbsp;·&nbsp; Total Assets = Net Worth + Total Debt + Current Liabilities
+                      </div>
+                      {years.map(fy => {
+                        const fyRow = typeRows.find(r => r.fiscal_year === fy);
+                        const items = (fyRow?.line_items ?? []) as unknown as LineItem[];
+                        const get = (lbl: string) => { const it = items.find(i => i.label === lbl); return it != null ? (it.override_value ?? it.value ?? 0) : 0; };
+                        const assets   = get("Total Assets");
+                        const nw       = get("Net Worth");
+                        const debt     = get("Total Debt");
+                        const currLiab = get("Current Liabilities");
+                        const liabSide = nw + debt + currLiab;
+                        const diff     = parseFloat((assets - liabSide).toFixed(2));
+                        const balanced = Math.abs(diff) < 0.01;
+                        const unit     = fyRow?.unit;
+                        const fmt      = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+                        const au       = unitAbbr(unit ?? "");
+                        return (
+                          <div key={fy} className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs px-2 py-1.5 border ${balanced ? "border-success/30 bg-success/5" : "border-destructive/40 bg-destructive/5"}`}>
+                            <span className="text-muted-foreground font-bold">FY{fy}</span>
+                            <span>Assets <span className="text-primary tabular-nums font-bold">{fmt(assets)}{au ? ` ${au}` : ""}</span></span>
+                            <span className="text-muted-foreground">=</span>
+                            <span>NW <span className="text-primary tabular-nums">{fmt(nw)}</span> + Debt <span className="text-primary tabular-nums">{fmt(debt)}</span> + CL <span className="text-primary tabular-nums">{fmt(currLiab)}</span> = <span className="text-primary tabular-nums font-bold">{fmt(liabSide)}{au ? ` ${au}` : ""}</span></span>
+                            <span className={`ml-auto font-bold tracking-widest text-[10px] ${balanced ? "text-success" : "text-destructive"}`}>
+                              {balanced ? "✓ BALANCED" : `DIFF ${diff > 0 ? "+" : ""}${fmt(diff)}${au ? ` ${au}` : ""} — adjust an asset or liability`}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
                   {/* ── Year-over-year comparison chart ─────────────────── */}
                   {years.length >= 1 && (() => {
                     const METRICS: Record<string, { key: string; color: string; name: string }[]> = {
