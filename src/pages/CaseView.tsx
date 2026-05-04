@@ -1,5 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "react-router-dom";
+import { RoomProvider } from "@/liveblocks.config";
+import { CollabAvatarStack, TabPresenceDots, LiveCursors } from "@/components/collab/CollabPresence";
+import { useMyPresence } from "@/components/collab/useMyPresence";
+import { ShareDialog } from "@/components/collab/ShareDialog";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { TerminalLayout } from "@/components/terminal/TerminalLayout";
@@ -66,9 +70,23 @@ function recomputeBS(items: LineItem[]): LineItem[] {
   return result;
 }
 
+// ── Wrapper: provides the Liveblocks room scoped to this case ─────────────────
 export default function CaseView() {
   const { id } = useParams<{ id: string }>();
+  if (!id) return null;
+  return (
+    <RoomProvider id={`case-${id}`} initialPresence={{ name: "", email: "", color: "#E8721C", activeTab: "upload", editingField: null, cursor: null }}>
+      <CaseViewInner />
+    </RoomProvider>
+  );
+}
+
+function CaseViewInner() {
+  const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
+  const [tab, setTabRaw] = useState<"upload" | "review" | "ratios" | "projections" | "ic_note" | "emi" | "bank" | "gst">("upload");
+  const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
+  const setTab = (t: typeof tab) => { setTabRaw(t); };
   const [cc, setCc] = useState<CaseRow | null>(null);
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [extracted, setExtracted] = useState<ExtractedRow[]>([]);
@@ -76,7 +94,6 @@ export default function CaseView() {
   const [emiPayments, setEmiPayments]       = useState<Tables<"emi_payments">[]>([]);
   const [bankData, setBankData]             = useState<Tables<"bank_statement_data">[]>([]);
   const [gstData, setGstData]               = useState<Tables<"gst_return_data">[]>([]);
-  const [tab, setTab] = useState<"upload" | "review" | "ratios" | "projections" | "ic_note" | "emi" | "bank" | "gst">("upload");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
@@ -539,8 +556,23 @@ export default function CaseView() {
     swot?: { strengths: string[]; weaknesses: string[]; opportunities: string[]; threats: string[] };
   };
 
+  const topBar = (
+    <div className="flex items-center justify-between w-full">
+      <div className="flex items-center gap-2 text-[10px] text-muted-foreground tracking-widest min-w-0">
+        <span className="text-primary font-bold">{cc.case_code}</span>
+        <span>·</span>
+        <span className="truncate">{cc.client_name}</span>
+      </div>
+      <div className="flex items-center gap-3 shrink-0">
+        <CollabAvatarStack />
+        <ShareDialog caseCode={cc.case_code} clientName={cc.client_name} />
+      </div>
+    </div>
+  );
+
   return (
-    <TerminalLayout>
+    <TerminalLayout topBar={topBar}>
+      <LiveCursors />
       {/* Header strip */}
       {editingHeader ? (
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 mb-3">
@@ -731,8 +763,8 @@ export default function CaseView() {
             <button
               key={k}
               onClick={() => setTab(k)}
-              className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-border whitespace-nowrap ${tab === k ? "bg-primary text-primary-foreground" : "text-primary/70 hover:bg-surface"}`}
-            >{l}</button>
+              className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-border whitespace-nowrap flex items-center gap-1 ${tab === k ? "bg-primary text-primary-foreground" : "text-primary/70 hover:bg-surface"}`}
+            >{l}<TabPresenceDots tabKey={k} /></button>
           ))}
         </div>
       </div>
@@ -899,7 +931,7 @@ export default function CaseView() {
                                         autoFocus
                                         type="number"
                                         defaultValue={val ?? ""}
-                                        onBlur={e => { setEditingCell(null); updateCellValue(type, fy, label, e.target.value); }}
+                                        onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
                                         onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
                                         className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
                                       />
@@ -907,7 +939,7 @@ export default function CaseView() {
                                       <span
                                         className={`cursor-pointer hover:text-primary ${confCls}`}
                                         title={`Confidence: ${conf} — click to edit`}
-                                        onClick={() => setEditingCell({ stmtType: type, fy, label, field: "value" })}
+                                        onClick={() => { setEditingCell({ stmtType: type, fy, label, field: "value" }); setEditing(`${type}.${fy}.${label}`); }}
                                       >
                                         {val != null ? val.toLocaleString("en-IN") : <span className="text-muted-foreground">—</span>}
                                         {abbr && val != null && <span className="text-[9px] text-muted-foreground ml-0.5">{abbr}</span>}
@@ -945,6 +977,10 @@ export default function CaseView() {
                       </tbody>
                     </table>
                   </div>
+                  <button
+                    onClick={() => addRowToType(type)}
+                    className="mt-2 text-[10px] border border-dashed border-border/60 text-muted-foreground hover:border-primary hover:text-primary px-3 py-1 w-full tracking-widest"
+                  >+ ADD ROW</button>
 
                   {/* ── Balance sheet tally check ────────────────────────── */}
                   {type === "balance_sheet" && (
@@ -1047,10 +1083,6 @@ export default function CaseView() {
                     );
                   })()}
                   <StatementInsights type={type} typeRows={typeRows} years={years} unit={unit} />
-                  <button
-                    onClick={() => addRowToType(type)}
-                    className="mt-2 text-[10px] border border-dashed border-border/60 text-muted-foreground hover:border-primary hover:text-primary px-3 py-1 w-full tracking-widest"
-                  >+ ADD ROW</button>
                 </Panel>
               );
             });
