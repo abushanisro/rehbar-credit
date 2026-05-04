@@ -10,9 +10,18 @@ export function CollabAvatarStack() {
   const others = useOthers();
   const self   = useSelf();
 
+  const selfEmail = self?.presence?.email ?? "";
+  const seenEmails = new Set(selfEmail ? [selfEmail] : []);
   const all = [
     ...(self ? [{ id: "self", name: self.presence?.name ?? "You", color: self.presence?.color ?? "#E8721C", isSelf: true }] : []),
-    ...others.map(o => ({ id: o.connectionId, name: o.presence?.name ?? "Analyst", color: o.presence?.color ?? "#F5A428", isSelf: false })),
+    ...others
+      .filter(o => {
+        const email = o.presence?.email ?? "";
+        if (!email || seenEmails.has(email)) return false;
+        seenEmails.add(email);
+        return true;
+      })
+      .map(o => ({ id: o.connectionId, name: o.presence?.name ?? "Analyst", color: o.presence?.color ?? "#F5A428", isSelf: false })),
   ];
 
   if (all.length === 0) return null;
@@ -78,9 +87,18 @@ export function TabPresenceDots({ tabKey }: { tabKey: string }) {
 export function LiveCursors() {
   const others = useOthers();
 
+  // Deduplicate by email — only show one cursor per unique user
+  const seenEmails = new Set<string>();
+  const unique = others.filter(o => {
+    const email = o.presence?.email ?? "";
+    if (!email || seenEmails.has(email)) return false;
+    seenEmails.add(email);
+    return true;
+  });
+
   return (
     <>
-      {others.map(o => {
+      {unique.map(o => {
         const cursor = o.presence?.cursor;
         const name   = o.presence?.name ?? "Analyst";
         const color  = o.presence?.color ?? "#E8721C";

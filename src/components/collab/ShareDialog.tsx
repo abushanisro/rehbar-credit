@@ -67,24 +67,33 @@ export function ShareDialog({ caseCode, clientName }: Props) {
     }
   };
 
-  const allUsers = [
-    ...(self ? [{
-      id: "self",
-      name: self.presence?.name ?? "You",
-      email: self.presence?.email ?? "",
-      color: self.presence?.color ?? "#E8721C",
-      tab: self.presence?.activeTab ?? "",
-      isSelf: true,
-    }] : []),
-    ...others.map(o => ({
+  // Deduplicate by email — same user with multiple tabs shows only once
+  const selfEntry = self ? {
+    id: "self",
+    name: self.presence?.name ?? "You",
+    email: self.presence?.email ?? "",
+    color: self.presence?.color ?? "#E8721C",
+    tab: self.presence?.activeTab ?? "",
+    isSelf: true,
+  } : null;
+
+  const seenEmails = new Set(selfEntry?.email ? [selfEntry.email] : []);
+  const otherUsers = others
+    .map(o => ({
       id: String(o.connectionId),
       name: o.presence?.name ?? "Analyst",
       email: o.presence?.email ?? "",
       color: o.presence?.color ?? "#F5A428",
       tab: o.presence?.activeTab ?? "",
       isSelf: false,
-    })),
-  ];
+    }))
+    .filter(u => {
+      if (!u.email || seenEmails.has(u.email)) return false;
+      seenEmails.add(u.email);
+      return true;
+    });
+
+  const allUsers = [...(selfEntry ? [selfEntry] : []), ...otherUsers];
 
   return (
     <div ref={dialogRef} className="relative">
