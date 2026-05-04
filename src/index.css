@@ -110,11 +110,7 @@
 }
 
 /* Hide Liveblocks "Powered by" badge */
-[data-liveblocks-portal] ~ div[style*="position: fixed"],
-.lb-root .lb-portal,
-a[href*="liveblocks.io"],
-a[href*="liveblocks.io"] *,
-div[class*="lb-"] svg rect[fill="white"][width="109"] { display: none !important; }
+#liveblocks-badge { display: none !important; }
 
 @layer components {
   .terminal-panel {
