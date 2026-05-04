@@ -1,5 +1,5 @@
-import { useState, useRef, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { TerminalLayout } from "@/components/terminal/TerminalLayout";
@@ -82,14 +82,29 @@ const SCANNABLE_FIELDS: { key: keyof ScanResult; label: string }[] = [
   { key: "website",            label: "Website" },
 ];
 
+interface CompanySuggestion {
+  id: string; name: string; legal_constitution: string | null;
+  industry: string | null; year_established: number | null;
+  gstin: string | null; website: string | null; promoter_details: string | null;
+}
+
 export default function NewCase() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [submitting, setSubmitting] = useState(false);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(
+    searchParams.get("company_id")
+  );
+  const [companySuggestions, setCompanySuggestions] = useState<CompanySuggestion[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const companySearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suggBoxRef = useRef<HTMLDivElement>(null);
+
   const [form, setForm] = useState<FormState>({
-    client_name: "",
+    client_name: searchParams.get("company_name") ?? "",
     product_type: "operating_lease",
     product_type_custom: "",
     industry: "",
@@ -116,6 +131,52 @@ export default function NewCase() {
   const xhrRef = useRef<XMLHttpRequest | null>(null);
 
   const product = PRODUCTS[form.product_type];
+
+  // ── Company search ────────────────────────────────────────────────────────
+  const searchCompanies = useCallback(async (q: string) => {
+    if (q.length < 2) { setCompanySuggestions([]); setShowSuggestions(false); return; }
+    const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+    const { data } = await db.from("companies")
+      .select("id,name,legal_constitution,industry,year_established,gstin,website,promoter_details")
+      .ilike("name", `%${q}%`)
+      .limit(6);
+    setCompanySuggestions((data ?? []) as CompanySuggestion[]);
+    setShowSuggestions(true);
+  }, []);
+
+  const onClientNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setForm(f => ({ ...f, client_name: val }));
+    setSelectedCompanyId(null);
+    if (companySearchRef.current) clearTimeout(companySearchRef.current);
+    companySearchRef.current = setTimeout(() => searchCompanies(val), 280);
+  };
+
+  const pickCompany = (co: CompanySuggestion) => {
+    setSelectedCompanyId(co.id);
+    setForm(f => ({
+      ...f,
+      client_name: co.name,
+      legal_constitution: co.legal_constitution ?? f.legal_constitution,
+      industry: co.industry && INDUSTRIES.includes(co.industry as typeof INDUSTRIES[number])
+        ? co.industry : f.industry,
+      year_established: co.year_established ? String(co.year_established) : f.year_established,
+      website: co.website ?? f.website,
+      promoter_details: co.promoter_details ?? f.promoter_details,
+    }));
+    setCompanySuggestions([]);
+    setShowSuggestions(false);
+    toast.success(`Linked to ${co.name} — form pre-filled`);
+  };
+
+  useEffect(() => {
+    const h = (e: MouseEvent) => {
+      if (suggBoxRef.current && !suggBoxRef.current.contains(e.target as Node))
+        setShowSuggestions(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
 
   // ── form helpers ──────────────────────────────────────────────────────────
   const set = (k: keyof FormState) =>
@@ -267,6 +328,7 @@ export default function NewCase() {
       user_id: user.id,
       case_code: code,
       client_name: form.client_name,
+      company_id: selectedCompanyId ?? undefined,
       product_type: form.product_type,
       product_type_custom: form.product_type === "other" ? form.product_type_custom || null : null,
       industry: resolvedIndustry || null,
@@ -322,9 +384,39 @@ export default function NewCase() {
                 )}
               </div>
 
-              <div>
+              <div ref={suggBoxRef} className="relative">
                 <label className={labelCls}>Client Name *</label>
-                <input required className={inputCls} value={form.client_name} onChange={set("client_name")} />
+                <div className="relative">
+                  <input
+                    required
+                    className={inputCls}
+                    value={form.client_name}
+                    onChange={onClientNameChange}
+                    onFocus={() => form.client_name.length >= 2 && setShowSuggestions(companySuggestions.length > 0)}
+                    placeholder="Type to search existing companies…"
+                    autoComplete="off"
+                  />
+                  {selectedCompanyId && (
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-success font-bold tracking-widest">● LINKED</span>
+                  )}
+                </div>
+                {showSuggestions && companySuggestions.length > 0 && (
+                  <div className="absolute z-50 left-0 right-0 top-full border border-border bg-card shadow-xl mt-px max-h-52 overflow-y-auto">
+                    {companySuggestions.map(co => (
+                      <button
+                        key={co.id}
+                        type="button"
+                        onClick={() => pickCompany(co)}
+                        className="w-full text-left px-3 py-2 hover:bg-surface-2 border-b border-border/40 transition-colors"
+                      >
+                        <div className="text-xs font-bold text-primary">{co.name}</div>
+                        <div className="text-[9px] text-muted-foreground mt-0.5">
+                          {[co.legal_constitution, co.industry, co.gstin].filter(Boolean).join(" · ")}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div>

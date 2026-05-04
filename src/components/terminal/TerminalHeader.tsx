@@ -287,7 +287,7 @@ export const TerminalHeader = () => {
   }, []);
 
   const navItem = (to: string, label: string, code: string) => {
-    const active = loc.pathname === to || (to !== "/" && loc.pathname.startsWith(to));
+    const active = loc.pathname === to || (to.length > 1 && loc.pathname.startsWith(to));
     return (
       <Link to={to} className={cn(
         "px-3 py-1 text-xs tracking-widest border-r border-border transition-colors",
@@ -322,6 +322,7 @@ export const TerminalHeader = () => {
       <nav className="border-b border-border bg-card flex items-center h-9">
         {navItem("/", "PIPELINE", "F1")}
         {navItem("/new", "NEW CASE", "F2")}
+        {navItem("/companies", "MASTER DATA", "F3")}
         <div className="flex-1" />
         <div className="px-3 text-[11px] text-muted-foreground tracking-widest hidden md:block">
           REHBAR FINANCIAL SERVICES · IC APPRAISAL <span className="text-primary">_</span>

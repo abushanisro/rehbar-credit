@@ -10,6 +10,8 @@ import Auth from "./pages/Auth";
 import Pipeline from "./pages/Pipeline";
 import NewCase from "./pages/NewCase";
 import CaseView from "./pages/CaseView";
+import Companies from "./pages/Companies";
+import CompanyView from "./pages/CompanyView";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -29,6 +31,8 @@ const App = () => (
               <Route path="/" element={<ProtectedRoute><ErrorBoundary><Pipeline /></ErrorBoundary></ProtectedRoute>} />
               <Route path="/new" element={<ProtectedRoute><ErrorBoundary><NewCase /></ErrorBoundary></ProtectedRoute>} />
               <Route path="/case/:id" element={<ProtectedRoute><ErrorBoundary><CaseView /></ErrorBoundary></ProtectedRoute>} />
+              <Route path="/companies" element={<ProtectedRoute><ErrorBoundary><Companies /></ErrorBoundary></ProtectedRoute>} />
+              <Route path="/companies/:id" element={<ProtectedRoute><ErrorBoundary><CompanyView /></ErrorBoundary></ProtectedRoute>} />
               <Route path="/history" element={<Navigate to="/" replace />} />
               <Route path="*" element={<NotFound />} />
             </Routes>

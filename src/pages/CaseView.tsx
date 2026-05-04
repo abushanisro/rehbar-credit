@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { RoomProvider } from "@/liveblocks.config";
 import { CollabAvatarStack, TabPresenceDots, LiveCursors } from "@/components/collab/CollabPresence";
 import { useMyPresence } from "@/components/collab/useMyPresence";
@@ -84,6 +84,7 @@ export default function CaseView() {
 function CaseViewInner() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [tab, setTabRaw] = useState<"upload" | "review" | "ratios" | "projections" | "ic_note" | "emi" | "bank" | "gst">("upload");
   const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
   const setTab = (t: typeof tab) => { setTabRaw(t); };
@@ -694,6 +695,28 @@ function CaseViewInner() {
             >
               <div className="text-2xl text-primary glow font-bold">{cc.client_name}</div>
               <div className="terminal-label mt-1">{product.label} · {cc.industry || "—"}</div>
+              {(cc as unknown as { company_id?: string }).company_id ? (
+                <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => navigate(`/companies/${(cc as unknown as { company_id: string }).company_id}`)}
+                    className="inline-flex items-center gap-1 text-[9px] tracking-widest border border-success/40 text-success bg-success/10 px-1.5 py-0.5 hover:bg-success/20 transition-colors"
+                  >
+                    ● MASTER DATA LINKED
+                  </button>
+                  <button
+                    onClick={async () => {
+                      await supabase.from("credit_cases").update({ company_id: null } as never).eq("id", cc.id);
+                      await reload();
+                      toast.success("Company unlinked");
+                    }}
+                    className="text-[9px] tracking-widest text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    [UNLINK]
+                  </button>
+                </div>
+              ) : (
+                <div className="mt-1.5 text-[9px] tracking-widest text-muted-foreground/40">— NOT LINKED TO MASTER DATA</div>
+              )}
             </Panel>
             <Panel title="STATUS" className="xl:col-span-3">
               <div className={`inline-block px-3 py-1 text-xs font-bold tracking-widest bg-${statusMeta.color} text-${statusMeta.color}-foreground`}>
