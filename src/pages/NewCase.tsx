@@ -297,12 +297,12 @@ export default function NewCase() {
 
   return (
     <TerminalLayout>
-      <div className="grid grid-cols-12 gap-3">
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
 
         {/* ── LEFT: case form ─────────────────────────────────────────────── */}
-        <Panel title="NEW CREDIT CASE — CLIENT & DEAL INFO" ticker="REHBAR/NEW" className="col-span-8">
+        <Panel title="NEW CREDIT CASE — CLIENT & DEAL INFO" ticker="REHBAR/NEW" className="xl:col-span-8">
           <form onSubmit={submit} className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
 
               <div>
                 <label className={labelCls}>Product Type *</label>
@@ -426,7 +426,7 @@ export default function NewCase() {
         </Panel>
 
         {/* ── RIGHT: product rules + AI scan ──────────────────────────────── */}
-        <div className="col-span-4 flex flex-col gap-3">
+        <div className="xl:col-span-4 flex flex-col gap-3">
 
           {/* Product Rules */}
           <Panel title="PRODUCT RULES" ticker={product.short} status="warn">

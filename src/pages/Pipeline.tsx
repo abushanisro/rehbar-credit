@@ -95,24 +95,24 @@ export default function Pipeline() {
 
   return (
     <TerminalLayout>
-      <div className="grid grid-cols-12 gap-3 mb-3">
-        <Panel title="ACTIVE CASES" className="col-span-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+        <Panel title="ACTIVE CASES">
           <div className="text-3xl text-primary glow font-bold">{cases.length}</div>
           <div className="terminal-label mt-1">Total in pipeline</div>
         </Panel>
-        <Panel title="IN IC REVIEW" className="col-span-3" status="warn">
+        <Panel title="IN IC REVIEW" status="warn">
           <div className="text-3xl text-warning glow font-bold">
             {cases.filter(c => c.status === "ic_review").length}
           </div>
           <div className="terminal-label mt-1">Awaiting committee decision</div>
         </Panel>
-        <Panel title="APPROVED" className="col-span-3">
+        <Panel title="APPROVED">
           <div className="text-3xl text-success glow font-bold">
             {cases.filter(c => c.status === "approved").length}
           </div>
           <div className="terminal-label mt-1">Closed deals</div>
         </Panel>
-        <Panel title="QUICK ACTION" className="col-span-3">
+        <Panel title="QUICK ACTION" className="col-span-2 lg:col-span-1">
           <Link
             to="/new"
             className="block w-full text-center bg-primary text-primary-foreground px-3 py-2 text-xs tracking-widest font-bold hover:opacity-90"
@@ -134,7 +134,8 @@ export default function Pipeline() {
             NO CASES YET — PRESS [F2] TO CREATE YOUR FIRST APPRAISAL
           </div>
         ) : (
-          <div className="grid grid-cols-7 gap-2">
+          <div className="overflow-x-auto -mx-3 px-3">
+          <div className="grid grid-cols-7 gap-2 min-w-[700px]">
             {COLUMNS.map(col => {
               const meta = CASE_STATUS_META[col];
               const colCases = cases.filter(c =>
@@ -201,6 +202,7 @@ export default function Pipeline() {
                 </div>
               );
             })}
+          </div>
           </div>
         )}
       </Panel>

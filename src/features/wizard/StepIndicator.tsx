@@ -20,7 +20,7 @@ export const StepIndicator = ({ step }: { step: 1 | 2 | 3 }) => (
           )}>
             {done ? "✓" : n}
           </span>
-          <span className="font-bold">{label}</span>
+          <span className="font-bold hidden sm:inline">{label}</span>
         </div>
       );
     })}

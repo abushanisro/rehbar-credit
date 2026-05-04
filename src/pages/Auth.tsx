@@ -122,8 +122,13 @@ function VerificationSent({ email, onResend, onBack }: { email: string; onResend
       setResendCount(n => n + 1);
       setCooldown(60);
       toast.success("Verification email resent");
-    } catch {
-      toast.error("Failed to resend — try again shortly");
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      if (msg.toLowerCase().includes("rate") || msg.toLowerCase().includes("429")) {
+        toast.error("Email rate limit hit — wait 1 hour before resending, or configure custom SMTP in Supabase dashboard.");
+      } else {
+        toast.error("Failed to resend — try again shortly");
+      }
     } finally { setResending(false); }
   };
 
@@ -238,7 +243,12 @@ const Auth = () => {
         if (error) throw error;
       }
     } catch (err) {
-      toast.error((err as Error).message ?? "Authentication failed");
+      const msg = (err as Error).message ?? "";
+      if (msg.toLowerCase().includes("rate") || msg.toLowerCase().includes("429")) {
+        toast.error("Too many requests — Supabase email limit reached. Wait an hour or use Sign In if already verified.");
+      } else {
+        toast.error(msg || "Authentication failed");
+      }
     } finally {
       setLoading(false);
     }

@@ -167,8 +167,8 @@ function NotificationBell({ userId }: { userId: string }) {
 
       {/* ── dropdown ────────────────────────────────────────────────────── */}
       {open && (
-        <div className="absolute right-0 top-10 w-84 bg-surface border border-border shadow-2xl z-50 flex flex-col"
-          style={{ width: 340, maxHeight: "80vh" }}>
+        <div className="absolute right-0 top-10 bg-surface border border-border shadow-2xl z-50 flex flex-col"
+          style={{ width: "min(340px, calc(100vw - 1rem))", maxHeight: "80vh" }}>
 
           {/* header */}
           <div className="border-b border-border bg-card px-3 py-2 space-y-1.5">
@@ -301,16 +301,17 @@ export const TerminalHeader = () => {
   return (
     <>
       <div className="border-b border-border bg-surface text-[11px] flex items-center justify-between px-3 h-9">
-        <div className="flex items-center gap-4">
-          <img src="/Rehbar_logo.png" alt="Rehbar" className="h-6 w-auto object-contain" />
-          <span className="text-primary font-bold tracking-widest glow">REHBAR//CAS · CREDIT TERMINAL</span>
-          <span className="text-muted-foreground">v1.0.0</span>
-          <span className="text-success ticker-blink">● LIVE</span>
-          <span className="text-muted-foreground">AI ENGINE</span>
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+          <img src="/Rehbar_logo.png" alt="Rehbar" className="h-6 w-auto object-contain shrink-0" />
+          <span className="text-primary font-bold tracking-widest glow hidden xs:block truncate">REHBAR//CAS</span>
+          <span className="text-primary font-bold tracking-widest glow hidden lg:block">· CREDIT TERMINAL</span>
+          <span className="text-muted-foreground hidden sm:block">v1.0.0</span>
+          <span className="text-success ticker-blink hidden sm:block">● LIVE</span>
+          <span className="text-muted-foreground hidden md:block">AI ENGINE</span>
         </div>
-        <div className="flex items-center gap-3 text-muted-foreground">
+        <div className="flex items-center gap-2 sm:gap-3 text-muted-foreground shrink-0">
           <span className="hidden md:block">{user?.email}</span>
-          <span className="text-primary">{fmtClock(now)}</span>
+          <span className="text-primary hidden sm:block">{fmtClock(now)}</span>
           {user && <NotificationBell userId={user.id} />}
           <button
             onClick={async () => { await signOut(); navigate("/auth"); }}
@@ -322,13 +323,13 @@ export const TerminalHeader = () => {
         {navItem("/", "PIPELINE", "F1")}
         {navItem("/new", "NEW CASE", "F2")}
         <div className="flex-1" />
-        <div className="px-3 text-[11px] text-muted-foreground tracking-widest">
+        <div className="px-3 text-[11px] text-muted-foreground tracking-widest hidden md:block">
           REHBAR FINANCIAL SERVICES · IC APPRAISAL <span className="text-primary">_</span>
           <span className="ticker-blink text-primary">█</span>
         </div>
       </nav>
       <div className="border-b border-border bg-surface-2 h-6 overflow-hidden flex items-center px-3 text-[10px] tracking-widest">
-        <span className="text-warning">⚠ AI-GENERATED DRAFTS REQUIRE ANALYST REVIEW · NO AUTO CREDIT VERDICTS · DSCR FORMULA IS FINANCE-LOCKED</span>
+        <span className="text-warning truncate">⚠ AI-GENERATED DRAFTS REQUIRE ANALYST REVIEW · NO AUTO CREDIT VERDICTS · DSCR FORMULA IS FINANCE-LOCKED</span>
       </div>
     </>
   );

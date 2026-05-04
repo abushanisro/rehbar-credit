@@ -511,12 +511,12 @@ export default function CaseView() {
     <TerminalLayout>
       {/* Header strip */}
       {editingHeader ? (
-        <div className="grid grid-cols-12 gap-3 mb-3">
-          <Panel title="EDIT CASE — CLIENT & DEAL INFO" ticker={cc.case_code} className="col-span-8"
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 mb-3">
+          <Panel title="EDIT CASE — CLIENT & DEAL INFO" ticker={cc.case_code} className="xl:col-span-8"
             actions={<button type="button" onClick={() => setEditingHeader(false)} className="text-[10px] border border-border text-foreground/60 px-3 py-1 hover:text-foreground">[CANCEL]</button>}
           >
             <form onSubmit={saveHeader} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className={labelCls}>Product Type *</label>
                   <select className={inputCls} value={hd.product_type} onChange={sHd("product_type")}>
@@ -598,7 +598,7 @@ export default function CaseView() {
               </button>
             </form>
           </Panel>
-          <div className="col-span-4">
+          <div className="xl:col-span-4">
             <Panel title="PRODUCT RULES" ticker={PRODUCTS[hd.product_type as ProductType]?.short ?? "—"} status="warn">
               <div className="space-y-3 text-xs">
                 <div>
@@ -624,20 +624,20 @@ export default function CaseView() {
       ) : (
         /* ── Header (always visible) + optional detail panel below ─────────── */
         <div className="space-y-3 mb-3">
-          <div className="grid grid-cols-12 gap-3">
-            <Panel title="CASE" ticker={cc.case_code} className="col-span-4"
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3">
+            <Panel title="CASE" ticker={cc.case_code} className="sm:col-span-2 xl:col-span-4"
               actions={<button onClick={openHeaderEdit} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[EDIT]</button>}
             >
               <div className="text-2xl text-primary glow font-bold">{cc.client_name}</div>
               <div className="terminal-label mt-1">{product.label} · {cc.industry || "—"}</div>
             </Panel>
-            <Panel title="STATUS" className="col-span-3">
+            <Panel title="STATUS" className="xl:col-span-3">
               <div className={`inline-block px-3 py-1 text-xs font-bold tracking-widest bg-${statusMeta.color} text-${statusMeta.color}-foreground`}>
                 {statusMeta.label}
               </div>
               <div className="terminal-label mt-2">Stage {statusMeta.pipeline} of 7</div>
             </Panel>
-            <Panel title="DEAL TERMS" className="col-span-5"
+            <Panel title="DEAL TERMS" className="xl:col-span-5"
               actions={<button onClick={openHeaderEdit} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[EDIT]</button>}
             >
               <div className="grid grid-cols-3 gap-3 text-sm">
@@ -649,7 +649,7 @@ export default function CaseView() {
           </div>
 
           <Panel title="COMPANY DETAILS" ticker={cc.case_code}>
-            <div className="grid grid-cols-4 gap-x-6 gap-y-3 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-xs">
               {([
                 ["Legal Constitution",  cc.legal_constitution],
                 ["Industry / Sector",   cc.industry],
@@ -664,7 +664,7 @@ export default function CaseView() {
               ) : null)}
             </div>
             {(cc.end_use || cc.collateral_summary || cc.strategic_rationale || cc.promoter_details || cc.analyst_notes) && (
-              <div className="border-t border-border/40 mt-3 pt-3 grid grid-cols-2 gap-x-6 gap-y-3 text-xs">
+              <div className="border-t border-border/40 mt-3 pt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-xs">
                 {([
                   ["End Use of Funds",    cc.end_use],
                   ["Collateral Summary",  cc.collateral_summary],
@@ -684,23 +684,25 @@ export default function CaseView() {
       )}
 
       {/* Tabs */}
-      <div className="flex border border-border bg-card mb-3">
-        {([
-          ["upload",      "1 · UPLOAD"],
-          ["review",      "2 · REVIEW EXTRACTION"],
-          ["ratios",      "3 · RATIO MATRIX"],
-          ["projections", "4 · PROJECTIONS"],
-          ["ic_note",     "5 · IC NOTE"],
-          ["emi",         "6 · EMI TRACKER"],
-          ["bank",        "7 · BANK STMT"],
-          ["gst",         "8 · GST RETURNS"],
-        ] as const).map(([k, l]) => (
-          <button
-            key={k}
-            onClick={() => setTab(k)}
-            className={`px-4 py-2 text-xs tracking-widest border-r border-border ${tab === k ? "bg-primary text-primary-foreground" : "text-primary/70 hover:bg-surface"}`}
-          >{l}</button>
-        ))}
+      <div className="overflow-x-auto -mx-3 px-3 mb-3">
+        <div className="flex border border-border bg-card min-w-max">
+          {([
+            ["upload",      "1 · UPLOAD"],
+            ["review",      "2 · REVIEW"],
+            ["ratios",      "3 · RATIOS"],
+            ["projections", "4 · PROJ"],
+            ["ic_note",     "5 · IC NOTE"],
+            ["emi",         "6 · EMI"],
+            ["bank",        "7 · BANK"],
+            ["gst",         "8 · GST"],
+          ] as const).map(([k, l]) => (
+            <button
+              key={k}
+              onClick={() => setTab(k)}
+              className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-border whitespace-nowrap ${tab === k ? "bg-primary text-primary-foreground" : "text-primary/70 hover:bg-surface"}`}
+            >{l}</button>
+          ))}
+        </div>
       </div>
 
       {tab === "upload" && (
@@ -1069,7 +1071,8 @@ export default function CaseView() {
                 <div className="text-[9px] text-warning/80 mb-2 tracking-wider">
                   ▸ Not in uploaded documents — auto-calculated from extracted data. Review before use.
                 </div>
-                <table className="w-full text-xs">
+                <div className="overflow-x-auto">
+                <table className="w-full text-xs min-w-[360px]">
                   <thead className="text-muted-foreground border-b border-border">
                     <tr><th className="text-left py-0.5">LINE ITEM</th><th className="text-right">FY</th><th className="text-right">CALCULATED VALUE</th></tr>
                   </thead>
@@ -1083,6 +1086,7 @@ export default function CaseView() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </Panel>
             );
           })()}
@@ -1112,7 +1116,8 @@ export default function CaseView() {
             <>
               {ratioGroups.map((cat) => (
                 <Panel key={cat} title={cat.toUpperCase()} ticker="RATIOS">
-                  <table className="w-full text-xs">
+                  <div className="overflow-x-auto">
+                  <table className="w-full text-xs min-w-[400px]">
                     <thead className="text-muted-foreground border-b border-border">
                       <tr>
                         <th className="text-left py-1">RATIO</th>
@@ -1151,6 +1156,7 @@ export default function CaseView() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </Panel>
               ))}
               <button onClick={() => setTab("projections")} className="bg-surface border border-border text-primary px-4 py-2 text-xs tracking-widest font-bold hover:bg-primary/10">
@@ -1292,12 +1298,13 @@ export default function CaseView() {
                 );
               })}
               <Panel title="RISK REGISTER" ticker="X.MIT">
-                <table className="w-full text-xs">
+                <div className="overflow-x-auto">
+                <table className="w-full text-xs min-w-[360px]">
                   <thead className="text-muted-foreground border-b border-border">
                     <tr><th className="text-left py-1">CATEGORY</th><th className="text-left">RISK</th><th className="text-left">MITIGANT</th><th>SEV</th></tr>
                   </thead>
                   <tbody>
-                    {ic.risks?.map((r, i) => (
+                    {ic.risks?.map((r: { category: string; risk: string; mitigant: string; severity: string }, i: number) => (
                       <tr key={i} className="border-b border-border/30">
                         <td className="py-1 text-accent uppercase">{r.category}</td>
                         <td className="text-foreground/90">{r.risk}</td>
@@ -1309,6 +1316,7 @@ export default function CaseView() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </Panel>
               <Panel title="CONDITIONS PRECEDENT" ticker="CP">
                 <ul className="text-xs space-y-1">
@@ -2971,7 +2979,8 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
         ▸ PROJECTIONS do not require a fiscal year.
         ▸ Excel parsed locally then sent as text — JPG/PNG/PDF sent directly to vision model.
       </div>
-      <table className="w-full text-xs border-t border-border">
+      <div className="overflow-x-auto">
+      <table className="w-full text-xs border-t border-border min-w-[480px]">
         <thead className="text-muted-foreground">
           <tr><th className="text-left py-1">FILE</th><th>TYPE</th><th>CLASS</th><th>FY</th><th>STATUS</th><th></th></tr>
         </thead>
@@ -3033,6 +3042,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -3211,7 +3221,7 @@ function ProjectionsTab({
     <div className="space-y-3">
 
       {/* ── KPI Cards ─────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Panel title="REVENUE CAGR" ticker={nYears > 0 ? `${nYears}Y PROJ` : "1Y"}>
           <div className={`text-2xl font-bold glow ${revCAGR !== null && revCAGR > 0 ? "text-success" : "text-destructive"}`}>
             {revCAGR !== null ? (revCAGR > 0 ? "+" : "") + revCAGR.toFixed(1) + "%" : "—"}
