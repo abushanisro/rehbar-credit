@@ -3,7 +3,6 @@ import { useParams } from "react-router-dom";
 import { RoomProvider } from "@/liveblocks.config";
 import { CollabAvatarStack, TabPresenceDots, LiveCursors } from "@/components/collab/CollabPresence";
 import { useMyPresence } from "@/components/collab/useMyPresence";
-import { getModelPreference } from "@/hooks/useModelPreference";
 import { ShareDialog } from "@/components/collab/ShareDialog";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/features/auth/AuthProvider";
@@ -101,6 +100,7 @@ function CaseViewInner() {
   const [extractError, setExtractError] = useState<{ title: string; detail?: string; action?: string } | null>(null);
   const [editingCell, setEditingCell] = useState<{ stmtType: string; fy: number; label: string; field: "label" | "value" } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [editingHeader, setEditingHeader] = useState(false);
   const [addStmtForm, setAddStmtForm] = useState<{ type: StatementType; fy: string; unit: string } | null>(null);
   const [addingYearFor, setAddingYearFor] = useState<{ stmtType: string; fy: string } | null>(null);
@@ -134,16 +134,26 @@ function CaseViewInner() {
 
   useEffect(() => { reload(); }, [reload]);
 
+  // Realtime: debounce so batch upserts (many rows at once) coalesce into one reload
+  // rather than firing one fetch per row and exhausting the browser connection pool.
+  const scheduleReload = useCallback(() => {
+    if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current);
+    reloadTimerRef.current = setTimeout(reload, 400);
+  }, [reload]);
+
   useEffect(() => {
     if (!id) return;
     const ch = supabase
       .channel(`case-${id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "credit_cases", filter: `id=eq.${id}` }, reload)
-      .on("postgres_changes", { event: "*", schema: "public", table: "extracted_financials", filter: `case_id=eq.${id}` }, reload)
-      .on("postgres_changes", { event: "*", schema: "public", table: "financial_ratios", filter: `case_id=eq.${id}` }, reload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "credit_cases", filter: `id=eq.${id}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "extracted_financials", filter: `case_id=eq.${id}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "financial_ratios", filter: `case_id=eq.${id}` }, scheduleReload)
       .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [id, reload]);
+    return () => {
+      if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current);
+      supabase.removeChannel(ch);
+    };
+  }, [id, scheduleReload]);
 
   if (!cc) return <TerminalLayout><div className="text-muted-foreground">LOADING CASE...</div></TerminalLayout>;
 
@@ -264,8 +274,8 @@ function CaseViewInner() {
       await supabase.from("credit_cases").update({ status: "extracting" }).eq("id", cc.id);
       setProgress(70);
 
-      // Stage 4: AI extraction — smart retry using Gemini's own retryDelay; bail immediately on daily quota
-      const extractBody = { case_id: cc.id, document_id: doc.id, statement_type, fiscal_year, excel_text: excelText, model_preference: getModelPreference() };
+      // Stage 4: AI extraction — retry on 429 with exponential backoff
+      const extractBody = { case_id: cc.id, document_id: doc.id, statement_type, fiscal_year, excel_text: excelText };
       const fnUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-financials`;
       const { data: { session } } = await supabase.auth.getSession();
       const fnHeaders = {
@@ -295,16 +305,12 @@ function CaseViewInner() {
           break;
         }
 
-        // Parse Gemini's structured quota error from the edge function's `detail` field
-        const { isDaily, retryAfterMs, retryDelaySec } = parseGeminiQuotaError(resBody?.detail as string | undefined);
-        if (isDaily) { fnErr = new Error("daily-quota"); break; }
         if (attempt === MAX_RETRIES) { fnErr = new Error("rate-limited"); break; }
 
-        // Countdown in the progress label so the user sees it live
-        const waitSec = Math.round(retryAfterMs / 1000);
+        const waitSec = 15 * (attempt + 1);
         for (let s = waitSec; s > 0; s--) {
           if (abort.signal.aborted) throw new Error("cancelled");
-          setProgressLabel(`Rate limited — retrying in ${s}s (attempt ${attempt + 1}/${MAX_RETRIES})  ·  suggested wait: ${retryDelaySec}s`);
+          setProgressLabel(`Rate limited — retrying in ${s}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
           await new Promise<void>((resolve, reject) => {
             const t = setTimeout(resolve, 1000);
             abort.signal.addEventListener("abort", () => { clearTimeout(t); reject(new Error("cancelled")); }, { once: true });
@@ -312,7 +318,6 @@ function CaseViewInner() {
         }
       }
       if (fnErr) {
-        if (fnErr.message === "daily-quota") throw new Error("daily-quota");
         if (fnErr.message === "rate-limited") throw new Error("rate-limited");
         if (fnErr.message === "no-data-extracted") throw new Error("no-data-extracted");
         throw fnErr;
@@ -331,22 +336,16 @@ function CaseViewInner() {
         if (uploadedPath) await supabase.storage.from("case-files").remove([uploadedPath]);
         await reload();
         setProgressLabel("Cancelled");
-      } else if (msg === "daily-quota") {
-        setExtractError({
-          title: "Gemini daily quota exhausted",
-          detail: "Free tier limit: 20 requests/day for gemini-2.5-flash. Quota resets at midnight UTC.",
-          action: "Upgrade your Gemini API key at ai.google.dev/gemini-api/docs/rate-limits",
-        });
       } else if (msg === "rate-limited") {
         setExtractError({
           title: "AI rate limited — all retries exhausted",
-          detail: "Gemini returned 429 on every attempt.",
+          detail: "Claude returned 429 on every attempt.",
           action: "Wait 1–2 minutes then try again.",
         });
       } else if (msg === "no-data-extracted") {
         setExtractError({
           title: "No financial data found in document",
-          detail: "Gemini scanned the file but could not identify any financial statements. This happens with scanned images with low resolution, password-protected PDFs, or documents that don't contain tabular financial data.",
+          detail: "Claude scanned the file but could not identify any financial statements. This happens with scanned images with low resolution, password-protected PDFs, or documents that don't contain tabular financial data.",
           action: "Try: (1) Use ALL-IN-ONE mode, (2) Check the file is readable, (3) For scanned PDFs try uploading as an image (PNG/JPG), (4) Add rows manually using + ADD STATEMENT BOX in the Review tab.",
         });
       } else {
@@ -516,7 +515,7 @@ function CaseViewInner() {
       setProgressLabel(LABELS[Math.min(Math.floor(p / 20), LABELS.length - 1)]);
     }, 600);
     try {
-      const { error } = await supabase.functions.invoke("generate-narrative", { body: { case_id: cc.id, model_preference: getModelPreference() } });
+      const { error } = await supabase.functions.invoke("generate-narrative", { body: { case_id: cc.id } });
       clearInterval(tick);
       if (error) throw error;
       setProgress(100);
@@ -2955,28 +2954,6 @@ function buildIcNoteHtml(
   return h;
 }
 
-// Parse Gemini's structured 429 response to get retry timing and quota type.
-function parseGeminiQuotaError(detail: string | undefined): { isDaily: boolean; retryAfterMs: number; retryDelaySec: number } {
-  const fallback = { isDaily: false, retryAfterMs: 15000, retryDelaySec: 15 };
-  if (!detail) return fallback;
-  try {
-    const parsed = JSON.parse(detail);
-    const errObj = (Array.isArray(parsed) ? parsed[0] : parsed)?.error;
-    if (!errObj) return fallback;
-    const details: Record<string, unknown>[] = Array.isArray(errObj.details) ? errObj.details : [];
-    const retryInfo = details.find(d => String(d["@type"]).includes("RetryInfo"));
-    const quotaFailure = details.find(d => String(d["@type"]).includes("QuotaFailure"));
-    const violations: Record<string, unknown>[] = Array.isArray((quotaFailure as Record<string, unknown>)?.violations)
-      ? (quotaFailure as Record<string, unknown[]>).violations as Record<string, unknown>[]
-      : [];
-    const isDaily = violations.some(v => String(v.quotaId).toLowerCase().includes("perday"));
-    const delayStr = String((retryInfo as Record<string, unknown>)?.retryDelay ?? "15s");
-    const retryDelaySec = Math.max(5, parseInt(delayStr) || 15);
-    return { isDaily, retryAfterMs: retryDelaySec * 1000 + 2000, retryDelaySec };
-  } catch {
-    return fallback;
-  }
-}
 
 // XHR-based upload to Supabase Storage so we get a real progress event stream.
 async function uploadWithProgress(bucket: string, path: string, file: File, onPct: (pct: number) => void, signal?: AbortSignal): Promise<void> {

@@ -40,7 +40,19 @@ export function ShareDialog({ caseCode, clientName }: Props) {
   }, [open]);
 
   const copyLink = async () => {
-    await navigator.clipboard.writeText(caseUrl);
+    try {
+      await navigator.clipboard.writeText(caseUrl);
+    } catch {
+      // Fallback for browsers without clipboard API (non-HTTPS, old browsers)
+      const el = document.createElement("textarea");
+      el.value = caseUrl;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

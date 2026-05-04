@@ -80,7 +80,7 @@ Deno.serve(async (req) => {
       status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
-    const { data: cc, error: ccErr } = await supabase.from("credit_cases").select("*").eq("id", case_id).eq("user_id", user.id).single();
+    const { data: cc, error: ccErr } = await supabase.from("credit_cases").select("*").eq("id", case_id).single();
     if (ccErr || !cc) return new Response(JSON.stringify({ error: "Case not found" }), {
       status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

@@ -1,7 +1,10 @@
-// Rehbar — GST Return Extraction
-// Extracts period-wise GST data from GSTR-1 / GSTR-3B / GSTR-9 documents via Gemini 2.5 Flash.
+/**
+ * Rehbar — GST Return Extraction
+ * Extracts period-wise GST data from GSTR-1/3B/9 documents via Claude Sonnet 4.6.
+ */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { createClient }           from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { callAI, type FileContent } from "../_shared/ai-caller.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -30,10 +33,10 @@ Deno.serve(async (req) => {
 
     await supabase.from("financial_documents").update({ extraction_status: "running" }).eq("id", document_id);
 
-    let userContent: unknown;
+    let files: FileContent[];
     if (doc.file_type === "excel") {
       const text = (body.excel_text ?? "").slice(0, 150_000);
-      userContent = [{ type: "text", text: `GST RETURN DOCUMENT (TSV):\n\n${text}` }];
+      files = [{ type: "text", text: `GST RETURN DOCUMENT (TSV):\n\n${text}` }];
     } else {
       const { data: file } = await supabase.storage.from("case-files").download(doc.file_path);
       if (!file) throw new Error("File download failed");
@@ -41,16 +44,16 @@ Deno.serve(async (req) => {
       let b64 = ""; const cs = 0x8000;
       for (let i = 0; i < bytes.length; i += cs) b64 += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + cs)));
       const mime = doc.file_type === "image" ? "image/png" : "application/pdf";
-      userContent = [{ type: "image_url", image_url: { url: `data:${mime};base64,${btoa(b64)}` } }];
+      files = mime === "application/pdf"
+        ? [{ type: "pdf", base64: btoa(b64) }]
+        : [{ type: "image", base64: btoa(b64), mime }];
     }
 
-    const geminiKey = Deno.env.get("GEMINI_API_KEY");
-    if (!geminiKey) throw new Error("GEMINI_API_KEY not configured");
-
-    const systemPrompt = `You are a GST expert extracting structured data from Indian GST return documents.
+    const args = await callAI({
+      systemPrompt: `You are a GST expert extracting structured data from Indian GST return documents.
 Extract period-wise data for EVERY month/quarter visible in the document.
 Rules:
-1. period format: "YYYY-MM" for monthly (e.g. "2024-01") or "Q1 FY2024" for quarterly.
+1. period format: "YYYY-MM" for monthly or "Q1 FY2024" for quarterly.
 2. return_type: detect from document — GSTR-1, GSTR-3B, or GSTR-9.
 3. Extract GSTIN if visible.
 4. taxable_turnover: total taxable supplies (excluding exempt/nil-rated).
@@ -60,88 +63,48 @@ Rules:
 8. itc_claimed: Input Tax Credit availed.
 9. net_tax_paid = output_tax - itc_claimed.
 10. filing_status: "filed", "not_filed", or "late".
-11. Do NOT invent data — omit absent fields.`;
-
-    const userMsg = {
-      role: "user",
-      content: [
-        { type: "text", text: "Extract GST return data for every period in this document." },
-        ...(Array.isArray(userContent) ? userContent : [userContent]),
-      ],
-    };
-
-    const toolSchema = {
-      type: "function",
-      function: {
-        name: "submit_gst_data",
-        description: "Submit extracted GST return data.",
-        parameters: {
-          type: "object",
-          properties: {
-            gstin: { type: "string" },
-            return_type: { type: "string" },
-            periods: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  period: { type: "string" },
-                  return_type: { type: "string" },
-                  taxable_turnover: { type: ["number", "null"] },
-                  exempt_turnover: { type: ["number", "null"] },
-                  total_turnover: { type: ["number", "null"] },
-                  output_tax: { type: ["number", "null"] },
-                  itc_claimed: { type: ["number", "null"] },
-                  net_tax_paid: { type: ["number", "null"] },
-                  filing_date: { type: ["string", "null"] },
-                  filing_status: { type: "string", enum: ["filed", "not_filed", "late"] },
-                },
-                required: ["period", "filing_status"],
-                additionalProperties: false,
-              },
+11. Do NOT invent data — omit absent fields.`,
+      userText: "Extract GST return data for every period in this document.",
+      files,
+      toolName: "submit_gst_data",
+      toolDescription: "Submit extracted GST return data.",
+      toolSchema: {
+        gstin: { type: "string" },
+        return_type: { type: "string" },
+        periods: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              period: { type: "string" },
+              return_type: { type: "string" },
+              taxable_turnover: { type: ["number", "null"] },
+              exempt_turnover: { type: ["number", "null"] },
+              total_turnover: { type: ["number", "null"] },
+              output_tax: { type: ["number", "null"] },
+              itc_claimed: { type: ["number", "null"] },
+              net_tax_paid: { type: ["number", "null"] },
+              filing_date: { type: ["string", "null"] },
+              filing_status: { type: "string", enum: ["filed", "not_filed", "late"] },
             },
+            required: ["period", "filing_status"],
+            additionalProperties: false,
           },
-          required: ["periods"],
-          additionalProperties: false,
         },
       },
-    };
-
-    let aiRes: Response | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      aiRes = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${geminiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "gemini-2.5-flash",
-          messages: [{ role: "system", content: systemPrompt }, userMsg],
-          tools: [toolSchema],
-          tool_choice: { type: "function", function: { name: "submit_gst_data" } },
-        }),
-      });
-      if (aiRes.status !== 429) break;
-      await new Promise(r => setTimeout(r, [5000, 15000, 30000][attempt] ?? 30000));
-    }
-
-    if (!aiRes!.ok) {
-      const txt = await aiRes!.text();
-      await supabase.from("financial_documents").update({ extraction_status: "failed", extraction_error: `AI error ${aiRes!.status}` }).eq("id", document_id);
-      return new Response(JSON.stringify({ error: "AI extraction failed", detail: txt }), { status: aiRes!.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-
-    const aiJson = await aiRes!.json();
-    const toolCall = aiJson.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) throw new Error("No tool call in AI response");
-    const args = JSON.parse(toolCall.function.arguments);
+      toolRequired: ["periods"],
+      retries: 2,
+    });
 
     let inserted = 0;
-    for (const p of args.periods ?? []) {
+    const periods = args.periods as { period: string; return_type?: string; taxable_turnover?: number; exempt_turnover?: number; total_turnover?: number; output_tax?: number; itc_claimed?: number; net_tax_paid?: number; filing_date?: string; filing_status?: string }[];
+    for (const p of periods ?? []) {
       if (!p.period) continue;
       await supabase.from("gst_return_data").upsert({
         case_id, user_id: user.id, document_id,
         period: p.period,
-        return_type: p.return_type ?? args.return_type ?? null,
-        gstin: args.gstin ?? null,
+        return_type: p.return_type ?? (args.return_type as string) ?? null,
+        gstin: (args.gstin as string) ?? null,
         taxable_turnover: p.taxable_turnover ?? null,
         exempt_turnover: p.exempt_turnover ?? null,
         total_turnover: p.total_turnover ?? null,

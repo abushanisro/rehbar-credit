@@ -7,6 +7,6 @@ AI-assisted credit appraisal and IC note platform for Rehbar Financial Services.
 ## Stack
 - React + TypeScript + Vite
 - Supabase (database, auth, edge functions, storage)
-- Gemini 2.5 Pro (financial extraction + narrative generation)
+- Claude Sonnet 4.6 (all AI — document extraction, metadata analysis, narrative generation)
 - Tailwind CSS (terminal theme)
 # rehbar-credit

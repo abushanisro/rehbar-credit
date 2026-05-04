@@ -1,3 +1,7 @@
+# Environment — never commit real secrets; use .env.local for local overrides
+.env
+.env.production
+
 # Logs
 logs
 *.log

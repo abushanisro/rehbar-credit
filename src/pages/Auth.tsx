@@ -20,7 +20,7 @@ const BOOT_LINES = [
   { text: "INITIALIZING CREDIT ANALYSIS ENGINE......", color: "text-foreground/70", delay: 0 },
   { text: "LOADING FINANCIAL RATIO MATRIX............[OK]", color: "text-success", delay: 80 },
   { text: "DSCR COMPUTATION MODULE...................[ONLINE]", color: "text-success", delay: 60 },
-  { text: "GEMINI 2.5 PRO API........................[READY]", color: "text-success", delay: 60 },
+  { text: "CLAUDE SONNET 4.6 API....................[READY]", color: "text-success", delay: 60 },
   { text: "SUPABASE VAULT............................[SECURE]", color: "text-success", delay: 60 },
   { text: "SHARIA COMPLIANCE ENGINE..................[ACTIVE]", color: "text-success", delay: 60 },
   { text: "", color: "", delay: 200 },

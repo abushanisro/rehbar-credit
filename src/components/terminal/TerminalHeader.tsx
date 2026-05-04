@@ -3,34 +3,6 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
-import { useModelPreference, type ModelPreference } from "@/hooks/useModelPreference";
-
-function ModelToggle() {
-  const { model, setModel } = useModelPreference();
-  const options: { value: ModelPreference; label: string; title: string }[] = [
-    { value: "gemini", label: "GEMINI", title: "Gemini 2.5 Flash — fast & lightweight" },
-    { value: "claude", label: "CLAUDE", title: "Claude Sonnet 4.6 — powerful & accurate" },
-  ];
-  return (
-    <div className="hidden sm:flex items-center border border-border bg-surface-2 text-[9px] tracking-widest overflow-hidden">
-      {options.map(o => (
-        <button
-          key={o.value}
-          title={o.title}
-          onClick={() => setModel(o.value)}
-          className={cn(
-            "px-2 py-1 transition-colors font-bold",
-            model === o.value
-              ? o.value === "claude"
-                ? "bg-accent text-accent-foreground"
-                : "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:text-foreground"
-          )}
-        >{o.label}</button>
-      ))}
-    </div>
-  );
-}
 
 const fmtClock = (d: Date) =>
   d.toLocaleTimeString("en-US", { hour12: false }) + " IST";
@@ -351,7 +323,6 @@ export const TerminalHeader = () => {
         {navItem("/", "PIPELINE", "F1")}
         {navItem("/new", "NEW CASE", "F2")}
         <div className="flex-1" />
-        <div className="px-3"><ModelToggle /></div>
         <div className="px-3 text-[11px] text-muted-foreground tracking-widest hidden md:block">
           REHBAR FINANCIAL SERVICES · IC APPRAISAL <span className="text-primary">_</span>
           <span className="ticker-blink text-primary">█</span>

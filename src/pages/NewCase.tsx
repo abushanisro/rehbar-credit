@@ -6,7 +6,6 @@ import { TerminalLayout } from "@/components/terminal/TerminalLayout";
 import { Panel } from "@/components/terminal/Panel";
 import { PRODUCTS, type ProductType } from "@/features/credit/domain";
 import { toast } from "sonner";
-import { getModelPreference } from "@/hooks/useModelPreference";
 
 const INDUSTRIES = [
   "Agriculture & Food Processing",
@@ -214,15 +213,14 @@ export default function NewCase() {
 
       if (cancelledRef.current) return;
 
-      // Tick while Gemini thinks
-      setScanStage("Gemini 2.5 Flash analysing document…");
+      setScanStage("Claude analysing document…");
       const tick = setInterval(() => {
         if (cancelledRef.current) { clearInterval(tick); return; }
         setScanPct((p) => (p < 92 ? p + 1 : p));
       }, 500);
 
       const { data, error } = await supabase.functions.invoke("extract-case-meta", {
-        body: { file_path: path, file_type: fileType, file_name: file.name, excel_text: excelText, model_preference: getModelPreference() },
+        body: { file_path: path, file_type: fileType, file_name: file.name, excel_text: excelText },
       });
       clearInterval(tick);
 
@@ -454,12 +452,12 @@ export default function NewCase() {
           </Panel>
 
           {/* AI Document Scan */}
-          <Panel title="AI DOCUMENT SCAN" ticker="GEMINI/2.5PRO" status="live">
+          <Panel title="AI DOCUMENT SCAN" ticker="CLAUDE/4.6" status="live">
             <div className="space-y-3 text-xs">
 
               <p className="text-foreground/60 leading-relaxed">
                 Upload a company profile, loan application, CMA, or any relevant document.
-                Gemini will read it end-to-end and auto-fill the form.
+                Claude will read it end-to-end and auto-fill the form.
               </p>
 
               {/* Drop zone */}

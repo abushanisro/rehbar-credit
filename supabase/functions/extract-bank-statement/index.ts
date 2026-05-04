@@ -1,7 +1,10 @@
-// Rehbar — Bank Statement Extraction
-// Extracts monthly bank metrics from PDF/Excel bank statements via Gemini 2.5 Flash.
+/**
+ * Rehbar — Bank Statement Extraction
+ * Extracts monthly bank metrics from PDF/Excel bank statements via Claude Sonnet 4.6.
+ */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { createClient }           from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { callAI, type FileContent } from "../_shared/ai-caller.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -30,10 +33,10 @@ Deno.serve(async (req) => {
 
     await supabase.from("financial_documents").update({ extraction_status: "running" }).eq("id", document_id);
 
-    let userContent: unknown;
+    let files: FileContent[];
     if (doc.file_type === "excel") {
       const text = (body.excel_text ?? "").slice(0, 150_000);
-      userContent = [{ type: "text", text: `BANK STATEMENT (TSV):\n\n${text}` }];
+      files = [{ type: "text", text: `BANK STATEMENT (TSV):\n\n${text}` }];
     } else {
       const { data: file } = await supabase.storage.from("case-files").download(doc.file_path);
       if (!file) throw new Error("File download failed");
@@ -41,13 +44,13 @@ Deno.serve(async (req) => {
       let b64 = ""; const cs = 0x8000;
       for (let i = 0; i < bytes.length; i += cs) b64 += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + cs)));
       const mime = doc.file_type === "image" ? "image/png" : "application/pdf";
-      userContent = [{ type: "image_url", image_url: { url: `data:${mime};base64,${btoa(b64)}` } }];
+      files = mime === "application/pdf"
+        ? [{ type: "pdf", base64: btoa(b64) }]
+        : [{ type: "image", base64: btoa(b64), mime }];
     }
 
-    const geminiKey = Deno.env.get("GEMINI_API_KEY");
-    if (!geminiKey) throw new Error("GEMINI_API_KEY not configured");
-
-    const systemPrompt = `You are a senior credit analyst extracting bank statement data for credit underwriting.
+    const args = await callAI({
+      systemPrompt: `You are a senior credit analyst extracting bank statement data for credit underwriting.
 Extract monthly metrics for EVERY month visible in the statement.
 Rules:
 1. Return one entry per month (format YYYY-MM, e.g. "2024-01").
@@ -57,82 +60,41 @@ Rules:
 5. EMI Outflows = total of recurring loan EMI / NACH debit transactions.
 6. Average Balance = average of daily EOD balances if available, else estimate from opening+closing.
 7. Extract bank name and account number if visible.
-8. Do NOT invent data — if a field is absent, omit it.`;
-
-    const userMsg = {
-      role: "user",
-      content: [
-        { type: "text", text: "Extract monthly bank statement metrics for every month in this document." },
-        ...(Array.isArray(userContent) ? userContent : [userContent]),
-      ],
-    };
-
-    const toolSchema = {
-      type: "function",
-      function: {
-        name: "submit_bank_data",
-        description: "Submit extracted bank statement data.",
-        parameters: {
-          type: "object",
-          properties: {
-            bank_name: { type: "string" },
-            account_number: { type: "string" },
-            months: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  month: { type: "string", description: "YYYY-MM format" },
-                  opening_balance: { type: ["number", "null"] },
-                  closing_balance: { type: ["number", "null"] },
-                  total_credits: { type: ["number", "null"] },
-                  total_debits: { type: ["number", "null"] },
-                  credit_count: { type: ["integer", "null"] },
-                  debit_count: { type: ["integer", "null"] },
-                  avg_balance: { type: ["number", "null"] },
-                  min_balance: { type: ["number", "null"] },
-                  max_balance: { type: ["number", "null"] },
-                  bounce_inward: { type: ["integer", "null"] },
-                  bounce_outward: { type: ["integer", "null"] },
-                  emi_outflows: { type: ["number", "null"] },
-                },
-                required: ["month"],
-                additionalProperties: false,
-              },
+8. Do NOT invent data — if a field is absent, omit it.`,
+      userText: "Extract monthly bank statement metrics for every month in this document.",
+      files,
+      toolName: "submit_bank_data",
+      toolDescription: "Submit extracted bank statement data.",
+      toolSchema: {
+        bank_name: { type: "string" },
+        account_number: { type: "string" },
+        months: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              month: { type: "string" },
+              opening_balance: { type: ["number", "null"] },
+              closing_balance: { type: ["number", "null"] },
+              total_credits: { type: ["number", "null"] },
+              total_debits: { type: ["number", "null"] },
+              credit_count: { type: ["integer", "null"] },
+              debit_count: { type: ["integer", "null"] },
+              avg_balance: { type: ["number", "null"] },
+              min_balance: { type: ["number", "null"] },
+              max_balance: { type: ["number", "null"] },
+              bounce_inward: { type: ["integer", "null"] },
+              bounce_outward: { type: ["integer", "null"] },
+              emi_outflows: { type: ["number", "null"] },
             },
+            required: ["month"],
+            additionalProperties: false,
           },
-          required: ["months"],
-          additionalProperties: false,
         },
       },
-    };
-
-    let aiRes: Response | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      aiRes = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${geminiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "gemini-2.5-flash",
-          messages: [{ role: "system", content: systemPrompt }, userMsg],
-          tools: [toolSchema],
-          tool_choice: { type: "function", function: { name: "submit_bank_data" } },
-        }),
-      });
-      if (aiRes.status !== 429) break;
-      await new Promise(r => setTimeout(r, [5000, 15000, 30000][attempt] ?? 30000));
-    }
-
-    if (!aiRes!.ok) {
-      const txt = await aiRes!.text();
-      await supabase.from("financial_documents").update({ extraction_status: "failed", extraction_error: `AI error ${aiRes!.status}` }).eq("id", document_id);
-      return new Response(JSON.stringify({ error: "AI extraction failed", detail: txt }), { status: aiRes!.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-
-    const aiJson = await aiRes!.json();
-    const toolCall = aiJson.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) throw new Error("No tool call in AI response");
-    const args = JSON.parse(toolCall.function.arguments);
+      toolRequired: ["months"],
+      retries: 2,
+    });
 
     let inserted = 0;
     for (const m of args.months ?? []) {
