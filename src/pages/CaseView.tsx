@@ -10,7 +10,7 @@ import { TerminalLayout } from "@/components/terminal/TerminalLayout";
 import { Panel } from "@/components/terminal/Panel";
 import {
   PRODUCTS, CASE_STATUS_META, IC_SECTIONS, RATIO_DISPLAY_NAMES,
-  formatRatio, AI_DRAFT_BANNER, type StatementType, type ProductType,
+  formatRatio, AI_DRAFT_BANNER, type StatementType, type DocClass, type ProductType,
 } from "@/features/credit/domain";
 
 const CASE_INDUSTRIES = [
@@ -44,7 +44,7 @@ type UploadQueueItem = {
   id: string; file: File; name: string; size: string;
   status: QueueStatus;
 };
-type FinQueueItem = UploadQueueItem & { stmtType: StatementType; fy: string };
+type FinQueueItem = UploadQueueItem & { stmtType: DocClass; fy: string };
 
 // ── Balance sheet auto-computation ────────────────────────────────────────────
 // Defines which labels are aggregate totals and what they sum from.
@@ -75,6 +75,26 @@ function recomputeBS(items: LineItem[]): LineItem[] {
     result[idx] = { ...result[idx], override_value: parseFloat(sum.toFixed(2)) };
   }
   return result;
+}
+
+// ── Poll financial_documents.extraction_status until done or failed ───────────
+async function pollExtractionStatus(docId: string, signal: AbortSignal): Promise<void> {
+  for (let i = 0; i < 300; i++) {
+    if (signal.aborted) throw new Error("cancelled");
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(resolve, 2000);
+      signal.addEventListener("abort", () => { clearTimeout(t); reject(new Error("cancelled")); }, { once: true });
+    });
+    const { data } = await supabase
+      .from("financial_documents")
+      .select("extraction_status, extraction_error")
+      .eq("id", docId)
+      .single();
+    if (data?.extraction_status === "extracted") return;
+    if (data?.extraction_status === "failed")
+      throw new Error(data.extraction_error ?? "Extraction failed");
+  }
+  throw new Error("Analysis timed out — check Trigger.dev dashboard for run status");
 }
 
 // ── Wrapper: provides the Liveblocks room scoped to this case ─────────────────
@@ -237,7 +257,9 @@ function CaseViewInner() {
     setProgressLabel("");
   };
 
-  const handleUpload = async (file: File, statement_type: StatementType, fiscal_year: number | null) => {
+  const FINANCIAL_CLASSES: DocClass[] = ["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"];
+
+  const handleUpload = async (file: File, doc_class: DocClass, fiscal_year: number | null) => {
     if (!user) return;
     const abort = new AbortController();
     abortRef.current = abort;
@@ -283,7 +305,7 @@ function CaseViewInner() {
       setProgressLabel("Registering document");
       const { data: doc, error: dErr } = await supabase.from("financial_documents").insert({
         case_id: cc.id, user_id: user.id, file_path: path, file_name: file.name,
-        file_type: fileType, doc_class: statement_type as never,
+        file_type: fileType, doc_class: doc_class as never,
         fiscal_year, extraction_status: "pending",
       }).select().single();
       if (dErr) throw dErr;
@@ -291,9 +313,6 @@ function CaseViewInner() {
       await supabase.from("credit_cases").update({ status: "extracting" }).eq("id", cc.id);
       setProgress(70);
 
-      // Stage 4: AI extraction — retry on 429 with exponential backoff
-      const extractBody = { case_id: cc.id, document_id: doc.id, statement_type, fiscal_year, excel_text: excelText };
-      const fnUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-financials`;
       const { data: { session } } = await supabase.auth.getSession();
       const fnHeaders = {
         "Content-Type": "application/json",
@@ -301,43 +320,59 @@ function CaseViewInner() {
         "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
       };
 
-      const MAX_RETRIES = 3;
-      let fnErr: Error | null = null;
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        if (abort.signal.aborted) throw new Error("cancelled");
-        setProgressLabel(attempt === 0 ? "Extracting with AI" : `Extracting with AI (attempt ${attempt + 1}/${MAX_RETRIES + 1})`);
+      if (doc_class === "bank_statement") {
+        // Stage 4: synchronous bank statement extraction
+        setProgressLabel("Extracting bank statement with AI...");
         const tick = setInterval(() => setProgress((p) => (p < 95 ? p + 1 : p)), 600);
-        const res = await fetch(fnUrl, { method: "POST", headers: fnHeaders, body: JSON.stringify(extractBody), signal: abort.signal });
+        const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-bank-statement`, {
+          method: "POST", headers: fnHeaders, signal: abort.signal,
+          body: JSON.stringify({ case_id: cc.id, document_id: doc.id, excel_text: excelText }),
+        });
         clearInterval(tick);
-        if (res.ok) { fnErr = null; break; }
-
-        const resBody = await res.json().catch(() => ({})) as Record<string, unknown>;
-
-        if (res.status === 422) {
-          fnErr = new Error("no-data-extracted");
-          break;
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({})) as Record<string, unknown>;
+          throw new Error(String(e?.error ?? `Bank extraction failed (HTTP ${res.status})`));
         }
-        if (res.status !== 429) {
-          fnErr = new Error(String(resBody?.error ?? resBody?.message ?? `HTTP ${res.status}`));
-          break;
+      } else if (doc_class === "gst_return") {
+        // Stage 4: synchronous GST extraction
+        setProgressLabel("Extracting GST return with AI...");
+        const tick = setInterval(() => setProgress((p) => (p < 95 ? p + 1 : p)), 600);
+        const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-gst`, {
+          method: "POST", headers: fnHeaders, signal: abort.signal,
+          body: JSON.stringify({ case_id: cc.id, document_id: doc.id, excel_text: excelText }),
+        });
+        clearInterval(tick);
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({})) as Record<string, unknown>;
+          throw new Error(String(e?.error ?? `GST extraction failed (HTTP ${res.status})`));
         }
-
-        if (attempt === MAX_RETRIES) { fnErr = new Error("rate-limited"); break; }
-
-        const waitSec = 15 * (attempt + 1);
-        for (let s = waitSec; s > 0; s--) {
-          if (abort.signal.aborted) throw new Error("cancelled");
-          setProgressLabel(`Rate limited — retrying in ${s}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
-          await new Promise<void>((resolve, reject) => {
-            const t = setTimeout(resolve, 1000);
-            abort.signal.addEventListener("abort", () => { clearTimeout(t); reject(new Error("cancelled")); }, { once: true });
-          });
+      } else {
+        // Stage 4: queue financial statement analysis via Trigger.dev (PDF, image, Excel all handled)
+        setProgressLabel("Queuing AI analysis...");
+        const triggerRes = await fetch(
+          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-analysis`,
+          {
+            method: "POST", headers: fnHeaders, signal: abort.signal,
+            body: JSON.stringify({
+              case_id: cc.id, document_ids: [doc.id], user_id: user.id,
+              ...(excelText ? { excel_texts: { [doc.id]: excelText } } : {}),
+            }),
+          }
+        );
+        if (!triggerRes.ok) {
+          const err = await triggerRes.json().catch(() => ({})) as Record<string, unknown>;
+          throw new Error(String(err?.error ?? `Failed to queue analysis (HTTP ${triggerRes.status})`));
         }
-      }
-      if (fnErr) {
-        if (fnErr.message === "rate-limited") throw new Error("rate-limited");
-        if (fnErr.message === "no-data-extracted") throw new Error("no-data-extracted");
-        throw fnErr;
+        setProgress(75);
+
+        // Stage 5: poll extraction_status until background task completes
+        setProgressLabel("Analysing with AI (running in background)...");
+        const tick = setInterval(() => setProgress((p) => (p < 95 ? p + 1 : p)), 800);
+        try {
+          await pollExtractionStatus(doc.id, abort.signal);
+        } finally {
+          clearInterval(tick);
+        }
       }
 
       setProgress(100);
@@ -353,18 +388,6 @@ function CaseViewInner() {
         if (uploadedPath) await supabase.storage.from("case-files").remove([uploadedPath]);
         await reload();
         setProgressLabel("Cancelled");
-      } else if (msg === "rate-limited") {
-        setExtractError({
-          title: "AI rate limited — all retries exhausted",
-          detail: "Claude returned 429 on every attempt.",
-          action: "Wait 1–2 minutes then try again.",
-        });
-      } else if (msg === "no-data-extracted") {
-        setExtractError({
-          title: "No financial data found in document",
-          detail: "Claude scanned the file but could not identify any financial statements. This happens with scanned images with low resolution, password-protected PDFs, or documents that don't contain tabular financial data.",
-          action: "Try: (1) Use ALL-IN-ONE mode, (2) Check the file is readable, (3) For scanned PDFs try uploading as an image (PNG/JPG), (4) Add rows manually using + ADD STATEMENT BOX in the Review tab.",
-        });
       } else {
         setExtractError({ title: "Extraction failed", detail: msg });
       }
@@ -827,7 +850,7 @@ function CaseViewInner() {
               )}
             </div>
           )}
-          <UploadGrid onUpload={(f, t, fy) => handleUpload(f, t, fy)} onCancel={handleCancelUpload} onDelete={handleDeleteDoc} onEdit={handleEditDoc} busy={busy} docs={docs} progress={progress} progressLabel={progressLabel} />
+          <UploadGrid onUpload={(f, cls, fy) => handleUpload(f, cls, fy)} onCancel={handleCancelUpload} onDelete={handleDeleteDoc} onEdit={handleEditDoc} busy={busy} docs={docs} progress={progress} progressLabel={progressLabel} />
         </Panel>
       )}
 
@@ -3161,13 +3184,23 @@ async function uploadWithProgress(bucket: string, path: string, file: File, onPc
 }
 
 function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress, progressLabel }: {
-  onUpload: (f: File, t: StatementType, fy: number | null) => void;
+  onUpload: (f: File, cls: DocClass, fy: number | null) => void;
   onCancel: () => void;
   onDelete: (doc: DocRow) => void;
   onEdit: (id: string, doc_class: string, fiscal_year: number | null) => void;
   busy: boolean; docs: DocRow[]; progress: number; progressLabel: string;
 }) {
-  const [globalStmt, setGlobalStmt] = useState<StatementType>("all_in_one");
+  const DOC_CLASSES: { value: DocClass; label: string }[] = [
+    { value: "all_in_one",     label: "ALL-IN-ONE (BS + P&L + CF + PROJ)" },
+    { value: "bank_statement", label: "BANK STATEMENT" },
+    { value: "gst_return",     label: "GST RETURN" },
+    { value: "profit_loss",    label: "PROFIT & LOSS" },
+    { value: "balance_sheet",  label: "BALANCE SHEET" },
+    { value: "cash_flow",      label: "CASH FLOW" },
+    { value: "projections",    label: "PROJECTIONS" },
+  ];
+
+  const [globalCls, setGlobalCls]   = useState<DocClass>("all_in_one");
   const [globalFy, setGlobalFy]     = useState("");
   const [fileQueue, setFileQueue]   = useState<FinQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
@@ -3177,12 +3210,11 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
   const [editClass, setEditClass]   = useState("");
   const [editFy, setEditFy]         = useState("");
 
-  const labelFor = (t: StatementType) =>
-    t === "all_in_one" ? "ALL-IN-ONE (BS + P&L + CF + PROJ)" : t.replace(/_/g, " ").toUpperCase();
-
-  function autoDetect(filename: string): StatementType {
+  function autoDetect(filename: string): DocClass {
     const n = filename.toLowerCase().replace(/[\s_\-\.]/g, "");
-    if (/balancesheet|bsheet|bs\d/.test(n))       return "balance_sheet";
+    if (/bank|stmt|statement/.test(n))             return "bank_statement";
+    if (/gst|gstin|gstr/.test(n))                  return "gst_return";
+    if (/balancesheet|bsheet|bs\d/.test(n))        return "balance_sheet";
     if (/profitloss|pandl|pnl|incomestat/.test(n)) return "profit_loss";
     if (/cashflow|cfs/.test(n))                    return "cash_flow";
     if (/proj|forecast|forcast/.test(n))           return "projections";
@@ -3190,9 +3222,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
   }
 
   function makeSize(f: File) {
-    return f.size < 1_048_576
-      ? `${(f.size / 1024).toFixed(1)} KB`
-      : `${(f.size / 1_048_576).toFixed(2)} MB`;
+    return f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`;
   }
 
   const addToQueue = (files: File[]) => {
@@ -3215,9 +3245,8 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
     for (const item of pending) {
       setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "processing" } : qi));
       await (onUpload(item.file, item.stmtType, item.fy ? Number(item.fy) : null) as unknown as Promise<void>);
-      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: busy ? "processing" : "done" } : qi));
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done" } : qi));
     }
-    setFileQueue(q => q.map(qi => qi.status === "processing" ? { ...qi, status: "done" } : qi));
     setQueueRunning(false);
   };
 
@@ -3234,9 +3263,9 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
       <div className="flex gap-3 items-end flex-wrap">
         <div>
           <label className="terminal-label block mb-1">Statement Type</label>
-          <select value={globalStmt} onChange={e => setGlobalStmt(e.target.value as StatementType)}
+          <select value={globalCls} onChange={e => setGlobalCls(e.target.value as DocClass)}
             className="bg-input border border-border px-2 py-1.5 text-sm text-primary">
-            {STATEMENT_TYPES.map(t => <option key={t} value={t}>{labelFor(t)}</option>)}
+            {DOC_CLASSES.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
           </select>
         </div>
         <div>
@@ -3298,11 +3327,11 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
                 <select
                   value={item.stmtType}
                   disabled={item.status !== "pending"}
-                  onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, stmtType: e.target.value as StatementType } : qi))}
+                  onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, stmtType: e.target.value as DocClass } : qi))}
                   className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 shrink-0 disabled:opacity-40"
                 >
-                  {STATEMENT_TYPES.map(t => (
-                    <option key={t} value={t}>{t === "all_in_one" ? "AUTO" : t.replace(/_/g, " ").toUpperCase()}</option>
+                  {DOC_CLASSES.map(d => (
+                    <option key={d.value} value={d.value}>{d.value === "all_in_one" ? "AUTO" : d.value.replace(/_/g, " ").toUpperCase()}</option>
                   ))}
                 </select>
                 <input
@@ -3316,8 +3345,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
                 {item.status !== "processing" && (
                   <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))}
                     className="text-foreground/40 hover:text-destructive hover:bg-destructive/10 px-1.5 py-0.5 border border-transparent hover:border-destructive/20 text-[10px] shrink-0 transition-colors"
-                    title="Remove from queue"
-                  >✕</button>
+                    title="Remove from queue">✕</button>
                 )}
               </div>
             ))}
@@ -3372,9 +3400,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
                   <td className="text-center text-foreground/80 px-1">
                     {isEditing ? (
                       <select value={editClass} onChange={e => setEditClass(e.target.value)} className={cellCls}>
-                        {["all_in_one","profit_loss","balance_sheet","cash_flow","projections","bank_statement","gst_return","other"].map(c => (
-                          <option key={c} value={c}>{c}</option>
-                        ))}
+                        {DOC_CLASSES.map(d => <option key={d.value} value={d.value}>{d.value}</option>)}
                       </select>
                     ) : d.doc_class}
                   </td>
@@ -3383,7 +3409,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
                       ? <input type="number" value={editFy} onChange={e => setEditFy(e.target.value)} placeholder="auto" className={`${cellCls} w-16`} />
                       : (d.fiscal_year ?? "—")}
                   </td>
-                  <td className={`text-center ${d.extraction_status === "extracted" ? "text-success" : d.extraction_status === "failed" ? "text-destructive" : "text-warning"}`}>
+                  <td className={`text-center ${d.extraction_status === "extracted" ? "text-success" : d.extraction_status === "failed" ? "text-destructive" : d.extraction_status === "running" ? "text-warning animate-pulse" : "text-warning"}`}>
                     {d.extraction_status.toUpperCase()}
                   </td>
                   <td className="text-center pl-2 whitespace-nowrap">

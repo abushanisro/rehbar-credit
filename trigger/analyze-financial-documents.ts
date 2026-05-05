@@ -138,8 +138,9 @@ export const analyzeFinancialDocuments = task({
     case_id: string;
     document_ids: string[];
     user_id: string;
+    excel_texts?: Record<string, string>; // doc_id → pre-parsed TSV text
   }) => {
-    const { case_id, document_ids, user_id } = payload;
+    const { case_id, document_ids, user_id, excel_texts = {} } = payload;
 
     const supabase = createClient(
       process.env.SUPABASE_URL!,
@@ -169,21 +170,33 @@ export const analyzeFinancialDocuments = task({
     // ── Build content blocks for Claude ────────────────────────────────────
     const contentBlocks: ContentBlock[] = [];
     const skipped: string[] = [];
+    let docIndex = 0;
 
     for (const doc of docs as FileRecord[]) {
-      logger.info("Downloading", { name: doc.file_name, type: doc.file_type });
+      docIndex++;
+      logger.info("Processing document", { index: docIndex, name: doc.file_name, type: doc.file_type });
 
       if (doc.file_type === "excel") {
-        // Excel text must be stored in extraction_notes or provided via payload
-        // We'll skip here — excel text comes from the client
-        logger.warn("Excel documents require pre-parsed text; skipping binary download", { id: doc.id });
-        skipped.push(doc.id);
+        const text = excel_texts[doc.id];
+        if (!text) {
+          logger.warn("No excel_text in payload for Excel doc; skipping", { id: doc.id });
+          skipped.push(doc.id);
+          continue;
+        }
+        contentBlocks.push({
+          type: "text",
+          text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (Excel/CSV) ===\n\n${text.slice(0, 150_000)}`,
+        });
         continue;
       }
 
       try {
         const base64 = await downloadAsBase64(supabase, doc.file_path);
-        contentBlocks.push(buildBlock(doc, base64));
+        const typeLabel = doc.file_type === "image" ? "Image" : "PDF";
+        contentBlocks.push(
+          { type: "text", text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (${typeLabel}) ===` },
+          buildBlock(doc, base64),
+        );
       } catch (e) {
         logger.error("Download failed", { id: doc.id, error: String(e) });
         skipped.push(doc.id);
@@ -206,8 +219,9 @@ export const analyzeFinancialDocuments = task({
       model: CLAUDE_MODEL,
       max_tokens: 8192,
       system: `You are a senior financial data extraction engine for Rehbar Financial Services (Islamic NBFC).
-You will receive ${contentBlocks.length} financial document${contentBlocks.length > 1 ? "s" : ""}.
-Extract ALL financial statements across ALL fiscal years from ALL documents.
+You will receive ${docIndex} financial document${docIndex > 1 ? "s" : ""} (${contentBlocks.length} content block${contentBlocks.length > 1 ? "s" : ""} total — PDFs, images, and Excel files). Each document is labelled with its filename and type.
+Extract ALL financial statements across ALL fiscal years from ALL documents. Process each document according to its type: PDFs and images contain scanned/printed statements; Excel/CSV files contain tabular data.
+
 
 EXTRACTION RULES:
 1. Return ONE entry per (statement_type, fiscal_year) pair — never merge years.
@@ -268,7 +282,7 @@ EXTRACTION RULES:
       tool_choice: { type: "tool", name: "submit_extraction" },
     };
 
-    let extracted: ExtractionResult;
+    let extracted: ExtractionResult | undefined;
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await fetch(CLAUDE_API, {
@@ -302,16 +316,18 @@ EXTRACTION RULES:
       break;
     }
 
+    if (!extracted) throw new Error("All Claude attempts failed — no extraction result");
+
     logger.info("Extraction complete", {
-      unit: extracted!.unit,
-      statements: extracted!.statements.length,
+      unit: extracted.unit,
+      statements: extracted.statements.length,
     });
 
     // ── Write extracted_financials to Supabase ──────────────────────────────
     let totalRows = 0;
     const primaryDocId = document_ids[0];
 
-    for (const stmt of extracted!.statements) {
+    for (const stmt of extracted.statements) {
       const lineItems = stmt.line_items.map(li => ({
         label: li.label, value: li.value, confidence: li.confidence,
         reviewed: li.confidence >= 90, override_value: null, note: li.note ?? "",
@@ -321,7 +337,7 @@ EXTRACTION RULES:
       const { error } = await supabase.from("extracted_financials").upsert({
         case_id, user_id, document_id: primaryDocId,
         fiscal_year: stmt.fiscal_year, statement_type: stmt.statement_type,
-        line_items: lineItems, confirmed: false, unit: extracted!.unit,
+        line_items: lineItems, confirmed: false, unit: extracted.unit,
       }, { onConflict: "case_id,fiscal_year,statement_type" });
 
       if (error) {
@@ -334,10 +350,10 @@ EXTRACTION RULES:
     logger.info("Financial data written", { rows: totalRows });
 
     // ── Compute & write financial ratios ────────────────────────────────────
-    const allFiscalYears = [...new Set(extracted!.statements.map(s => s.fiscal_year))].sort();
+    const allFiscalYears = [...new Set(extracted.statements.map(s => s.fiscal_year))].sort();
 
     for (const fy of allFiscalYears) {
-      const ratios = computeRatiosForYear(extracted!.statements, fy);
+      const ratios = computeRatiosForYear(extracted.statements, fy);
       const { error } = await supabase.from("financial_ratios").upsert({
         case_id, user_id, fiscal_year: fy, ...ratios,
       }, { onConflict: "case_id,fiscal_year" });
@@ -365,7 +381,7 @@ EXTRACTION RULES:
 
     return {
       ok: true,
-      unit: extracted!.unit,
+      unit: extracted.unit,
       statements_extracted: totalRows,
       ratios_computed: allFiscalYears.length,
       fiscal_years: allFiscalYears,
