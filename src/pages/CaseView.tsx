@@ -124,7 +124,8 @@ function CaseViewInner() {
       supabase.from("bank_statement_data").select("*").eq("case_id", id).order("month"),
       supabase.from("gst_return_data").select("*").eq("case_id", id).order("period"),
     ]);
-    if (c.data) setCc(c.data);
+    if (!c.data) { navigate("/", { replace: true }); return; }
+    setCc(c.data);
     setDocs(d.data ?? []);
     setExtracted(e.data ?? []);
     setRatios(r.data ?? []);

@@ -94,7 +94,7 @@ Rules:
       },
       toolRequired: ["months"],
       retries: 2,
-    });
+    }) as any;
 
     let inserted = 0;
     for (const m of args.months ?? []) {

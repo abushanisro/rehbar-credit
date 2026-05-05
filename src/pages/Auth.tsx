@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { z } from "zod";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/features/auth/AuthProvider";
@@ -124,11 +124,7 @@ function VerificationSent({ email, onResend, onBack }: { email: string; onResend
       toast.success("Verification email resent");
     } catch (err) {
       const msg = (err as Error).message ?? "";
-      if (msg.toLowerCase().includes("rate") || msg.toLowerCase().includes("429")) {
-        toast.error("Email rate limit hit — wait 1 hour before resending, or configure custom SMTP in Supabase dashboard.");
-      } else {
-        toast.error("Failed to resend — try again shortly");
-      }
+      toast.error(msg || "Failed to resend — try again shortly");
     } finally { setResending(false); }
   };
 
@@ -209,6 +205,8 @@ function VerificationSent({ email, onResend, onBack }: { email: string; onResend
 const Auth = () => {
   const { session } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const redirectTo = new URLSearchParams(location.search).get("redirect") ?? "/";
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -219,7 +217,7 @@ const Auth = () => {
 
   const { completedLines, currentLine, currentColor, done } = useTypewriter();
 
-  useEffect(() => { if (session) navigate("/", { replace: true }); }, [session, navigate]);
+  useEffect(() => { if (session) navigate(redirectTo, { replace: true }); }, [session, navigate, redirectTo]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -232,31 +230,36 @@ const Auth = () => {
     setLoading(true);
     try {
       if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
-          email, password,
-          options: { emailRedirectTo: `${window.location.origin}/`, data: { full_name: fullName } },
+        const { data, error } = await supabase.functions.invoke("send-auth-email", {
+          body: {
+            type: "signup",
+            email,
+            password,
+            full_name: fullName,
+            redirect_url: `${window.location.origin}/auth?redirect=${encodeURIComponent(redirectTo)}`,
+          },
         });
-        if (error) throw error;
-        setVerificationSent(true);           // ← show verification screen
+        if (error) throw new Error(error.message ?? "Sign up failed");
+        if (data?.already_exists) throw new Error("An account with this email already exists — please sign in.");
+        if (!data?.ok) throw new Error(data?.error ?? "Sign up failed");
+        setVerificationSent(true);
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
       }
     } catch (err) {
-      const msg = (err as Error).message ?? "";
-      if (msg.toLowerCase().includes("rate") || msg.toLowerCase().includes("429")) {
-        toast.error("Too many requests — Supabase email limit reached. Wait an hour or use Sign In if already verified.");
-      } else {
-        toast.error(msg || "Authentication failed");
-      }
+      toast.error((err as Error).message || "Authentication failed");
     } finally {
       setLoading(false);
     }
   };
 
   const resendVerification = async () => {
-    const { error } = await supabase.auth.resend({ type: "signup", email });
-    if (error) throw error;
+    const { data, error } = await supabase.functions.invoke("send-auth-email", {
+      body: { type: "resend", email },
+    });
+    if (error) throw new Error(error.message ?? "Resend failed");
+    if (!data?.ok) throw new Error(data?.error ?? "Resend failed");
   };
 
   const inputCls = "w-full bg-input border border-border px-3 py-2 text-primary font-mono focus:outline-none focus:border-primary";

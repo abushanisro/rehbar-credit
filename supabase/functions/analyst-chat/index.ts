@@ -7,7 +7,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
-declare const Deno: { env: { get(key: string): string | undefined } };
+
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -130,7 +130,7 @@ RULES:
 - You know what page the analyst is currently viewing — use that context.`;
 
 async function buildCaseSystemPrompt(
-  sb: ReturnType<typeof createClient>,
+  sb: any,
   caseId: string,
   pageName: string,
 ): Promise<string> {
@@ -143,7 +143,7 @@ async function buildCaseSystemPrompt(
     sb.from("emi_payments").select("emi_number,due_date,emi_amount,status,paid_amount,outstanding_balance").eq("case_id", caseId).order("emi_number"),
   ]);
 
-  const cc         = ccRes.data;
+  const cc         = ccRes.data as any;
   const financials = (finRes.data ?? []) as { fiscal_year: number; statement_type: string; line_items: unknown; unit?: string | null }[];
   const ratios     = (ratRes.data ?? []) as { fiscal_year: number; ratio_name: string; ratio_value: number | null; threshold_status: string; benchmark: number | null }[];
   const bank       = (bkRes.data ?? []) as { month: string; bank_name?: string | null; total_credits?: number | null; total_debits?: number | null; avg_balance?: number | null; bounce_inward?: number | null; bounce_outward?: number | null; emi_outflows?: number | null }[];
@@ -188,7 +188,7 @@ ${buildEmiContext(emi)}`;
 }
 
 async function buildGlobalSystemPrompt(
-  sb: ReturnType<typeof createClient>,
+  sb: any,
   pageName: string,
   currentPath: string,
 ): Promise<string> {
@@ -197,8 +197,8 @@ async function buildGlobalSystemPrompt(
     sb.from("companies").select("id,name,industry,website,created_at").order("created_at", { ascending: false }).limit(100),
   ]);
 
-  const cases     = casesRes.data     ?? [];
-  const companies = companiesRes.data ?? [];
+  const cases     = (casesRes.data as any[])     ?? [];
+  const companies = (companiesRes.data as any[]) ?? [];
 
   // Aggregate pipeline stats
   const statusCounts: Record<string, number> = {};
@@ -241,6 +241,7 @@ ${companyList || "  No companies yet."}`;
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 
+// @ts-ignore: Deno.serve is available in the edge function environment
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 

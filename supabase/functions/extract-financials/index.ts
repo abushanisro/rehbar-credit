@@ -32,7 +32,7 @@ function imageMime(name: string): string {
 }
 
 async function downloadAsFile(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   filePath: string,
   fileType: string,
   fileName: string,

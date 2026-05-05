@@ -1,6 +1,7 @@
 # Environment — never commit real secrets; use .env.local for local overrides
 .env
 .env.production
+supabase/functions/.env
 
 # Logs
 logs

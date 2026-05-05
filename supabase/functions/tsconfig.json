@@ -11,7 +11,8 @@
     "baseUrl": ".",
     "paths": {
       "@shared/*": ["./_shared/*"]
-    }
+    },
+    "allowImportingTsExtensions": true
   },
   "include": ["**/*.ts", "deno.d.ts"]
 }

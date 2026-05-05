@@ -155,7 +155,7 @@ export function ShareDialog({ caseCode, clientName }: Props) {
             <div>
               <div className="text-[9px] text-muted-foreground tracking-widest mb-2 flex items-center gap-1">
                 <span>INVITE ANALYST</span>
-                <span className="text-muted-foreground/40">— sends a Supabase account invite email</span>
+                <span className="text-muted-foreground/40">— sends an email invite via Resend</span>
               </div>
               <div className="flex gap-2">
                 <input
@@ -265,7 +265,7 @@ export function ShareDialog({ caseCode, clientName }: Props) {
 
           {/* Footer */}
           <div className="border-t border-border px-4 py-2 shrink-0 text-[9px] text-muted-foreground/60 tracking-wider">
-            ▸ Invited users receive a Supabase email to set their password · All analysts can view all cases
+            ▸ Invited users receive an email via Resend to set their password · All analysts can view all cases
           </div>
         </div>
       )}
