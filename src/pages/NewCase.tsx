@@ -47,6 +47,17 @@ type FormState = {
   website: string;
 };
 
+type FileQueueItem = {
+  id: string;
+  name: string;
+  size: string;
+  fileType: "pdf" | "image" | "excel";
+  excelText?: string;
+  status: "pending" | "uploading" | "done" | "error";
+  uploadPct: number;
+  storagePath?: string;
+};
+
 type ScanResult = {
   client_name?: string;
   product_type?: ProductType;
@@ -126,9 +137,9 @@ export default function NewCase() {
   const [scanPct, setScanPct] = useState(0);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [scannedFile, setScannedFile] = useState<{ name: string; size: string } | null>(null);
+  const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([]);
   const cancelledRef = useRef(false);
-  const xhrRef = useRef<XMLHttpRequest | null>(null);
+  const currentXhrRef = useRef<XMLHttpRequest | null>(null);
 
   const product = PRODUCTS[form.product_type];
 
@@ -221,97 +232,118 @@ export default function NewCase() {
 
   const resetScan = () => {
     cancelledRef.current = true;
-    xhrRef.current?.abort();
+    currentXhrRef.current?.abort();
     setScanning(false);
     setScanPct(0);
     setScanStage("");
-    setScannedFile(null);
+    setFileQueue([]);
     setScanResult(null);
   };
 
-  // ── document scan ─────────────────────────────────────────────────────────
-  const handleScanFile = useCallback(async (file: File) => {
-    if (!user) return;
+  // ── multi-document scan ───────────────────────────────────────────────────
+  const handleScanFiles = useCallback(async (rawFiles: File[]) => {
+    if (!user || rawFiles.length === 0) return;
     cancelledRef.current = false;
-    setScanning(true);
-    setScanPct(5);
-    setScanStage("Reading file…");
-    setScanResult(null);
-    const fileSizeStr = file.size < 1024 * 1024
-      ? `${(file.size / 1024).toFixed(1)} KB`
-      : `${(file.size / (1024 * 1024)).toFixed(2)} MB`;
-    setScannedFile({ name: file.name, size: fileSizeStr });
 
-    try {
-      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const makeItem = (f: File): FileQueueItem => {
+      const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
       const isImage = ["jpg","jpeg","png","webp","gif"].includes(ext);
       const isExcel = ["xlsx","xls","csv"].includes(ext);
-      const fileType: "pdf"|"image"|"excel" = isImage ? "image" : isExcel ? "excel" : "pdf";
+      const size = f.size < 1_048_576
+        ? `${(f.size / 1024).toFixed(1)} KB`
+        : `${(f.size / 1_048_576).toFixed(2)} MB`;
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: f.name, size,
+        fileType: isImage ? "image" : isExcel ? "excel" : "pdf",
+        status: "pending", uploadPct: 0,
+      };
+    };
 
+    const initialQueue = rawFiles.map(makeItem);
+    setFileQueue(initialQueue);
+    setScanning(true); setScanPct(5); setScanStage("Preparing…"); setScanResult(null);
+
+    const toUpload: Array<{ file_path: string; file_type: "pdf"|"image"|"excel"; file_name: string; excel_text?: string }> = [];
+
+    for (let i = 0; i < rawFiles.length; i++) {
+      if (cancelledRef.current) return;
+      const f    = rawFiles[i];
+      const item = initialQueue[i];
+
+      // Parse Excel client-side
       let excelText: string | undefined;
-      if (isExcel) {
-        setScanStage("Parsing spreadsheet…");
-        setScanPct(10);
+      if (item.fileType === "excel") {
+        setScanStage(`Parsing ${item.name}…`);
         const XLSX = await import("xlsx");
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: "array" });
-        excelText = wb.SheetNames.map((name) => {
-          const sheet = wb.Sheets[name];
-          return `=== SHEET: ${name} ===\n${XLSX.utils.sheet_to_csv(sheet, { FS: "\t" })}`;
-        }).join("\n\n");
-        setScanPct(20);
+        const buf  = await f.arrayBuffer();
+        const wb   = XLSX.read(buf, { type: "array" });
+        excelText  = wb.SheetNames.map(n =>
+          `=== SHEET: ${n} ===\n${XLSX.utils.sheet_to_csv(wb.Sheets[n], { FS: "\t" })}`
+        ).join("\n\n");
       }
 
       if (cancelledRef.current) return;
 
-      // Upload to drafts path
-      setScanStage("Uploading to secure storage…");
-      const path = `${user.id}/drafts/${Date.now()}-${file.name}`;
-      await uploadWithProgress(path, file, (pct) => {
-        setScanPct(20 + Math.round(pct * 0.35));
-      }, xhrRef);
-      setScanPct(55);
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "uploading" } : qi));
+      setScanStage(`Uploading ${i + 1} of ${rawFiles.length}…`);
 
-      if (cancelledRef.current) return;
+      const path = `${user.id}/drafts/${Date.now()}-${f.name}`;
+      try {
+        await uploadWithProgress(path, f, (pct) => {
+          setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, uploadPct: pct } : qi));
+          const perFile = 50 / rawFiles.length;
+          setScanPct(Math.min(55, Math.round(5 + i * perFile + (pct / 100) * perFile)));
+        }, currentXhrRef);
+        setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done", uploadPct: 100, storagePath: path } : qi));
+        toUpload.push({ file_path: path, file_type: item.fileType, file_name: item.name, excel_text: excelText });
+      } catch (e) {
+        if (cancelledRef.current) return;
+        setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "error" } : qi));
+        toast.error(`Upload failed: ${item.name}`);
+      }
+    }
 
-      setScanStage("Claude analysing document…");
-      const tick = setInterval(() => {
-        if (cancelledRef.current) { clearInterval(tick); return; }
-        setScanPct((p) => (p < 92 ? p + 1 : p));
-      }, 500);
+    if (cancelledRef.current || toUpload.length === 0) { setScanning(false); return; }
 
+    const docWord = toUpload.length === 1 ? "document" : `${toUpload.length} documents`;
+    setScanStage(`Claude analysing ${docWord}…`);
+    setScanPct(60);
+    const tick = setInterval(() => {
+      if (cancelledRef.current) { clearInterval(tick); return; }
+      setScanPct(p => p < 92 ? p + 1 : p);
+    }, 500);
+
+    try {
       const { data, error } = await supabase.functions.invoke("extract-case-meta", {
-        body: { file_path: path, file_type: fileType, file_name: file.name, excel_text: excelText },
+        body: { files: toUpload },
       });
       clearInterval(tick);
-
       if (cancelledRef.current) return;
       if (error) throw new Error(error.message);
       if (!data?.ok) throw new Error(data?.error ?? "Extraction failed");
-
-      setScanPct(100);
-      setScanStage("Done");
+      setScanPct(100); setScanStage("Done");
       setScanResult(data.extracted as ScanResult);
-      toast.success("Document analysed — review and apply below");
+      toast.success(`${toUpload.length} document${toUpload.length > 1 ? "s" : ""} analysed — review and apply below`);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Scan failed");
-      setScanStage("");
+      clearInterval(tick);
+      if (!cancelledRef.current) { toast.error(e instanceof Error ? e.message : "Analysis failed"); setScanStage(""); }
     } finally {
       setTimeout(() => { setScanning(false); setScanPct(0); setScanStage(""); }, 600);
     }
   }, [user]);
 
   const onFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleScanFile(file);
+    const files = Array.from(e.target.files ?? []);
+    if (files.length) handleScanFiles(files);
     e.target.value = "";
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) handleScanFile(file);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length) handleScanFiles(files);
   };
 
   // ── case submit ───────────────────────────────────────────────────────────
@@ -324,11 +356,11 @@ export default function NewCase() {
     const resolvedIndustry =
       form.industry === "Other" ? form.industry_custom : form.industry;
 
-    const { data, error } = await supabase.from("credit_cases").insert({
+    const { data, error } = await (supabase.from("credit_cases") as any).insert({
       user_id: user.id,
       case_code: code,
       client_name: form.client_name,
-      company_id: selectedCompanyId ?? undefined,
+      company_id: selectedCompanyId || null,
       product_type: form.product_type,
       product_type_custom: form.product_type === "other" ? form.product_type_custom || null : null,
       industry: resolvedIndustry || null,
@@ -554,7 +586,7 @@ export default function NewCase() {
 
               {/* Drop zone */}
               <div
-                className={`border-2 border-dashed transition-colors cursor-pointer px-3 py-5 text-center ${
+                className={`border-2 border-dashed transition-colors cursor-pointer ${
                   dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
                 } ${scanning ? "pointer-events-none opacity-50" : ""}`}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -567,20 +599,42 @@ export default function NewCase() {
                   type="file"
                   className="hidden"
                   accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp"
+                  multiple
                   onChange={onFileInput}
                 />
-                {scannedFile ? (
-                  <>
-                    <div className="text-primary text-lg mb-1">📄</div>
-                    <div className="terminal-label truncate px-2">{scannedFile.name}</div>
-                    <div className="text-foreground/50 mt-1">{scannedFile.size}</div>
-                  </>
+                {fileQueue.length > 0 ? (
+                  <div className="px-3 py-2">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="terminal-label text-primary">
+                        {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""}
+                      </span>
+                      <span className="text-foreground/40 text-[10px]">· drop more to add</span>
+                    </div>
+                    <div className="space-y-1 max-h-28 overflow-y-auto">
+                      {fileQueue.map(item => (
+                        <div key={item.id} className="flex items-center gap-1.5 text-[10px]">
+                          <span className={
+                            item.status === "done"     ? "text-green-500" :
+                            item.status === "error"    ? "text-red-500"   :
+                            item.status === "uploading"? "text-primary"   : "text-foreground/30"
+                          }>
+                            {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "uploading" ? "▶" : "○"}
+                          </span>
+                          <span className="truncate flex-1 text-primary">{item.name}</span>
+                          <span className="text-foreground/40 shrink-0">{item.size}</span>
+                          {item.status === "uploading" && (
+                            <span className="text-primary shrink-0 w-8 text-right">{item.uploadPct}%</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 ) : (
-                  <>
+                  <div className="px-3 py-5 text-center">
                     <div className="text-primary text-lg mb-1">⬆</div>
-                    <div className="terminal-label">DROP FILE OR CLICK TO BROWSE</div>
-                    <div className="text-foreground/40 mt-1">PDF · Excel · Image</div>
-                  </>
+                    <div className="terminal-label">DROP FILES OR CLICK TO BROWSE</div>
+                    <div className="text-foreground/40 mt-1">PDF · Excel · Image · Multiple OK</div>
+                  </div>
                 )}
               </div>
 
@@ -654,7 +708,7 @@ export default function NewCase() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setScanResult(null); setScannedFile(null); }}
+                    onClick={() => { setScanResult(null); setFileQueue([]); }}
                     className="w-full border border-border text-foreground/50 py-1 text-xs tracking-widest hover:border-primary/50"
                   >
                     DISCARD

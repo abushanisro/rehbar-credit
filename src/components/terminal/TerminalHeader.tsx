@@ -291,6 +291,8 @@ export const TerminalHeader = () => {
       if (e.key === "F1") { e.preventDefault(); navigate("/"); }
       if (e.key === "F2") { e.preventDefault(); navigate("/new"); }
       if (e.key === "F3") { e.preventDefault(); navigate("/companies"); }
+      if (e.key === "F4") { e.preventDefault(); window.dispatchEvent(new CustomEvent("toggle-analyst-chat")); }
+
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);

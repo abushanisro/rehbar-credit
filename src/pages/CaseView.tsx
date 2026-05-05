@@ -39,6 +39,13 @@ interface LineItem {
 
 const STATEMENT_TYPES: StatementType[] = ["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"];
 
+type QueueStatus = "pending" | "processing" | "done" | "error";
+type UploadQueueItem = {
+  id: string; file: File; name: string; size: string;
+  status: QueueStatus;
+};
+type FinQueueItem = UploadQueueItem & { stmtType: StatementType; fy: string };
+
 // ── Balance sheet auto-computation ────────────────────────────────────────────
 // Defines which labels are aggregate totals and what they sum from.
 // Order matters: dependencies must come before the rows that depend on them.
@@ -157,7 +164,15 @@ function CaseViewInner() {
     };
   }, [id, scheduleReload]);
 
+  useEffect(() => {
+    if (extractError) {
+      const timer = setTimeout(() => setExtractError(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [extractError]);
+
   if (!cc) return <TerminalLayout><div className="text-muted-foreground">LOADING CASE...</div></TerminalLayout>;
+
 
   const product = PRODUCTS[cc.product_type];
   const statusMeta = CASE_STATUS_META[cc.status];
@@ -797,9 +812,12 @@ function CaseViewInner() {
         <Panel title="UPLOAD FINANCIAL STATEMENTS" ticker="PDF / IMG / XLSX">
           {extractError && (
             <div className="mb-3 border border-destructive/50 bg-destructive/10 px-3 py-2 space-y-1">
-              <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2 border-b border-destructive/20 pb-1 mb-1.5">
                 <span className="text-destructive font-bold text-xs tracking-widest">✕ {extractError.title.toUpperCase()}</span>
-                <button onClick={() => setExtractError(null)} className="text-destructive/50 hover:text-destructive text-xs">✕</button>
+                <button 
+                  onClick={() => setExtractError(null)} 
+                  className="text-destructive hover:bg-destructive/20 px-1.5 py-0.5 border border-destructive/30 text-[10px] font-bold transition-colors"
+                >[CLOSE]</button>
               </div>
               {extractError.detail && (
                 <div className="text-destructive/80 text-[11px] tracking-wide">{extractError.detail}</div>
@@ -1517,10 +1535,13 @@ function CaseViewInner() {
 
 // ─── Bank Statement Tab ───────────────────────────────────────────────────────
 function BankStatementTab({ cc, data, user, onReload }: { cc: CaseRow; data: Tables<"bank_statement_data">[]; user: { id: string }; onReload: () => Promise<void> }) {
-  const [busy, setBusy]       = useState(false);
+  const [busy, setBusy]         = useState(false);
   const [progress, setProgress] = useState(0);
-  const [label, setLabel]     = useState("");
-  const fileRef               = useRef<HTMLInputElement>(null);
+  const [label, setLabel]       = useState("");
+  const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
+  const [queueRunning, setQueueRunning] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef                 = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
   const fmtN = (v: number | null) => v == null ? null : v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
@@ -1531,6 +1552,27 @@ function BankStatementTab({ cc, data, user, onReload }: { cc: CaseRow; data: Tab
   const totalBounce = data.reduce((s, r) => s + (r.bounce_inward ?? 0), 0);
   const bounceRate  = data.length && totalBounce ? ((totalBounce / data.length)).toFixed(1) : null;
   const bankName    = data[0]?.bank_name;
+
+  const addBankFiles = (files: File[]) => {
+    setFileQueue(q => [...q, ...files.map(f => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      file: f, name: f.name,
+      size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
+      status: "pending" as QueueStatus,
+    }))]);
+  };
+
+  const processBankQueue = async () => {
+    const pending = fileQueue.filter(i => i.status === "pending");
+    if (!pending.length) return;
+    setQueueRunning(true);
+    for (const item of pending) {
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "processing" } : qi));
+      await handleUpload(item.file);
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done" } : qi));
+    }
+    setQueueRunning(false);
+  };
 
   const handleUpload = async (file: File) => {
     setBusy(true); setProgress(5); setLabel("Reading file…");
@@ -1601,21 +1643,65 @@ function BankStatementTab({ cc, data, user, onReload }: { cc: CaseRow; data: Tab
       <Panel title="BANK STATEMENT UPLOAD" ticker="AI EXTRACTION" status={data.length > 0 ? "live" : "idle"}
         actions={data.length > 0 ? <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button> : undefined}
       >
-        <div className="flex items-center gap-3 flex-wrap">
-          <input ref={fileRef} type="file" className="hidden" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
-            onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f); e.target.value = ""; }} />
-          <button onClick={() => fileRef.current?.click()} disabled={busy}
-            className="bg-primary text-primary-foreground px-4 py-1.5 text-xs tracking-widest font-bold hover:opacity-90 disabled:opacity-40">
-            {busy ? label || "PROCESSING…" : "[UPLOAD BANK STATEMENT]"}
-          </button>
-          <span className="text-[10px] text-muted-foreground">PDF · Excel · Image — monthly statements preferred</span>
-        </div>
-        {busy && (
-          <div className="mt-3 space-y-1">
-            <div className="flex justify-between text-[10px] text-muted-foreground"><span>{label}</span><span>{progress}%</span></div>
-            <div className="h-1.5 bg-border"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
+        <div className="space-y-3">
+          <input ref={fileRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
+            onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addBankFiles(files); e.target.value = ""; }} />
+
+          {/* Drop zone */}
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={e => { e.preventDefault(); setDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) addBankFiles(files); }}
+            onClick={() => !(busy || queueRunning) && fileRef.current?.click()}
+            className={`border-2 border-dashed cursor-pointer px-4 py-3 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
+          >
+            <span className="text-primary font-bold">⬆ DROP BANK STATEMENTS OR CLICK</span>
+            <span className="text-muted-foreground ml-1">· Multiple months OK · PDF · Excel · Image</span>
           </div>
-        )}
+
+          {/* Queue */}
+          {fileQueue.length > 0 && (
+            <div className="border border-border">
+              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-surface/40">
+                <span className="terminal-label text-[10px]">
+                  {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""}
+                  {fileQueue.filter(i => i.status === "pending").length > 0 && ` · ${fileQueue.filter(i => i.status === "pending").length} PENDING`}
+                </span>
+                <div className="flex gap-2">
+                  {fileQueue.some(i => i.status === "pending") && !busy && !queueRunning && (
+                    <button onClick={processBankQueue}
+                      className="bg-primary text-primary-foreground px-3 py-0.5 text-[10px] tracking-widest font-bold hover:opacity-90">
+                      [EXTRACT {fileQueue.filter(i => i.status === "pending").length} FILE{fileQueue.filter(i => i.status === "pending").length > 1 ? "S" : ""}]
+                    </button>
+                  )}
+                  <button onClick={() => setFileQueue([])} className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground">CLEAR</button>
+                </div>
+              </div>
+              <div className="divide-y divide-border/30">
+                {fileQueue.map(item => (
+                  <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : "text-muted-foreground"}>
+                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : "○"}
+                    </span>
+                    <span className="truncate flex-1 text-primary">{item.name}</span>
+                    <span className="text-foreground/40 shrink-0">{item.size}</span>
+                    {item.status === "pending" && (
+                      <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Progress */}
+          {busy && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px] text-muted-foreground"><span>{label}</span><span>{progress}%</span></div>
+              <div className="h-1.5 bg-border"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
+            </div>
+          )}
+        </div>
       </Panel>
 
       {data.length > 0 && (
@@ -1727,10 +1813,13 @@ function BankStatementTab({ cc, data, user, onReload }: { cc: CaseRow; data: Tab
 
 // ─── GST Tab ─────────────────────────────────────────────────────────────────
 function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Tables<"gst_return_data">[]; extracted: ExtractedRow[]; user: { id: string }; onReload: () => Promise<void> }) {
-  const [busy, setBusy]         = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [label, setLabel]       = useState("");
-  const fileRef                 = useRef<HTMLInputElement>(null);
+  const [busy, setBusy]           = useState(false);
+  const [progress, setProgress]   = useState(0);
+  const [label, setLabel]         = useState("");
+  const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
+  const [queueRunning, setQueueRunning] = useState(false);
+  const [dragOver, setDragOver]   = useState(false);
+  const fileRef                   = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
@@ -1750,6 +1839,27 @@ function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Ta
     const it = (row?.line_items as { label: string; value: number | null }[] | undefined)?.find(i => i.label === "Turnover");
     return it?.value ?? null;
   })();
+
+  const addGstFiles = (files: File[]) => {
+    setFileQueue(q => [...q, ...files.map(f => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      file: f, name: f.name,
+      size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
+      status: "pending" as QueueStatus,
+    }))]);
+  };
+
+  const processGstQueue = async () => {
+    const pending = fileQueue.filter(i => i.status === "pending");
+    if (!pending.length) return;
+    setQueueRunning(true);
+    for (const item of pending) {
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "processing" } : qi));
+      await handleUpload(item.file);
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done" } : qi));
+    }
+    setQueueRunning(false);
+  };
 
   const handleUpload = async (file: File) => {
     setBusy(true); setProgress(5); setLabel("Reading file…");
@@ -1822,21 +1932,66 @@ function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Ta
       <Panel title="GST RETURN UPLOAD" ticker="GSTR-1 / GSTR-3B / GSTR-9" status={data.length > 0 ? "live" : "idle"}
         actions={data.length > 0 ? <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button> : undefined}
       >
-        <div className="flex items-center gap-3 flex-wrap">
-          <input ref={fileRef} type="file" className="hidden" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
-            onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f); e.target.value = ""; }} />
-          <button onClick={() => fileRef.current?.click()} disabled={busy}
-            className="bg-primary text-primary-foreground px-4 py-1.5 text-xs tracking-widest font-bold hover:opacity-90 disabled:opacity-40">
-            {busy ? label || "PROCESSING…" : "[UPLOAD GST RETURN]"}
-          </button>
-          <span className="text-[10px] text-muted-foreground">{gstin ? `GSTIN: ${gstin}` : "Upload GSTR-1, GSTR-3B or annual GSTR-9"}</span>
-        </div>
-        {busy && (
-          <div className="mt-3 space-y-1">
-            <div className="flex justify-between text-[10px] text-muted-foreground"><span>{label}</span><span>{progress}%</span></div>
-            <div className="h-1.5 bg-border"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
+        <div className="space-y-3">
+          <input ref={fileRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
+            onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addGstFiles(files); e.target.value = ""; }} />
+
+          {/* Drop zone */}
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={e => { e.preventDefault(); setDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) addGstFiles(files); }}
+            onClick={() => !(busy || queueRunning) && fileRef.current?.click()}
+            className={`border-2 border-dashed cursor-pointer px-4 py-3 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
+          >
+            <span className="text-primary font-bold">⬆ DROP GST RETURNS OR CLICK</span>
+            <span className="text-muted-foreground ml-1">· GSTR-1 / GSTR-3B / GSTR-9 · Multiple OK</span>
           </div>
-        )}
+          {gstin && <div className="text-[10px] text-accent tracking-wider">GSTIN: {gstin}</div>}
+
+          {/* Queue */}
+          {fileQueue.length > 0 && (
+            <div className="border border-border">
+              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-surface/40">
+                <span className="terminal-label text-[10px]">
+                  {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""}
+                  {fileQueue.filter(i => i.status === "pending").length > 0 && ` · ${fileQueue.filter(i => i.status === "pending").length} PENDING`}
+                </span>
+                <div className="flex gap-2">
+                  {fileQueue.some(i => i.status === "pending") && !busy && !queueRunning && (
+                    <button onClick={processGstQueue}
+                      className="bg-primary text-primary-foreground px-3 py-0.5 text-[10px] tracking-widest font-bold hover:opacity-90">
+                      [EXTRACT {fileQueue.filter(i => i.status === "pending").length} FILE{fileQueue.filter(i => i.status === "pending").length > 1 ? "S" : ""}]
+                    </button>
+                  )}
+                  <button onClick={() => setFileQueue([])} className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground">CLEAR</button>
+                </div>
+              </div>
+              <div className="divide-y divide-border/30">
+                {fileQueue.map(item => (
+                  <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : "text-muted-foreground"}>
+                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : "○"}
+                    </span>
+                    <span className="truncate flex-1 text-primary">{item.name}</span>
+                    <span className="text-foreground/40 shrink-0">{item.size}</span>
+                    {item.status === "pending" && (
+                      <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Progress */}
+          {busy && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px] text-muted-foreground"><span>{label}</span><span>{progress}%</span></div>
+              <div className="h-1.5 bg-border"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
+            </div>
+          )}
+        </div>
       </Panel>
 
       {data.length > 0 && (
@@ -3005,145 +3160,250 @@ async function uploadWithProgress(bucket: string, path: string, file: File, onPc
   });
 }
 
-function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress, progressLabel }: { onUpload: (f: File, t: StatementType, fy: number | null) => void; onCancel: () => void; onDelete: (doc: DocRow) => void; onEdit: (id: string, doc_class: string, fiscal_year: number | null) => void; busy: boolean; docs: DocRow[]; progress: number; progressLabel: string }) {
-  const [stmt, setStmt] = useState<StatementType>("all_in_one");
-  const [uploadFy, setUploadFy] = useState<string>("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editClass, setEditClass] = useState("");
-  const [editFy, setEditFy] = useState<string>("");
-  const labelFor = (t: StatementType) => t === "all_in_one" ? "ALL-IN-ONE (BS + P&L + CF + PROJ)" : t.replace("_", " ").toUpperCase();
+function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress, progressLabel }: {
+  onUpload: (f: File, t: StatementType, fy: number | null) => void;
+  onCancel: () => void;
+  onDelete: (doc: DocRow) => void;
+  onEdit: (id: string, doc_class: string, fiscal_year: number | null) => void;
+  busy: boolean; docs: DocRow[]; progress: number; progressLabel: string;
+}) {
+  const [globalStmt, setGlobalStmt] = useState<StatementType>("all_in_one");
+  const [globalFy, setGlobalFy]     = useState("");
+  const [fileQueue, setFileQueue]   = useState<FinQueueItem[]>([]);
+  const [queueRunning, setQueueRunning] = useState(false);
+  const [dragOver, setDragOver]     = useState(false);
+  const fileInputRef                = useRef<HTMLInputElement>(null);
+  const [editingId, setEditingId]   = useState<string | null>(null);
+  const [editClass, setEditClass]   = useState("");
+  const [editFy, setEditFy]         = useState("");
 
-  const startEdit = (d: DocRow) => {
-    setEditingId(d.id);
-    setEditClass(d.doc_class);
-    setEditFy(d.fiscal_year ? String(d.fiscal_year) : "");
+  const labelFor = (t: StatementType) =>
+    t === "all_in_one" ? "ALL-IN-ONE (BS + P&L + CF + PROJ)" : t.replace(/_/g, " ").toUpperCase();
+
+  function autoDetect(filename: string): StatementType {
+    const n = filename.toLowerCase().replace(/[\s_\-\.]/g, "");
+    if (/balancesheet|bsheet|bs\d/.test(n))       return "balance_sheet";
+    if (/profitloss|pandl|pnl|incomestat/.test(n)) return "profit_loss";
+    if (/cashflow|cfs/.test(n))                    return "cash_flow";
+    if (/proj|forecast|forcast/.test(n))           return "projections";
+    return "all_in_one";
+  }
+
+  function makeSize(f: File) {
+    return f.size < 1_048_576
+      ? `${(f.size / 1024).toFixed(1)} KB`
+      : `${(f.size / 1_048_576).toFixed(2)} MB`;
+  }
+
+  const addToQueue = (files: File[]) => {
+    setFileQueue(q => [
+      ...q,
+      ...files.map(f => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file: f, name: f.name, size: makeSize(f),
+        stmtType: autoDetect(f.name),
+        fy: globalFy,
+        status: "pending" as QueueStatus,
+      })),
+    ]);
   };
 
-  const saveEdit = (id: string) => {
-    onEdit(id, editClass, editFy ? Number(editFy) : null);
-    setEditingId(null);
+  const processAll = async () => {
+    const pending = fileQueue.filter(i => i.status === "pending");
+    if (!pending.length) return;
+    setQueueRunning(true);
+    for (const item of pending) {
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "processing" } : qi));
+      await (onUpload(item.file, item.stmtType, item.fy ? Number(item.fy) : null) as unknown as Promise<void>);
+      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: busy ? "processing" : "done" } : qi));
+    }
+    setFileQueue(q => q.map(qi => qi.status === "processing" ? { ...qi, status: "done" } : qi));
+    setQueueRunning(false);
   };
+
+  const startEdit = (d: DocRow) => { setEditingId(d.id); setEditClass(d.doc_class); setEditFy(d.fiscal_year ? String(d.fiscal_year) : ""); };
+  const saveEdit  = (id: string) => { onEdit(id, editClass, editFy ? Number(editFy) : null); setEditingId(null); };
+
+  const pendingCount = fileQueue.filter(i => i.status === "pending").length;
+  const cellCls = "bg-input border border-border text-primary px-1 py-0.5 text-xs";
+
   return (
     <div className="space-y-3">
+
+      {/* ── Controls row ─────────────────────────────────────────────────── */}
       <div className="flex gap-3 items-end flex-wrap">
         <div>
           <label className="terminal-label block mb-1">Statement Type</label>
-          <select value={stmt} onChange={(e) => setStmt(e.target.value as StatementType)} className="bg-input border border-border px-2 py-1.5 text-sm text-primary">
-            {STATEMENT_TYPES.map((t) => <option key={t} value={t}>{labelFor(t)}</option>)}
+          <select value={globalStmt} onChange={e => setGlobalStmt(e.target.value as StatementType)}
+            className="bg-input border border-border px-2 py-1.5 text-sm text-primary">
+            {STATEMENT_TYPES.map(t => <option key={t} value={t}>{labelFor(t)}</option>)}
           </select>
         </div>
         <div>
           <label className="terminal-label block mb-1">Fiscal Year (optional)</label>
-          <input
-            type="number"
-            placeholder="e.g. 2025"
-            value={uploadFy}
-            onChange={(e) => setUploadFy(e.target.value)}
-            className="bg-input border border-border px-2 py-1.5 text-sm text-primary w-28"
-          />
+          <input type="number" placeholder="e.g. 2025" value={globalFy} onChange={e => setGlobalFy(e.target.value)}
+            className="bg-input border border-border px-2 py-1.5 text-sm text-primary w-28" />
         </div>
-        <div>
+        <div className="flex-1 min-w-[200px]">
           <label className="terminal-label block mb-1">File (PDF / Image / Excel)</label>
-          <input
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
-            disabled={busy}
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) { onUpload(f, stmt, uploadFy ? Number(uploadFy) : null); setUploadFy(""); } e.target.value = ""; }}
-            className="text-xs file:bg-primary file:text-primary-foreground file:border-0 file:px-3 file:py-1.5 file:text-xs file:font-bold file:tracking-widest"
-          />
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={e => { e.preventDefault(); setDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) addToQueue(files); }}
+            onClick={() => !(busy || queueRunning) && fileInputRef.current?.click()}
+            className={`border-2 border-dashed cursor-pointer px-3 py-2 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
+          >
+            <input ref={fileInputRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
+              onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addToQueue(files); e.target.value = ""; }} />
+            <span className="text-primary font-bold">⬆ DROP FILES OR CLICK</span>
+            <span className="text-muted-foreground ml-1">· Multiple OK</span>
+          </div>
         </div>
       </div>
+
+      {/* ── File queue ───────────────────────────────────────────────────── */}
+      {fileQueue.length > 0 && (
+        <div className="border border-border">
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-surface/40">
+            <span className="terminal-label text-[10px]">
+              {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""} QUEUED
+              {pendingCount > 0 && ` · ${pendingCount} PENDING`}
+            </span>
+            <div className="flex gap-2">
+              {pendingCount > 0 && !busy && !queueRunning && (
+                <button onClick={processAll}
+                  className="bg-primary text-primary-foreground px-3 py-0.5 text-[10px] tracking-widest font-bold hover:opacity-90">
+                  [EXTRACT {pendingCount} FILE{pendingCount > 1 ? "S" : ""}]
+                </button>
+              )}
+              <button onClick={() => setFileQueue([])}
+                className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground">
+                CLEAR ALL
+              </button>
+            </div>
+          </div>
+          <div className="divide-y divide-border/30">
+            {fileQueue.map(item => (
+              <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+                <span className={
+                  item.status === "done"       ? "text-success shrink-0" :
+                  item.status === "error"      ? "text-destructive shrink-0" :
+                  item.status === "processing" ? "text-primary shrink-0 animate-pulse" :
+                                                 "text-muted-foreground shrink-0"
+                }>
+                  {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : "○"}
+                </span>
+                <span className="truncate flex-1 text-primary min-w-0" title={item.name}>{item.name}</span>
+                <span className="text-foreground/40 shrink-0 hidden sm:block">{item.size}</span>
+                <select
+                  value={item.stmtType}
+                  disabled={item.status !== "pending"}
+                  onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, stmtType: e.target.value as StatementType } : qi))}
+                  className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 shrink-0 disabled:opacity-40"
+                >
+                  {STATEMENT_TYPES.map(t => (
+                    <option key={t} value={t}>{t === "all_in_one" ? "AUTO" : t.replace(/_/g, " ").toUpperCase()}</option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  value={item.fy}
+                  disabled={item.status !== "pending"}
+                  onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, fy: e.target.value } : qi))}
+                  placeholder="FY"
+                  className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 w-12 shrink-0 disabled:opacity-40"
+                />
+                {item.status !== "processing" && (
+                  <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))}
+                    className="text-foreground/40 hover:text-destructive hover:bg-destructive/10 px-1.5 py-0.5 border border-transparent hover:border-destructive/20 text-[10px] shrink-0 transition-colors"
+                    title="Remove from queue"
+                  >✕</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Progress bar ─────────────────────────────────────────────────── */}
       {busy && (
         <div className="border border-warning/40 bg-warning/5 p-3 space-y-2">
           <div className="flex justify-between items-center text-[11px] tracking-widest">
             <span className="text-warning">▸ {progressLabel || "WORKING"}</span>
             <div className="flex items-center gap-3">
               <span className="text-primary font-bold tabular-nums">{progress}%</span>
-              <button
-                onClick={onCancel}
-                className="text-[10px] border border-destructive/60 text-destructive px-2 py-0.5 hover:bg-destructive/10 tracking-widest"
-              >[CANCEL]</button>
+              <button onClick={onCancel}
+                className="text-[10px] border border-destructive/60 text-destructive px-2 py-0.5 hover:bg-destructive/10 tracking-widest">
+                [CANCEL]
+              </button>
             </div>
           </div>
           <div className="h-2 bg-input border border-border overflow-hidden">
-            <div
-              className="h-full bg-primary transition-all duration-300 ease-out"
-              style={{ width: `${progress}%`, boxShadow: "0 0 8px hsl(var(--primary))" }}
-            />
+            <div className="h-full bg-primary transition-all duration-300 ease-out"
+              style={{ width: `${progress}%`, boxShadow: "0 0 8px hsl(var(--primary))" }} />
           </div>
           <div className="flex justify-between text-[9px] text-muted-foreground tracking-widest">
             <span>PARSE</span><span>UPLOAD</span><span>REGISTER</span><span>EXTRACT</span><span>DONE</span>
           </div>
         </div>
       )}
-      <div className="text-[10px] text-muted-foreground tracking-wider">
-        ▸ ALL-IN-ONE detects every statement (BS, P&L, CF, Projections) inside one PDF or Excel.
-        ▸ PROJECTIONS do not require a fiscal year.
-        ▸ Excel parsed locally then sent as text — JPG/PNG/PDF sent directly to vision model.
+
+      <div className="text-[10px] text-muted-foreground tracking-wider space-y-0.5">
+        <div>▸ ALL-IN-ONE (AUTO) detects every statement type and all fiscal years inside one document.</div>
+        <div>▸ Statement type is auto-detected from filename — review and override per file before extracting.</div>
+        <div>▸ PROJECTIONS do not require a fiscal year. Excel parsed locally — PDF/Image via vision model.</div>
       </div>
+
+      {/* ── Uploaded documents table ──────────────────────────────────────── */}
       <div className="overflow-x-auto">
-      <table className="w-full text-xs border-t border-border min-w-[480px]">
-        <thead className="text-muted-foreground">
-          <tr><th className="text-left py-1">FILE</th><th>TYPE</th><th>CLASS</th><th>FY</th><th>STATUS</th><th></th></tr>
-        </thead>
-        <tbody>
-          {docs.length === 0 ? (
-            <tr><td colSpan={6} className="text-center text-muted-foreground py-4">NO DOCUMENTS UPLOADED</td></tr>
-          ) : docs.map((d) => {
-            const isEditing = editingId === d.id;
-            const cellCls = "bg-input border border-border text-primary px-1 py-0.5 text-xs";
-            return (
-              <tr key={d.id} className="border-b border-border/30">
-                <td className="py-1 text-primary max-w-[180px] truncate" title={d.file_name}>{d.file_name}</td>
-                <td className="text-center text-accent">{d.file_type.toUpperCase()}</td>
-
-                {/* CLASS — editable */}
-                <td className="text-center text-foreground/80 px-1">
-                  {isEditing ? (
-                    <select value={editClass} onChange={(e) => setEditClass(e.target.value)} className={cellCls}>
-                      {["all_in_one","profit_loss","balance_sheet","cash_flow","projections","bank_statement","gst_return","other"].map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  ) : d.doc_class}
-                </td>
-
-                {/* FY — editable */}
-                <td className="text-center px-1">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      value={editFy}
-                      onChange={(e) => setEditFy(e.target.value)}
-                      placeholder="auto"
-                      className={`${cellCls} w-16`}
-                    />
-                  ) : (d.fiscal_year ?? "—")}
-                </td>
-
-                <td className={`text-center ${d.extraction_status === "extracted" ? "text-success" : d.extraction_status === "failed" ? "text-destructive" : "text-warning"}`}>
-                  {d.extraction_status.toUpperCase()}
-                </td>
-
-                {/* Actions */}
-                <td className="text-center pl-2 whitespace-nowrap">
-                  {isEditing ? (
-                    <>
-                      <button type="button" onClick={() => saveEdit(d.id)} className="text-green-400 hover:text-green-300 mr-2" title="Save">✓</button>
-                      <button type="button" onClick={() => setEditingId(null)} className="text-foreground/40 hover:text-foreground" title="Cancel">✕</button>
-                    </>
-                  ) : (
-                    <>
-                      <button type="button" onClick={() => startEdit(d)} disabled={busy} className="text-foreground/40 hover:text-primary transition-colors mr-2 disabled:pointer-events-none" title="Edit">✎</button>
-                      <button type="button" onClick={() => onDelete(d)} disabled={busy} className="text-foreground/40 hover:text-red-400 transition-colors disabled:pointer-events-none" title="Remove">✕</button>
-                    </>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+        <table className="w-full text-xs border-t border-border min-w-[480px]">
+          <thead className="text-muted-foreground">
+            <tr><th className="text-left py-1">FILE</th><th>TYPE</th><th>CLASS</th><th>FY</th><th>STATUS</th><th></th></tr>
+          </thead>
+          <tbody>
+            {docs.length === 0 ? (
+              <tr><td colSpan={6} className="text-center text-muted-foreground py-4">NO DOCUMENTS UPLOADED YET</td></tr>
+            ) : docs.map(d => {
+              const isEditing = editingId === d.id;
+              return (
+                <tr key={d.id} className="border-b border-border/30">
+                  <td className="py-1 text-primary max-w-[180px] truncate" title={d.file_name}>{d.file_name}</td>
+                  <td className="text-center text-accent">{d.file_type.toUpperCase()}</td>
+                  <td className="text-center text-foreground/80 px-1">
+                    {isEditing ? (
+                      <select value={editClass} onChange={e => setEditClass(e.target.value)} className={cellCls}>
+                        {["all_in_one","profit_loss","balance_sheet","cash_flow","projections","bank_statement","gst_return","other"].map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    ) : d.doc_class}
+                  </td>
+                  <td className="text-center px-1">
+                    {isEditing
+                      ? <input type="number" value={editFy} onChange={e => setEditFy(e.target.value)} placeholder="auto" className={`${cellCls} w-16`} />
+                      : (d.fiscal_year ?? "—")}
+                  </td>
+                  <td className={`text-center ${d.extraction_status === "extracted" ? "text-success" : d.extraction_status === "failed" ? "text-destructive" : "text-warning"}`}>
+                    {d.extraction_status.toUpperCase()}
+                  </td>
+                  <td className="text-center pl-2 whitespace-nowrap">
+                    {isEditing ? (
+                      <>
+                        <button type="button" onClick={() => saveEdit(d.id)} className="text-green-400 hover:text-green-300 mr-2">✓</button>
+                        <button type="button" onClick={() => setEditingId(null)} className="text-foreground/40 hover:text-foreground">✕</button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" onClick={() => startEdit(d)} disabled={busy} className="text-foreground/40 hover:text-primary mr-2 disabled:pointer-events-none">✎</button>
+                        <button type="button" onClick={() => onDelete(d)} disabled={busy} className="text-foreground/40 hover:text-red-400 disabled:pointer-events-none">✕</button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

@@ -61,6 +61,13 @@ export function AnalystChat() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  useEffect(() => {
+    const handleToggle = () => setOpen(o => !o);
+    window.addEventListener("toggle-analyst-chat", handleToggle);
+    return () => window.removeEventListener("toggle-analyst-chat", handleToggle);
+  }, []);
+
+
   const send = async (text: string) => {
     const userMsg = text.trim();
     if (!userMsg || loading) return;
@@ -111,17 +118,29 @@ export function AnalystChat() {
       {/* Toggle button — fixed bottom-right on every page */}
       <button
         onClick={() => setOpen(o => !o)}
-        className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-full bg-[#E8721C] px-4 py-2.5 text-sm font-medium text-white shadow-lg hover:bg-[#d0631a] transition-colors"
+        className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-full bg-[#E8721C] px-4 py-2.5 text-sm font-medium text-white shadow-lg hover:bg-[#d0631a] transition-all hover:scale-105 active:scale-95"
       >
-        <span className="text-base">◈</span>
-        {open ? "Close Analyst" : "Ask Analyst"}
+        {open ? (
+          <>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+            <span>Close</span>
+          </>
+        ) : (
+          <>
+            <span className="text-base">◈</span>
+            <span>Ask Analyst (F4)</span>
+          </>
+        )}
       </button>
 
       {/* Panel */}
-      {open && (
-        <div className="fixed bottom-20 right-6 z-50 flex flex-col w-[420px] max-h-[75vh] rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] shadow-2xl overflow-hidden">
-          {/* Header */}
-          <div className="flex items-center gap-2 border-b border-[#2a2a2a] px-4 py-3">
+      <div className={`fixed bottom-20 right-6 z-50 flex flex-col w-[420px] max-h-[75vh] rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] shadow-2xl overflow-hidden transition-all duration-300 ease-in-out ${open ? "opacity-100 translate-y-0" : "opacity-0 translate-y-10 pointer-events-none"}`}>
+        {/* Header */}
+        <div className="flex items-center gap-2 border-b border-[#2a2a2a] px-4 py-3">
+
             <span className="text-[#E8721C] text-lg">◈</span>
             <div>
               <p className="text-sm font-semibold text-white">Rehbar Analyst</p>
@@ -130,7 +149,19 @@ export function AnalystChat() {
                 <span className="ml-2 text-[#444]">— {pageName}</span>
               </p>
             </div>
-            <span className="ml-auto text-[10px] text-[#444] font-mono">claude-sonnet-4-6</span>
+            <div className="ml-auto flex items-center gap-3">
+              <span className="text-[10px] text-[#444] font-mono">claude-sonnet-4-6</span>
+              <button 
+                onClick={() => setOpen(false)}
+                className="text-[#666] hover:text-white transition-colors p-1"
+                title="Close"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
           </div>
 
           {/* Messages */}
@@ -200,7 +231,7 @@ export function AnalystChat() {
             </Button>
           </div>
         </div>
-      )}
+
     </>
   );
 }

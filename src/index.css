@@ -74,9 +74,9 @@
     --sidebar-ring:              25 82% 51%;
   }
 
-  .dark {
-    /* same — terminal is always dark */
-  }
+  /* .dark {
+    same — terminal is always dark
+  } */
 }
 
 @layer base {
