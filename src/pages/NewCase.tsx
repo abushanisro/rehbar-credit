@@ -14,6 +14,7 @@ const INDUSTRIES = [
   "Construction & Infrastructure",
   "Education",
   "Energy & Utilities",
+  "EV Logistics & Transportation",
   "Financial Services",
   "Healthcare & Pharmaceuticals",
   "Hospitality & Tourism",

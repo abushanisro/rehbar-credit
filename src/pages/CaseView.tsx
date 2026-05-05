@@ -15,8 +15,8 @@ import {
 
 const CASE_INDUSTRIES = [
   "Agriculture & Food Processing","Automotive","Chemicals & Petrochemicals",
-  "Construction & Infrastructure","Education","Energy & Utilities","Financial Services",
-  "Healthcare & Pharmaceuticals","Hospitality & Tourism","IT & Technology",
+  "Construction & Infrastructure","Education","Energy & Utilities","EV Logistics & Transportation",
+  "Financial Services","Healthcare & Pharmaceuticals","Hospitality & Tourism","IT & Technology",
   "Logistics & Transportation","Manufacturing","Media & Entertainment","Real Estate",
   "Retail & E-commerce","Telecom","Textile & Apparel","Trading","Other",
 ] as const;
