@@ -191,6 +191,71 @@ function CaseViewInner() {
     }
   }, [extractError]);
 
+  const FINANCIAL_CLASSES_SET = new Set(["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"]);
+
+  const handleRetry = useCallback(async (doc: DocRow) => {
+    if (!user || !cc) return;
+    try {
+      // Reset this doc to pending immediately so the UI reacts
+      await supabase.from("financial_documents")
+        .update({ extraction_status: "pending", extraction_error: null })
+        .eq("id", doc.id);
+
+      if (doc.doc_class === "bank_statement") {
+        // Collect all non-extracted bank statements for this case
+        const { data: batchDocs } = await supabase.from("financial_documents")
+          .select("id")
+          .eq("case_id", cc.id)
+          .eq("doc_class", "bank_statement")
+          .neq("extraction_status", "extracted");
+        const ids = (batchDocs ?? [{ id: doc.id }]).map((d: { id: string }) => d.id);
+
+        await supabase.from("financial_documents")
+          .update({ extraction_status: "running", extraction_error: null })
+          .in("id", ids);
+
+        // Use supabase.functions.invoke so auth is handled automatically
+        const { error: triggerErr } = await supabase.functions.invoke("trigger-bank-extraction", {
+          body: { case_id: cc.id, user_id: user.id, document_ids: ids },
+        });
+
+        if (triggerErr) {
+          // Fallback: fire individual extractions in parallel (fire-and-forget)
+          ids.forEach(id => {
+            supabase.functions.invoke("extract-bank-statement", {
+              body: { case_id: cc.id, document_id: id },
+            });
+          });
+        }
+        toast.success(`Re-running ${ids.length} bank statement${ids.length > 1 ? "s" : ""}`);
+
+      } else if (doc.doc_class === "gst_return") {
+        await supabase.from("financial_documents")
+          .update({ extraction_status: "running", extraction_error: null })
+          .eq("id", doc.id);
+        const { error } = await supabase.functions.invoke("extract-gst", {
+          body: { case_id: cc.id, document_id: doc.id },
+        });
+        if (error) throw error;
+        toast.success("GST re-extraction queued");
+
+      } else if (FINANCIAL_CLASSES_SET.has(doc.doc_class)) {
+        await supabase.from("financial_documents")
+          .update({ extraction_status: "running", extraction_error: null })
+          .eq("id", doc.id);
+        const { error } = await supabase.functions.invoke("trigger-analysis", {
+          body: { case_id: cc.id, user_id: user.id, document_ids: [doc.id] },
+        });
+        if (error) throw error;
+        toast.success("Analysis re-queued");
+      }
+
+      await reload();
+    } catch (e) {
+      toast.error("Retry failed: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }, [user, cc, reload]);
+
   if (!cc) return <TerminalLayout><div className="text-muted-foreground">LOADING CASE...</div></TerminalLayout>;
 
 
@@ -321,17 +386,33 @@ function CaseViewInner() {
       };
 
       if (doc_class === "bank_statement") {
-        // Stage 4: synchronous bank statement extraction
-        setProgressLabel("Extracting bank statement with AI...");
-        const tick = setInterval(() => setProgress((p) => (p < 95 ? p + 1 : p)), 600);
-        const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-bank-statement`, {
+        // Stage 4: queue all bank statement docs (this + any existing failed/pending) via Trigger.dev
+        setProgressLabel("Queuing bank statement extraction…");
+        const { data: otherDocs } = await supabase.from("financial_documents")
+          .select("id")
+          .eq("case_id", cc.id)
+          .eq("doc_class", "bank_statement")
+          .neq("id", doc.id)
+          .in("extraction_status", ["failed", "pending"]);
+        const allIds = [doc.id, ...(otherDocs?.map((d: { id: string }) => d.id) ?? [])];
+        const triggerRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-bank-extraction`, {
           method: "POST", headers: fnHeaders, signal: abort.signal,
-          body: JSON.stringify({ case_id: cc.id, document_id: doc.id, excel_text: excelText }),
+          body: JSON.stringify({
+            case_id: cc.id, user_id: user.id, document_ids: allIds,
+            ...(excelText ? { excel_texts: { [doc.id]: excelText } } : {}),
+          }),
         });
-        clearInterval(tick);
-        if (!res.ok) {
-          const e = await res.json().catch(() => ({})) as Record<string, unknown>;
-          throw new Error(String(e?.error ?? `Bank extraction failed (HTTP ${res.status})`));
+        if (!triggerRes.ok) {
+          const e = await triggerRes.json().catch(() => ({})) as Record<string, unknown>;
+          throw new Error(String(e?.error ?? `Failed to queue extraction (HTTP ${triggerRes.status})`));
+        }
+        setProgress(75);
+        setProgressLabel(`Extracting ${allIds.length} bank statement${allIds.length > 1 ? "s" : ""} in parallel…`);
+        const tick = setInterval(() => setProgress((p) => (p < 95 ? p + 1 : p)), 800);
+        try {
+          await pollExtractionStatus(doc.id, abort.signal);
+        } finally {
+          clearInterval(tick);
         }
       } else if (doc_class === "gst_return") {
         // Stage 4: synchronous GST extraction
@@ -850,7 +931,7 @@ function CaseViewInner() {
               )}
             </div>
           )}
-          <UploadGrid onUpload={(f, cls, fy) => handleUpload(f, cls, fy)} onCancel={handleCancelUpload} onDelete={handleDeleteDoc} onEdit={handleEditDoc} busy={busy} docs={docs} progress={progress} progressLabel={progressLabel} />
+          <UploadGrid onUpload={(f, cls, fy) => handleUpload(f, cls, fy)} onCancel={handleCancelUpload} onDelete={handleDeleteDoc} onEdit={handleEditDoc} onRetry={handleRetry} busy={busy} docs={docs} progress={progress} progressLabel={progressLabel} />
         </Panel>
       )}
 
@@ -1547,7 +1628,7 @@ function CaseViewInner() {
         <EmiTracker cc={cc} payments={emiPayments} user={user!} onReload={reload} />
       )}
       {tab === "bank" && (
-        <BankStatementTab cc={cc} data={bankData} user={user!} onReload={reload} />
+        <BankStatementTab cc={cc} data={bankData} docs={docs} user={user!} onReload={reload} />
       )}
       {tab === "gst" && (
         <GstTab cc={cc} data={gstData} extracted={extracted} user={user!} onReload={reload} />
@@ -1557,7 +1638,7 @@ function CaseViewInner() {
 }
 
 // ─── Bank Statement Tab ───────────────────────────────────────────────────────
-function BankStatementTab({ cc, data, user, onReload }: { cc: CaseRow; data: Tables<"bank_statement_data">[]; user: { id: string }; onReload: () => Promise<void> }) {
+function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; data: Tables<"bank_statement_data">[]; docs: DocRow[]; user: { id: string }; onReload: () => Promise<void> }) {
   const [busy, setBusy]         = useState(false);
   const [progress, setProgress] = useState(0);
   const [label, setLabel]       = useState("");
@@ -1632,24 +1713,70 @@ function BankStatementTab({ cc, data, user, onReload }: { cc: CaseRow; data: Tab
         file_type: fileType as never, doc_class: "bank_statement" as never, extraction_status: "pending",
       }).select().single();
       if (dErr || !doc) throw new Error(dErr?.message ?? "Register failed");
-      setProgress(70); setLabel("Extracting with AI…");
-      const tick = setInterval(() => setProgress(p => p < 94 ? p + 1 : p), 700);
+      setProgress(70); setLabel("Queuing extraction…");
       const { data: { session: s2 } } = await supabase.auth.getSession();
-      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-bank-statement`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${s2?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY },
-        body: JSON.stringify({ case_id: cc.id, document_id: doc.id, excel_text: excelText }),
+      const fnHeaders = { "Content-Type": "application/json", "Authorization": `Bearer ${s2?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
+
+      // Include any other failed/pending bank statements so they all run together
+      const { data: otherDocs } = await supabase.from("financial_documents")
+        .select("id")
+        .eq("case_id", cc.id)
+        .eq("doc_class", "bank_statement")
+        .neq("id", doc.id)
+        .in("extraction_status", ["failed", "pending"]);
+      const allIds = [doc.id, ...(otherDocs?.map((d: { id: string }) => d.id) ?? [])];
+
+      const queueRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-bank-extraction`, {
+        method: "POST", headers: fnHeaders,
+        body: JSON.stringify({
+          case_id: cc.id, user_id: user.id, document_ids: allIds,
+          ...(excelText ? { excel_texts: { [doc.id]: excelText } } : {}),
+        }),
       });
-      clearInterval(tick);
-      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${res.status}`); }
-      const result = await res.json();
+      if (!queueRes.ok) { const j = await queueRes.json().catch(() => ({})); throw new Error(j.error ?? `Queue failed HTTP ${queueRes.status}`); }
+
+      setProgress(75); setLabel(`Extracting ${allIds.length} statement${allIds.length > 1 ? "s" : ""} in parallel…`);
+      const tick = setInterval(() => setProgress(p => p < 94 ? p + 1 : p), 700);
+      // Poll the newly registered doc until it completes
+      const abort = new AbortController();
+      try {
+        await pollExtractionStatus(doc.id, abort.signal);
+      } finally {
+        clearInterval(tick);
+      }
       setProgress(100); setLabel("Done");
-      toast.success(`Bank statement extracted — ${result.months_extracted} months`);
+      toast.success("Bank statements extracted");
       await onReload();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setTimeout(() => { setBusy(false); setProgress(0); setLabel(""); }, 600);
+    }
+  };
+
+  const failedDocs = docs.filter(d => d.doc_class === "bank_statement" && d.extraction_status === "failed");
+
+  const retryFailed = async () => {
+    if (!failedDocs.length) return;
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${session?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
+      const ids = failedDocs.map(d => d.id);
+      await supabase.from("financial_documents").update({ extraction_status: "running", extraction_error: null }).in("id", ids);
+      const { error: triggerErr } = await supabase.functions.invoke("trigger-bank-extraction", {
+        body: { case_id: cc.id, user_id: user.id, document_ids: ids },
+      });
+      if (triggerErr) {
+        ids.forEach(id => {
+          supabase.functions.invoke("extract-bank-statement", {
+            body: { case_id: cc.id, document_id: id },
+          });
+        });
+      }
+      toast.success(`Re-running ${ids.length} statement${ids.length > 1 ? "s" : ""}`);
+      await onReload();
+    } catch (e) {
+      toast.error("Retry failed: " + (e instanceof Error ? e.message : String(e)));
     }
   };
 
@@ -1664,7 +1791,16 @@ function BankStatementTab({ cc, data, user, onReload }: { cc: CaseRow; data: Tab
     <div className="space-y-3">
       {/* Upload */}
       <Panel title="BANK STATEMENT UPLOAD" ticker="AI EXTRACTION" status={data.length > 0 ? "live" : "idle"}
-        actions={data.length > 0 ? <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button> : undefined}
+        actions={
+          <div className="flex gap-2">
+            {failedDocs.length > 0 && (
+              <button onClick={retryFailed} className="text-[10px] border border-warning/40 text-warning/70 px-2 py-0.5 hover:bg-warning/10">
+                [↺ RETRY {failedDocs.length} FAILED]
+              </button>
+            )}
+            {data.length > 0 && <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button>}
+          </div>
+        }
       >
         <div className="space-y-3">
           <input ref={fileRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
@@ -3183,11 +3319,12 @@ async function uploadWithProgress(bucket: string, path: string, file: File, onPc
   });
 }
 
-function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress, progressLabel }: {
+function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs, progress, progressLabel }: {
   onUpload: (f: File, cls: DocClass, fy: number | null) => void;
   onCancel: () => void;
   onDelete: (doc: DocRow) => void;
   onEdit: (id: string, doc_class: string, fiscal_year: number | null) => void;
+  onRetry: (doc: DocRow) => void;
   busy: boolean; docs: DocRow[]; progress: number; progressLabel: string;
 }) {
   const DOC_CLASSES: { value: DocClass; label: string }[] = [
@@ -3445,6 +3582,9 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
                       </>
                     ) : (
                       <>
+                        {d.extraction_status !== "extracted" && (
+                          <button type="button" onClick={() => onRetry(d)} disabled={busy} title="Re-run extraction" className="text-warning/70 hover:text-warning mr-2 disabled:pointer-events-none text-base leading-none">▶</button>
+                        )}
                         <button type="button" onClick={() => startEdit(d)} disabled={busy} className="text-foreground/40 hover:text-primary mr-2 disabled:pointer-events-none">✎</button>
                         <button type="button" onClick={() => onDelete(d)} disabled={busy} className="text-foreground/40 hover:text-red-400 disabled:pointer-events-none">✕</button>
                       </>

@@ -3,7 +3,7 @@
  * Extracts monthly bank metrics from PDF/Excel bank statements via Claude Sonnet 4.6.
  */
 
-import { createClient }           from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { createClient }             from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { callAI, type FileContent } from "../_shared/ai-caller.ts";
 
 const corsHeaders = {
@@ -15,20 +15,22 @@ const corsHeaders = {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+  // Parse body up-front so document_id is available in the catch block
+  const body = await req.json().catch(() => ({})) as { case_id?: string; document_id?: string; excel_text?: string };
+  const { case_id, document_id } = body;
+  if (!case_id || !document_id) return new Response(JSON.stringify({ error: "Missing fields" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+  const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+
   try {
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-
-    const body = await req.json() as { case_id: string; document_id: string; excel_text?: string };
-    const { case_id, document_id } = body;
-    if (!case_id || !document_id) return new Response(JSON.stringify({ error: "Missing fields" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const userClient = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, { global: { headers: { Authorization: authHeader } } });
     const { data: { user } } = await userClient.auth.getUser();
     if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-    const { data: doc } = await supabase.from("financial_documents").select("*").eq("id", document_id).eq("user_id", user.id).single();
+    const { data: doc } = await supabase.from("financial_documents").select("*").eq("id", document_id).single();
     if (!doc) return new Response(JSON.stringify({ error: "Document not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
     await supabase.from("financial_documents").update({ extraction_status: "running" }).eq("id", document_id);
@@ -93,6 +95,8 @@ Rules:
         },
       },
       toolRequired: ["months"],
+      // Bank statement output is small — monthly summaries don't need 8192 tokens
+      maxTokens: 4096,
       retries: 2,
     }) as any;
 
@@ -131,6 +135,10 @@ Rules:
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("extract-bank-statement error:", msg);
+    // Always flip to failed so the document never stays stuck at "running"
+    await supabase.from("financial_documents")
+      .update({ extraction_status: "failed", extraction_error: msg })
+      .eq("id", document_id);
     return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   }
 });

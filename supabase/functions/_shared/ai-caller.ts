@@ -35,13 +35,15 @@ export interface CallAIOptions {
   toolRequired?:   string[];
   maxTokens?:      number;
   retries?:        number;
+  // Per-attempt timeout in ms. Default 110 s — keeps total under Supabase's 150 s wall-clock limit.
+  timeoutMs?:      number;
 }
 
 export async function callAI(opts: CallAIOptions): Promise<Record<string, unknown>> {
   const {
     systemPrompt, userText, files = [],
     toolName, toolDescription, toolSchema, toolRequired = [],
-    maxTokens = 8192, retries = 2,
+    maxTokens = 8192, retries = 2, timeoutMs = 110_000,
   } = opts;
 
   const key = Deno.env.get("ANTHROPIC_API_KEY");
@@ -53,6 +55,7 @@ export async function callAI(opts: CallAIOptions): Promise<Record<string, unknow
     try {
       const res = await fetch(CLAUDE_API, {
         method: "POST",
+        signal: AbortSignal.timeout(timeoutMs),
         headers: {
           "x-api-key": key,
           "anthropic-version": ANTHROPIC_VER,

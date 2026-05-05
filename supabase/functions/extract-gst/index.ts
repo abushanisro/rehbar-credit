@@ -28,7 +28,7 @@ Deno.serve(async (req) => {
     const { data: { user } } = await userClient.auth.getUser();
     if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-    const { data: doc } = await supabase.from("financial_documents").select("*").eq("id", document_id).eq("user_id", user.id).single();
+    const { data: doc } = await supabase.from("financial_documents").select("*").eq("id", document_id).single();
     if (!doc) return new Response(JSON.stringify({ error: "Document not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
     await supabase.from("financial_documents").update({ extraction_status: "running" }).eq("id", document_id);

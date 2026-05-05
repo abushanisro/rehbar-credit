@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useLocation, useMatch } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -6,7 +6,6 @@ import { Textarea } from "@/components/ui/textarea";
 
 interface Message { role: "user" | "assistant"; content: string }
 
-// Starters vary based on where the user is
 const STARTERS_CASE = [
   "What are the key risks in this deal?",
   "Summarise the DSCR trend across years",
@@ -31,56 +30,128 @@ const STARTERS_COMPANIES = [
 
 function usePageContext() {
   const location = useLocation();
-  const caseMatch  = useMatch("/case/:id");
-  const compMatch  = useMatch("/companies/:id");
+  const caseMatch = useMatch("/case/:id");
+  const compMatch = useMatch("/companies/:id");
   const path = location.pathname;
 
   if (caseMatch?.params.id) return { caseId: caseMatch.params.id, pageName: "Case Detail", starters: STARTERS_CASE };
   if (compMatch?.params.id) return { caseId: undefined, pageName: "Company Detail", starters: STARTERS_COMPANIES };
-  if (path === "/companies")  return { caseId: undefined, pageName: "Companies",       starters: STARTERS_COMPANIES };
-  if (path === "/new")        return { caseId: undefined, pageName: "New Case",         starters: STARTERS_PIPELINE };
+  if (path === "/companies") return { caseId: undefined, pageName: "Companies", starters: STARTERS_COMPANIES };
+  if (path === "/new")       return { caseId: undefined, pageName: "New Case",   starters: STARTERS_PIPELINE };
   return { caseId: undefined, pageName: "Pipeline", starters: STARTERS_PIPELINE };
+}
+
+const PANEL_W = 420;
+const PANEL_H = 520;
+const BTN_W   = 160;
+const BTN_H   = 44;
+
+function clamp(val: number, min: number, max: number) {
+  return Math.max(min, Math.min(val, max));
+}
+
+function getSavedPos(): { x: number; y: number } | null {
+  try {
+    const raw = localStorage.getItem("analyst-chat-pos");
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return null;
 }
 
 export function AnalystChat() {
   const { caseId, pageName, starters } = usePageContext();
   const location = useLocation();
 
-  const [open, setOpen]         = useState(false);
-  const [showButton, setShowButton] = useState(true);
+  const [open, setOpen]       = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput]       = useState("");
-  const [loading, setLoading]   = useState(false);
-  const bottomRef               = useRef<HTMLDivElement>(null);
+  const [input, setInput]     = useState("");
+  const [loading, setLoading] = useState(false);
+  const messagesRef           = useRef<HTMLDivElement>(null);
 
-  // Reset conversation when page changes so stale case data isn't carried forward
-  useEffect(() => {
-    setMessages([]);
-  }, [location.pathname]);
+  // ── position state ──────────────────────────────────────────────────────────
+  const [pos, setPos] = useState<{ x: number; y: number }>(() => {
+    const saved = getSavedPos();
+    if (saved) return saved;
+    return {
+      x: typeof window !== "undefined" ? window.innerWidth  - PANEL_W - 24 : 200,
+      y: typeof window !== "undefined" ? window.innerHeight - BTN_H   - 24 : 200,
+    };
+  });
+
+  // ── drag state (refs, not state, to avoid re-renders during drag) ───────────
+  const draggingRef   = useRef(false);
+  const hasDraggedRef = useRef(false);
+  const dragOrigin    = useRef({ mx: 0, my: 0, px: 0, py: 0 });
+
+  const startDrag = useCallback((e: React.MouseEvent | React.PointerEvent) => {
+    e.preventDefault();
+    draggingRef.current   = true;
+    hasDraggedRef.current = false;
+    dragOrigin.current = {
+      mx: e.clientX,
+      my: e.clientY,
+      px: pos.x,
+      py: pos.y,
+    };
+    (e.currentTarget as HTMLElement).setPointerCapture?.((e as React.PointerEvent).pointerId ?? 0);
+  }, [pos]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const onMove = (e: PointerEvent) => {
+      if (!draggingRef.current) return;
+      const dx = e.clientX - dragOrigin.current.mx;
+      const dy = e.clientY - dragOrigin.current.my;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) hasDraggedRef.current = true;
+      const maxX = window.innerWidth  - (open ? PANEL_W : BTN_W) - 4;
+      const maxY = window.innerHeight - (open ? PANEL_H : BTN_H) - 4;
+      const newPos = { x: clamp(dragOrigin.current.px + dx, 4, maxX), y: clamp(dragOrigin.current.py + dy, 4, maxY) };
+      setPos(newPos);
+      localStorage.setItem("analyst-chat-pos", JSON.stringify(newPos));
+    };
+    const onUp = () => { draggingRef.current = false; };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup",   onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup",   onUp);
+    };
+  }, [open]);
+
+  // keep inside viewport on resize
+  useEffect(() => {
+    const onResize = () => {
+      setPos(p => ({
+        x: clamp(p.x, 4, window.innerWidth  - (open ? PANEL_W : BTN_W) - 4),
+        y: clamp(p.y, 4, window.innerHeight - (open ? PANEL_H : BTN_H) - 4),
+      }));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [open]);
+
+  // ── reset messages on page change ──────────────────────────────────────────
+  useEffect(() => { setMessages([]); }, [location.pathname]);
+
+  useEffect(() => {
+    if (messagesRef.current) {
+      messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+    }
   }, [messages, loading]);
 
   useEffect(() => {
-    const handleToggle = () => {
-      setShowButton(true);
-      setOpen(o => !o);
-    };
+    const handleToggle = () => setOpen(o => !o);
     window.addEventListener("toggle-analyst-chat", handleToggle);
     return () => window.removeEventListener("toggle-analyst-chat", handleToggle);
   }, []);
 
-
+  // ── send ────────────────────────────────────────────────────────────────────
   const send = async (text: string) => {
     const userMsg = text.trim();
     if (!userMsg || loading) return;
     setInput("");
-
     const next: Message[] = [...messages, { role: "user", content: userMsg }];
     setMessages(next);
     setLoading(true);
-
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch(
@@ -117,143 +188,160 @@ export function AnalystChat() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); }
   };
 
+  const handleToggleClick = () => {
+    if (!hasDraggedRef.current) setOpen(o => !o);
+  };
+
+  // ── panel renders at pos — drag constraints above guarantee it stays in viewport
+  const panelLeft = clamp(pos.x, 4, window.innerWidth  - PANEL_W - 4);
+  const panelTop  = clamp(pos.y, 4, window.innerHeight - PANEL_H - 4);
+
   return (
     <>
-      {/* Toggle button — fixed bottom-right on every page */}
-      <button
-        onClick={() => setOpen(o => !o)}
-        className={`fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-full bg-[#E8721C] px-4 py-2.5 text-sm font-medium text-white shadow-lg hover:bg-[#d0631a] transition-all hover:scale-105 active:scale-95 ${showButton ? "" : "opacity-0 pointer-events-none"}`}
+      {/* ── Floating toggle button (visible when panel is closed) ─────────── */}
+      {!open && (
+        <button
+          onPointerDown={startDrag}
+          onClick={handleToggleClick}
+          style={{ left: pos.x, top: pos.y, touchAction: "none" }}
+          className="fixed z-50 flex items-center gap-2 rounded-full bg-[#E8721C] px-4 py-2.5 text-sm font-medium text-white shadow-lg hover:bg-[#d0631a] transition-colors select-none cursor-grab active:cursor-grabbing"
+        >
+          <span className="text-base leading-none">◈</span>
+          <span>Ask Analyst</span>
+          <span className="text-[10px] text-white/60 ml-0.5">F4</span>
+        </button>
+      )}
+
+      {/* ── Chat panel ───────────────────────────────────────────────────────── */}
+      <div
+        style={{
+          left: panelLeft,
+          top: panelTop,
+          width: PANEL_W,
+          maxHeight: PANEL_H,
+          touchAction: "none",
+        }}
+        className={`fixed z-50 flex flex-col rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] shadow-2xl overflow-hidden transition-[opacity,transform] duration-200 ${
+          open ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"
+        }`}
       >
-        {open ? (
-          <>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"></line>
-              <line x1="6" y1="6" x2="18" y2="18"></line>
+        {/* Header — drag handle */}
+        <div
+          onPointerDown={startDrag}
+          className="flex items-center gap-2 border-b border-[#2a2a2a] px-4 py-3 cursor-grab active:cursor-grabbing select-none"
+          title="Drag to move"
+        >
+          <span className="text-[#E8721C] text-lg leading-none">◈</span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-white leading-none">Rehbar Analyst</p>
+            <p className="text-[10px] text-[#666] mt-0.5">
+              AI · Senior Credit Analyst
+              <span className="ml-2 text-[#444]">— {pageName}</span>
+            </p>
+          </div>
+
+          {/* drag hint */}
+          <div className="ml-2 text-[#333] flex-shrink-0" title="Drag to reposition">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/>
+              <circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/>
+              <circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/>
             </svg>
-            <span>Close</span>
-          </>
-        ) : (
-          <>
-            <span className="text-base">◈</span>
-            <span>Ask Analyst (F4)</span>
-          </>
-        )}
-      </button>
+          </div>
 
-      {/* Panel */}
-      <div className={`fixed bottom-20 right-6 z-50 flex flex-col w-[420px] max-h-[75vh] rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] shadow-2xl overflow-hidden transition-all duration-300 ease-in-out ${open ? "opacity-100 translate-y-0" : "opacity-0 translate-y-10 pointer-events-none"}`}>
-        {/* Header */}
-        <div className="flex items-center gap-2 border-b border-[#2a2a2a] px-4 py-3">
-
-            <span className="text-[#E8721C] text-lg">◈</span>
-            <div>
-              <p className="text-sm font-semibold text-white">Rehbar Analyst</p>
-              <p className="text-[10px] text-[#666]">
-                AI · Senior Credit Analyst
-                <span className="ml-2 text-[#444]">— {pageName}</span>
-              </p>
-            </div>
-            <div className="ml-auto flex items-center gap-3">
-              <span className="text-[10px] text-[#444] font-mono">claude-sonnet-4-6</span>
+          <div className="ml-auto flex items-center gap-3 flex-shrink-0">
+            <span className="text-[10px] text-[#444] font-mono">claude-sonnet-4-6</span>
+            {messages.length > 0 && (
               <button
-                onClick={() => { setShowButton(s => !s); setOpen(false); }}
+                onPointerDown={e => e.stopPropagation()}
+                onClick={() => setMessages([])}
                 className="text-[#666] hover:text-white transition-colors p-1"
-                title={showButton ? "Hide button" : "Show button"}
+                title="Clear conversation"
               >
-                {showButton ? (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
-                    <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
-                    <line x1="1" y1="1" x2="23" y2="23"/>
-                  </svg>
-                ) : (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                    <circle cx="12" cy="12" r="3"/>
-                  </svg>
-                )}
-              </button>
-              <button
-                onClick={() => setOpen(false)}
-                className="text-[#666] hover:text-white transition-colors p-1"
-                title="Close"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18"></line>
-                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>
                 </svg>
               </button>
-            </div>
-          </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
-            {messages.length === 0 && (
-              <div className="space-y-2">
-                <p className="text-xs text-[#555] mb-3">
-                  {caseId
-                    ? "Ask me anything about this case."
-                    : `Ask me anything about your ${pageName.toLowerCase()}.`}
-                </p>
-                {starters.map(s => (
-                  <button
-                    key={s}
-                    onClick={() => send(s)}
-                    className="block w-full text-left text-xs text-[#888] border border-[#222] rounded px-3 py-1.5 hover:border-[#E8721C] hover:text-[#E8721C] transition-colors"
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
             )}
-
-            {messages.map((m, i) => (
-              <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div
-                  className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap leading-relaxed ${
-                    m.role === "user"
-                      ? "bg-[#E8721C] text-white"
-                      : "bg-[#1a1a1a] text-[#d0d0d0] border border-[#2a2a2a]"
-                  }`}
-                >
-                  {m.content}
-                </div>
-              </div>
-            ))}
-
-            {loading && (
-              <div className="flex justify-start">
-                <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg px-3 py-2 text-sm text-[#555]">
-                  <span className="animate-pulse">Analysing...</span>
-                </div>
-              </div>
-            )}
-
-            <div ref={bottomRef} />
-          </div>
-
-          {/* Input */}
-          <div className="border-t border-[#2a2a2a] p-3 flex gap-2">
-            <Textarea
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKey}
-              placeholder="Ask a question… (Enter to send)"
-              rows={2}
-              className="resize-none text-sm bg-[#1a1a1a] border-[#2a2a2a] text-white placeholder:text-[#444] focus-visible:ring-[#E8721C]"
-              disabled={loading}
-            />
-            <Button
-              onClick={() => send(input)}
-              disabled={loading || !input.trim()}
-              size="sm"
-              className="self-end bg-[#E8721C] hover:bg-[#d0631a] text-white"
+            <button
+              onPointerDown={e => e.stopPropagation()}
+              onClick={() => setOpen(false)}
+              className="text-[#666] hover:text-white transition-colors p-1"
+              title="Close"
             >
-              Send
-            </Button>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
           </div>
         </div>
 
+        {/* Messages */}
+        <div ref={messagesRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
+          {messages.length === 0 && (
+            <div className="space-y-2">
+              <p className="text-xs text-[#555] mb-3">
+                {caseId
+                  ? "Ask me anything about this case."
+                  : `Ask me anything about your ${pageName.toLowerCase()}.`}
+              </p>
+              {starters.map(s => (
+                <button
+                  key={s}
+                  onClick={() => send(s)}
+                  className="block w-full text-left text-xs text-[#888] border border-[#222] rounded px-3 py-1.5 hover:border-[#E8721C] hover:text-[#E8721C] transition-colors"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {messages.map((m, i) => (
+            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap leading-relaxed ${
+                  m.role === "user"
+                    ? "bg-[#E8721C] text-white"
+                    : "bg-[#1a1a1a] text-[#d0d0d0] border border-[#2a2a2a]"
+                }`}
+              >
+                {m.content}
+              </div>
+            </div>
+          ))}
+
+          {loading && (
+            <div className="flex justify-start">
+              <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg px-3 py-2 text-sm text-[#555]">
+                <span className="animate-pulse">Analysing...</span>
+              </div>
+            </div>
+          )}
+
+        </div>
+
+        {/* Input */}
+        <div className="border-t border-[#2a2a2a] p-3 flex gap-2">
+          <Textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder="Ask a question… (Enter to send)"
+            rows={2}
+            className="resize-none text-sm bg-[#1a1a1a] border-[#2a2a2a] text-white placeholder:text-[#444] focus-visible:ring-[#E8721C]"
+            disabled={loading}
+          />
+          <Button
+            onClick={() => send(input)}
+            disabled={loading || !input.trim()}
+            size="sm"
+            className="self-end bg-[#E8721C] hover:bg-[#d0631a] text-white"
+          >
+            Send
+          </Button>
+        </div>
+      </div>
     </>
   );
 }

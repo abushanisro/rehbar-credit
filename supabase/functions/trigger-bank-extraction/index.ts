@@ -1,7 +1,8 @@
 /**
- * Rehbar — Trigger Analysis Edge Function
- * Proxies a request to Trigger.dev to start the analyze-financial-documents task.
- * Required env vars: TRIGGER_SECRET_KEY
+ * Rehbar — Trigger Bank Extraction
+ * Queues the extract-bank-statements Trigger.dev task and returns immediately.
+ * Frontend polls financial_documents.extraction_status for progress.
+ * Required env: TRIGGER_SECRET_KEY
  */
 
 const corsHeaders = {
@@ -26,13 +27,13 @@ Deno.serve(async (req) => {
 
     const body: {
       case_id: string;
-      document_ids: string[];
       user_id: string;
+      document_ids: string[];
       excel_texts?: Record<string, string>;
     } = await req.json();
 
-    if (!body.case_id || !body.document_ids?.length || !body.user_id) {
-      return new Response(JSON.stringify({ error: "Missing required fields: case_id, document_ids, user_id" }), {
+    if (!body.case_id || !body.user_id || !body.document_ids?.length) {
+      return new Response(JSON.stringify({ error: "Missing required fields: case_id, user_id, document_ids" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -44,35 +45,33 @@ Deno.serve(async (req) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        taskIdentifier: "analyze-financial-documents",
+        taskIdentifier: "extract-bank-statements",
         payload: {
-          case_id: body.case_id,
+          case_id:      body.case_id,
+          user_id:      body.user_id,
           document_ids: body.document_ids,
-          user_id: body.user_id,
-          excel_texts: body.excel_texts ?? {},
+          excel_texts:  body.excel_texts ?? {},
         },
       }),
     });
 
-    const json = await res.json();
+    const json = await res.json().catch(() => ({}));
     if (!res.ok) {
       console.error("Trigger.dev error:", JSON.stringify(json));
-      return new Response(JSON.stringify({ error: json.message ?? "Trigger.dev error" }), {
+      return new Response(JSON.stringify({ error: (json as Record<string, unknown>).message ?? "Trigger.dev error" }), {
         status: res.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    return new Response(JSON.stringify({ ok: true, run_id: json.id }), {
+    return new Response(JSON.stringify({ ok: true, run_id: (json as Record<string, unknown>).id }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error("trigger-analysis error:", msg);
+    console.error("trigger-bank-extraction error:", msg);
     return new Response(JSON.stringify({ error: msg }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });
-
-export {};
