@@ -136,6 +136,8 @@ export default function NewCase() {
   const [scanStage, setScanStage] = useState("");
   const [scanPct, setScanPct] = useState(0);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [webEnriching, setWebEnriching] = useState(false);
+  const [webEnrichPct, setWebEnrichPct] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([]);
   const cancelledRef = useRef(false);
@@ -154,6 +156,33 @@ export default function NewCase() {
     setCompanySuggestions((data ?? []) as CompanySuggestion[]);
     setShowSuggestions(true);
   }, []);
+
+  const runWebEnrich = useCallback(async () => {
+    if (!form.client_name.trim() && !form.website.trim()) return;
+    setWebEnriching(true);
+    setWebEnrichPct(5);
+    setScanResult(null);
+    const tick = setInterval(() => setWebEnrichPct(p => p < 88 ? p + 2 : p), 400);
+    try {
+      const { data, error } = await supabase.functions.invoke("web-enrich-company", {
+        body: {
+          company_name: form.client_name.trim() || undefined,
+          website: form.website.trim() || undefined,
+        },
+      });
+      clearInterval(tick);
+      if (error) throw new Error(error.message);
+      if (!data?.ok) throw new Error(data?.error ?? "Enrichment failed");
+      setWebEnrichPct(100);
+      setScanResult(data.extracted as ScanResult);
+      toast.success("Company info found — review and apply");
+    } catch (e) {
+      clearInterval(tick);
+      toast.error("Web search failed: " + (e instanceof Error ? e.message : "unknown"));
+    } finally {
+      setTimeout(() => { setWebEnriching(false); setWebEnrichPct(0); }, 400);
+    }
+  }, [form.client_name, form.website]);
 
   const onClientNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -462,6 +491,20 @@ export default function NewCase() {
                 />
               </div>
 
+              <div className="col-span-2">
+                <button
+                  type="button"
+                  onClick={runWebEnrich}
+                  disabled={webEnriching || (!form.client_name.trim() && !form.website.trim())}
+                  className="w-full border border-primary/40 bg-primary/5 text-primary px-4 py-2 text-xs tracking-widest font-bold hover:bg-primary/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                >
+                  {webEnriching ? "SEARCHING WEB & FILLING FORM…" : "WEB SEARCH & AUTO-FILL ALL FIELDS"}
+                </button>
+                {!form.client_name.trim() && !form.website.trim() && (
+                  <p className="text-[10px] text-foreground/40 mt-1 tracking-wider">Enter client name or website above first</p>
+                )}
+              </div>
+
               <div>
                 <label className={labelCls}>Legal Constitution</label>
                 <select className={inputCls} value={form.legal_constitution} onChange={set("legal_constitution")}>
@@ -638,7 +681,23 @@ export default function NewCase() {
                 )}
               </div>
 
-              {/* Progress */}
+              {/* Web search progress */}
+              {webEnriching && (
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-foreground/60 text-xs">
+                    <span>Searching web &amp; analysing…</span>
+                    <span className="font-mono text-primary">{webEnrichPct}%</span>
+                  </div>
+                  <div className="w-full h-1 bg-border">
+                    <div
+                      className="h-1 bg-primary transition-all duration-300"
+                      style={{ width: `${webEnrichPct}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Document scan progress */}
               {scanning && (
                 <div className="space-y-1.5">
                   <div className="flex justify-between text-foreground/60">

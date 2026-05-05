@@ -3253,6 +3253,31 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
   const startEdit = (d: DocRow) => { setEditingId(d.id); setEditClass(d.doc_class); setEditFy(d.fiscal_year ? String(d.fiscal_year) : ""); };
   const saveEdit  = (id: string) => { onEdit(id, editClass, editFy ? Number(editFy) : null); setEditingId(null); };
 
+  const handleDownloadDoc = async (d: DocRow) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) { toast.error("Not authenticated"); return; }
+    try {
+      const encodedPath = d.file_path.split("/").map(encodeURIComponent).join("/");
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/authenticated/case-files/${encodedPath}`;
+      const res = await fetch(url, {
+        headers: {
+          "Authorization": `Bearer ${session.access_token}`,
+          "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+        },
+      });
+      if (!res.ok) { const body = await res.text().catch(() => ""); throw new Error(`${res.status}: ${body}`); }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = d.file_name;
+      a.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (e) {
+      toast.error("Download failed: " + (e instanceof Error ? e.message : "unknown error"));
+    }
+  };
+
   const pendingCount = fileQueue.filter(i => i.status === "pending").length;
   const cellCls = "bg-input border border-border text-primary px-1 py-0.5 text-xs";
 
@@ -3395,7 +3420,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, busy, docs, progress
               const isEditing = editingId === d.id;
               return (
                 <tr key={d.id} className="border-b border-border/30">
-                  <td className="py-1 text-primary max-w-[180px] truncate" title={d.file_name}>{d.file_name}</td>
+                  <td className="py-1 max-w-[180px] truncate"><button type="button" onClick={() => handleDownloadDoc(d)} title="Click to download" className="text-primary hover:underline hover:text-accent cursor-pointer text-left truncate max-w-full">{d.file_name}</button></td>
                   <td className="text-center text-accent">{d.file_type.toUpperCase()}</td>
                   <td className="text-center text-foreground/80 px-1">
                     {isEditing ? (
