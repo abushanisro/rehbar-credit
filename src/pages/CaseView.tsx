@@ -220,14 +220,21 @@ function CaseViewInner() {
         });
 
         if (triggerErr) {
-          // Fallback: fire individual extractions in parallel (fire-and-forget)
-          ids.forEach(id => {
-            supabase.functions.invoke("extract-bank-statement", {
+          // Fallback: call extract-bank-statement for each doc; await all so errors surface
+          const results = await Promise.allSettled(
+            ids.map(id => supabase.functions.invoke("extract-bank-statement", {
               body: { case_id: cc.id, document_id: id },
-            });
-          });
+            }))
+          );
+          const failed = results.filter(r => r.status === "rejected" || (r.status === "fulfilled" && r.value.error)).length;
+          if (failed > 0) {
+            toast.warning(`${ids.length - failed} extracted, ${failed} failed — check error column`);
+          } else {
+            toast.success(`${ids.length} bank statement${ids.length > 1 ? "s" : ""} extracted`);
+          }
+        } else {
+          toast.success(`Re-running ${ids.length} bank statement${ids.length > 1 ? "s" : ""} in background`);
         }
-        toast.success(`Re-running ${ids.length} bank statement${ids.length > 1 ? "s" : ""}`);
 
       } else if (doc.doc_class === "gst_return") {
         await supabase.from("financial_documents")
@@ -1650,9 +1657,12 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
   const fmtN = (v: number | null) => v == null ? null : v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
 
-  const avgCredits  = data.length ? data.reduce((s, r) => s + (r.total_credits ?? 0), 0) / data.length : null;
-  const avgDebits   = data.length ? data.reduce((s, r) => s + (r.total_debits ?? 0), 0) / data.length : null;
-  const avgBalance  = data.length ? data.reduce((s, r) => s + (r.avg_balance ?? r.closing_balance ?? 0), 0) / data.length : null;
+  const creditData  = data.filter(r => r.total_credits != null);
+  const avgCredits  = creditData.length ? creditData.reduce((s, r) => s + r.total_credits!, 0) / creditData.length : null;
+  const debitData   = data.filter(r => r.total_debits != null);
+  const avgDebits   = debitData.length ? debitData.reduce((s, r) => s + r.total_debits!, 0) / debitData.length : null;
+  const balData     = data.filter(r => r.avg_balance != null);
+  const avgBalance  = balData.length ? balData.reduce((s, r) => s + r.avg_balance!, 0) / balData.length : null;
   const totalBounce = data.reduce((s, r) => s + (r.bounce_inward ?? 0), 0);
   const bounceRate  = data.length && totalBounce ? ((totalBounce / data.length)).toFixed(1) : null;
   const bankName    = data[0]?.bank_name;
@@ -1904,7 +1914,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
                 </thead>
                 <tbody>
                   {data.map(row => {
-                    const net = (row.total_credits ?? 0) - (row.total_debits ?? 0);
+                    const net = row.total_credits != null && row.total_debits != null ? row.total_credits - row.total_debits : null;
                     const bounce = (row.bounce_inward ?? 0) + (row.bounce_outward ?? 0);
                     return (
                       <tr key={row.id} className="border-b border-border/30">
@@ -1916,7 +1926,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
                         <td className="text-right pr-2 tabular-nums text-accent">{fmt(row.avg_balance)}</td>
                         <td className="text-right pr-2 tabular-nums text-warning">{fmt(row.emi_outflows)}</td>
                         <td className={`text-center pr-2 font-bold ${bounce > 0 ? "text-destructive" : "text-success"}`}>{bounce > 0 ? bounce : "—"}</td>
-                        <td className={`text-right tabular-nums font-bold ${net >= 0 ? "text-success" : "text-destructive"}`}>{net >= 0 ? "+" : ""}{fmt(net)}</td>
+                        <td className={`text-right tabular-nums font-bold ${net == null ? "text-muted-foreground" : net >= 0 ? "text-success" : "text-destructive"}`}>{net == null ? "—" : (net >= 0 ? "+" : "") + fmt(net)}</td>
                       </tr>
                     );
                   })}
@@ -1930,7 +1940,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
             <Panel title="CREDITS vs DEBITS TREND" ticker="MONTHLY CASH FLOW">
               <div className="h-52">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={data.map(r => ({ month: r.month.slice(5), credits: r.total_credits, debits: r.total_debits, balance: r.avg_balance ?? r.closing_balance }))} margin={{ top: 4, right: 20, left: 0, bottom: 0 }}>
+                  <ComposedChart data={data.map(r => ({ month: r.month.slice(5), credits: r.total_credits, debits: r.total_debits, balance: r.avg_balance }))} margin={{ top: 4, right: 20, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
                     <XAxis dataKey="month" tick={{ fill: "#6b7280", fontSize: 10 }} />
                     <YAxis tick={{ fill: "#6b7280", fontSize: 10 }} width={54} tickFormatter={v => Math.abs(v) >= 1000 ? `${(v/1000).toFixed(0)}K` : String(v)} />
@@ -3572,7 +3582,12 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
                       : (d.fiscal_year ?? "—")}
                   </td>
                   <td className={`text-center ${d.extraction_status === "extracted" ? "text-success" : d.extraction_status === "failed" ? "text-destructive" : d.extraction_status === "running" ? "text-warning animate-pulse" : "text-warning"}`}>
-                    {d.extraction_status.toUpperCase()}
+                    <span title={(d as DocRow & { extraction_error?: string }).extraction_error ?? ""}>{d.extraction_status.toUpperCase()}</span>
+                    {(d as DocRow & { extraction_error?: string }).extraction_error && d.extraction_status === "failed" && (
+                      <div className="text-[9px] text-destructive/60 max-w-[140px] truncate" title={(d as DocRow & { extraction_error?: string }).extraction_error!}>
+                        {(d as DocRow & { extraction_error?: string }).extraction_error}
+                      </div>
+                    )}
                   </td>
                   <td className="text-center pl-2 whitespace-nowrap">
                     {isEditing ? (
