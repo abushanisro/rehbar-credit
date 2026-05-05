@@ -1652,10 +1652,41 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
   const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [editCell, setEditCell] = useState<{ id: string; field: string; value: string } | null>(null);
   const fileRef                 = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
   const fmtN = (v: number | null) => v == null ? null : v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+
+  const commitBankEdit = async () => {
+    if (!editCell) return;
+    const snap = editCell;
+    setEditCell(null);
+    const raw = snap.value.trim().replace(/,/g, "");
+    const num = raw === "" ? null : parseFloat(raw);
+    if (raw !== "" && (isNaN(num!) || !isFinite(num!))) return;
+    await supabase.from("bank_statement_data").update({ [snap.field]: num }).eq("id", snap.id);
+    await onReload();
+  };
+
+  const bankNumCell = (id: string, field: string, val: number | null) => {
+    if (editCell?.id === id && editCell?.field === field) return (
+      <input autoFocus
+        className="w-full bg-transparent border-b border-primary text-right tabular-nums outline-none"
+        style={{ fontSize: "inherit", fontFamily: "inherit", minWidth: "3rem" }}
+        value={editCell.value}
+        onChange={e => setEditCell(ec => ec ? { ...ec, value: e.target.value } : ec)}
+        onBlur={commitBankEdit}
+        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitBankEdit(); } if (e.key === "Escape") setEditCell(null); }}
+      />
+    );
+    return (
+      <span className="cursor-pointer hover:text-primary transition-colors"
+        onClick={() => setEditCell({ id, field, value: val == null ? "" : String(val) })}>
+        {fmt(val)}
+      </span>
+    );
+  };
 
   const creditData  = data.filter(r => r.total_credits != null);
   const avgCredits  = creditData.length ? creditData.reduce((s, r) => s + r.total_credits!, 0) / creditData.length : null;
@@ -1908,24 +1939,27 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
                     <th className="text-right pr-2">CLOSING</th>
                     <th className="text-right pr-2">AVG BAL</th>
                     <th className="text-right pr-2">EMI OUTFLOW</th>
-                    <th className="text-center pr-2">BOUNCES</th>
+                    <th className="text-center pr-2">BNCE↓</th>
+                    <th className="text-center pr-2">BNCE↑</th>
                     <th className="text-right">NET FLOW</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.map(row => {
                     const net = row.total_credits != null && row.total_debits != null ? row.total_credits - row.total_debits : null;
-                    const bounce = (row.bounce_inward ?? 0) + (row.bounce_outward ?? 0);
+                    const bi = row.bounce_inward ?? 0;
+                    const bo = row.bounce_outward ?? 0;
                     return (
                       <tr key={row.id} className="border-b border-border/30">
                         <td className="py-1 pr-2 font-medium">{row.month}</td>
-                        <td className="text-right pr-2 tabular-nums text-muted-foreground">{fmt(row.opening_balance)}</td>
-                        <td className="text-right pr-2 tabular-nums text-success">{fmt(row.total_credits)}</td>
-                        <td className="text-right pr-2 tabular-nums text-destructive">{fmt(row.total_debits)}</td>
-                        <td className="text-right pr-2 tabular-nums font-medium">{fmt(row.closing_balance)}</td>
-                        <td className="text-right pr-2 tabular-nums text-accent">{fmt(row.avg_balance)}</td>
-                        <td className="text-right pr-2 tabular-nums text-warning">{fmt(row.emi_outflows)}</td>
-                        <td className={`text-center pr-2 font-bold ${bounce > 0 ? "text-destructive" : "text-success"}`}>{bounce > 0 ? bounce : "—"}</td>
+                        <td className="text-right pr-2 tabular-nums text-muted-foreground">{bankNumCell(row.id, "opening_balance", row.opening_balance)}</td>
+                        <td className="text-right pr-2 tabular-nums text-success">{bankNumCell(row.id, "total_credits", row.total_credits)}</td>
+                        <td className="text-right pr-2 tabular-nums text-destructive">{bankNumCell(row.id, "total_debits", row.total_debits)}</td>
+                        <td className="text-right pr-2 tabular-nums font-medium">{bankNumCell(row.id, "closing_balance", row.closing_balance)}</td>
+                        <td className="text-right pr-2 tabular-nums text-accent">{bankNumCell(row.id, "avg_balance", row.avg_balance)}</td>
+                        <td className="text-right pr-2 tabular-nums text-warning">{bankNumCell(row.id, "emi_outflows", row.emi_outflows)}</td>
+                        <td className={`text-center pr-2 font-bold ${bi > 0 ? "text-destructive" : "text-muted-foreground"}`}>{bankNumCell(row.id, "bounce_inward", row.bounce_inward)}</td>
+                        <td className={`text-center pr-2 font-bold ${bo > 0 ? "text-warning" : "text-muted-foreground"}`}>{bankNumCell(row.id, "bounce_outward", row.bounce_outward)}</td>
                         <td className={`text-right tabular-nums font-bold ${net == null ? "text-muted-foreground" : net >= 0 ? "text-success" : "text-destructive"}`}>{net == null ? "—" : (net >= 0 ? "+" : "") + fmt(net)}</td>
                       </tr>
                     );
@@ -1988,9 +2022,94 @@ function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Ta
   const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
   const [dragOver, setDragOver]   = useState(false);
+  const [editCell, setEditCell]   = useState<{ id: string; field: string; value: string } | null>(null);
   const fileRef                   = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+
+  const commitGstNum = async () => {
+    if (!editCell) return;
+    const snap = editCell;
+    setEditCell(null);
+    const raw = snap.value.trim().replace(/,/g, "");
+    const num = raw === "" ? null : parseFloat(raw);
+    if (raw !== "" && (isNaN(num!) || !isFinite(num!))) return;
+    await supabase.from("gst_return_data").update({ [snap.field]: num }).eq("id", snap.id);
+    await onReload();
+  };
+
+  const commitGstText = async () => {
+    if (!editCell) return;
+    const snap = editCell;
+    setEditCell(null);
+    const val = snap.value.trim() || null;
+    await supabase.from("gst_return_data").update({ [snap.field]: val }).eq("id", snap.id);
+    await onReload();
+  };
+
+  const gstNumCell = (id: string, field: string, val: number | null) => {
+    if (editCell?.id === id && editCell?.field === field) return (
+      <input autoFocus
+        className="w-full bg-transparent border-b border-primary text-right tabular-nums outline-none"
+        style={{ fontSize: "inherit", fontFamily: "inherit", minWidth: "3rem" }}
+        value={editCell.value}
+        onChange={e => setEditCell(ec => ec ? { ...ec, value: e.target.value } : ec)}
+        onBlur={commitGstNum}
+        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitGstNum(); } if (e.key === "Escape") setEditCell(null); }}
+      />
+    );
+    return (
+      <span className="cursor-pointer hover:text-primary transition-colors"
+        onClick={() => setEditCell({ id, field, value: val == null ? "" : String(val) })}>
+        {fmt(val)}
+      </span>
+    );
+  };
+
+  const gstTxtCell = (id: string, field: string, val: string | null, cls = "") => {
+    if (editCell?.id === id && editCell?.field === field) return (
+      <input autoFocus
+        className="w-full bg-transparent border-b border-primary outline-none"
+        style={{ fontSize: "inherit", fontFamily: "inherit", minWidth: "3rem" }}
+        value={editCell.value}
+        onChange={e => setEditCell(ec => ec ? { ...ec, value: e.target.value } : ec)}
+        onBlur={commitGstText}
+        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitGstText(); } if (e.key === "Escape") setEditCell(null); }}
+      />
+    );
+    return (
+      <span className={`cursor-pointer hover:text-primary transition-colors ${cls}`}
+        onClick={() => setEditCell({ id, field, value: val ?? "" })}>
+        {val ?? "—"}
+      </span>
+    );
+  };
+
+  const gstStatusCell = (id: string, val: string) => {
+    if (editCell?.id === id && editCell?.field === "filing_status") return (
+      <select autoFocus
+        className="bg-background border border-primary text-[9px] font-bold tracking-widest outline-none cursor-pointer"
+        value={editCell.value}
+        onChange={async e => {
+          const snap = { id, value: e.target.value };
+          setEditCell(null);
+          await supabase.from("gst_return_data").update({ filing_status: snap.value }).eq("id", snap.id);
+          await onReload();
+        }}
+        onBlur={() => setEditCell(null)}
+      >
+        <option value="filed">FILED</option>
+        <option value="late">LATE</option>
+        <option value="not_filed">NOT FILED</option>
+      </select>
+    );
+    return (
+      <span className={`cursor-pointer hover:underline decoration-dotted underline-offset-2 text-[9px] font-bold tracking-widest ${statusCls(val)}`}
+        onClick={() => setEditCell({ id, field: "filing_status", value: val })}>
+        {val.toUpperCase().replace("_", " ")}
+      </span>
+    );
+  };
 
   const totalTurnover = data.reduce((s, r) => s + (r.total_turnover ?? 0), 0);
   const totalTax      = data.reduce((s, r) => s + (r.net_tax_paid ?? 0), 0);
@@ -2238,16 +2357,16 @@ function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Ta
                 <tbody>
                   {data.map(row => (
                     <tr key={row.id} className="border-b border-border/30">
-                      <td className="py-1 pr-2 font-medium">{row.period}</td>
-                      <td className="pr-2 text-accent text-[10px]">{row.return_type ?? "—"}</td>
-                      <td className="text-right pr-2 tabular-nums">{fmt(row.taxable_turnover)}</td>
-                      <td className="text-right pr-2 tabular-nums text-muted-foreground">{fmt(row.exempt_turnover)}</td>
-                      <td className="text-right pr-2 tabular-nums font-medium">{fmt(row.total_turnover)}</td>
-                      <td className="text-right pr-2 tabular-nums text-warning">{fmt(row.output_tax)}</td>
-                      <td className="text-right pr-2 tabular-nums text-accent">{fmt(row.itc_claimed)}</td>
-                      <td className="text-right pr-2 tabular-nums font-bold">{fmt(row.net_tax_paid)}</td>
-                      <td className={`text-center pr-2 text-[9px] font-bold tracking-widest ${statusCls(row.filing_status)}`}>{row.filing_status.toUpperCase().replace("_"," ")}</td>
-                      <td className="text-muted-foreground text-[10px]">{row.filing_date ?? "—"}</td>
+                      <td className="py-1 pr-2 font-medium">{gstTxtCell(row.id, "period", row.period)}</td>
+                      <td className="pr-2 text-accent text-[10px]">{gstTxtCell(row.id, "return_type", row.return_type)}</td>
+                      <td className="text-right pr-2 tabular-nums">{gstNumCell(row.id, "taxable_turnover", row.taxable_turnover)}</td>
+                      <td className="text-right pr-2 tabular-nums text-muted-foreground">{gstNumCell(row.id, "exempt_turnover", row.exempt_turnover)}</td>
+                      <td className="text-right pr-2 tabular-nums font-medium">{gstNumCell(row.id, "total_turnover", row.total_turnover)}</td>
+                      <td className="text-right pr-2 tabular-nums text-warning">{gstNumCell(row.id, "output_tax", row.output_tax)}</td>
+                      <td className="text-right pr-2 tabular-nums text-accent">{gstNumCell(row.id, "itc_claimed", row.itc_claimed)}</td>
+                      <td className="text-right pr-2 tabular-nums font-bold">{gstNumCell(row.id, "net_tax_paid", row.net_tax_paid)}</td>
+                      <td className="text-center pr-2">{gstStatusCell(row.id, row.filing_status)}</td>
+                      <td className="text-muted-foreground text-[10px]">{gstTxtCell(row.id, "filing_date", row.filing_date ?? null)}</td>
                     </tr>
                   ))}
                 </tbody>
