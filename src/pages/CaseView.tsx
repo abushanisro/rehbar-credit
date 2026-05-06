@@ -359,6 +359,13 @@ function CaseViewInner() {
       const isExcel = ext === "xlsx" || ext === "xls" || ext === "csv";
       const fileType = isImage ? "image" : isExcel ? "excel" : "pdf";
 
+      // Warn on large scanned PDFs — Claude accepts up to ~32 MB per document
+      const MAX_PDF_MB = 30;
+      if (fileType === "pdf" && file.size > MAX_PDF_MB * 1024 * 1024) {
+        const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+        toast.warning(`File is ${sizeMb} MB — large scanned PDFs may timeout or exceed Claude's limit. Consider compressing to under ${MAX_PDF_MB} MB.`);
+      }
+
       // Stage 1: parse Excel client-side (0 → 15%)
       let excelText: string | undefined;
       if (isExcel) {
