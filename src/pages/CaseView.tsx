@@ -39,7 +39,7 @@ interface LineItem {
 
 const STATEMENT_TYPES: StatementType[] = ["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"];
 
-type QueueStatus = "pending" | "processing" | "done" | "error";
+type QueueStatus = "pending" | "processing" | "done" | "error" | "duplicate";
 type UploadQueueItem = {
   id: string; file: File; name: string; size: string;
   status: QueueStatus;
@@ -1638,7 +1638,7 @@ function CaseViewInner() {
         <BankStatementTab cc={cc} data={bankData} docs={docs} user={user!} onReload={reload} />
       )}
       {tab === "gst" && (
-        <GstTab cc={cc} data={gstData} extracted={extracted} user={user!} onReload={reload} />
+        <GstTab cc={cc} data={gstData} extracted={extracted} user={user!} onReload={reload} docs={docs} />
       )}
     </TerminalLayout>
   );
@@ -1699,12 +1699,15 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
   const bankName    = data[0]?.bank_name;
 
   const addBankFiles = (files: File[]) => {
-    setFileQueue(q => [...q, ...files.map(f => ({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      file: f, name: f.name,
-      size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
-      status: "pending" as QueueStatus,
-    }))]);
+    setFileQueue(q => {
+      const existingNames = new Set([...q.map(i => i.name), ...docs.map(d => d.file_name)]);
+      return [...q, ...files.map(f => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file: f, name: f.name,
+        size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
+        status: (existingNames.has(f.name) ? "duplicate" : "pending") as QueueStatus,
+      }))];
+    });
   };
 
   const processBankQueue = async () => {
@@ -1880,11 +1883,14 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
               <div className="divide-y divide-border/30">
                 {fileQueue.map(item => (
                   <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : "text-muted-foreground"}>
-                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : "○"}
+                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : item.status === "duplicate" ? "text-warning" : "text-muted-foreground"}>
+                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
                     </span>
                     <span className="truncate flex-1 text-primary">{item.name}</span>
                     <span className="text-foreground/40 shrink-0">{item.size}</span>
+                    {item.status === "duplicate" && (
+                      <span className="text-warning text-[9px] tracking-widest shrink-0">ALREADY EXISTS</span>
+                    )}
                     {item.status === "pending" && (
                       <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
                     )}
@@ -2015,7 +2021,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
 }
 
 // ─── GST Tab ─────────────────────────────────────────────────────────────────
-function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Tables<"gst_return_data">[]; extracted: ExtractedRow[]; user: { id: string }; onReload: () => Promise<void> }) {
+function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; data: Tables<"gst_return_data">[]; extracted: ExtractedRow[]; user: { id: string }; onReload: () => Promise<void>; docs: DocRow[] }) {
   const [busy, setBusy]           = useState(false);
   const [progress, setProgress]   = useState(0);
   const [label, setLabel]         = useState("");
@@ -2129,12 +2135,15 @@ function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Ta
   })();
 
   const addGstFiles = (files: File[]) => {
-    setFileQueue(q => [...q, ...files.map(f => ({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      file: f, name: f.name,
-      size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
-      status: "pending" as QueueStatus,
-    }))]);
+    setFileQueue(q => {
+      const existingNames = new Set([...q.map(i => i.name), ...docs.map(d => d.file_name)]);
+      return [...q, ...files.map(f => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file: f, name: f.name,
+        size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
+        status: (existingNames.has(f.name) ? "duplicate" : "pending") as QueueStatus,
+      }))];
+    });
   };
 
   const processGstQueue = async () => {
@@ -2258,11 +2267,14 @@ function GstTab({ cc, data, extracted, user, onReload }: { cc: CaseRow; data: Ta
               <div className="divide-y divide-border/30">
                 {fileQueue.map(item => (
                   <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : "text-muted-foreground"}>
-                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : "○"}
+                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : item.status === "duplicate" ? "text-warning" : "text-muted-foreground"}>
+                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
                     </span>
                     <span className="truncate flex-1 text-primary">{item.name}</span>
                     <span className="text-foreground/40 shrink-0">{item.size}</span>
+                    {item.status === "duplicate" && (
+                      <span className="text-warning text-[9px] tracking-widest shrink-0">ALREADY EXISTS</span>
+                    )}
                     {item.status === "pending" && (
                       <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
                     )}
@@ -3492,16 +3504,19 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
   }
 
   const addToQueue = (files: File[]) => {
-    setFileQueue(q => [
-      ...q,
-      ...files.map(f => ({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file: f, name: f.name, size: makeSize(f),
-        stmtType: autoDetect(f.name),
-        fy: globalFy,
-        status: "pending" as QueueStatus,
-      })),
-    ]);
+    setFileQueue(q => {
+      const existingNames = new Set([...q.map(i => i.name), ...docs.map(d => d.file_name)]);
+      return [
+        ...q,
+        ...files.map(f => ({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          file: f, name: f.name, size: makeSize(f),
+          stmtType: autoDetect(f.name),
+          fy: globalFy,
+          status: (existingNames.has(f.name) ? "duplicate" : "pending") as QueueStatus,
+        })),
+      ];
+    });
   };
 
   const processAll = async () => {
@@ -3609,30 +3624,37 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
                   item.status === "done"       ? "text-success shrink-0" :
                   item.status === "error"      ? "text-destructive shrink-0" :
                   item.status === "processing" ? "text-primary shrink-0 animate-pulse" :
+                  item.status === "duplicate"  ? "text-warning shrink-0" :
                                                  "text-muted-foreground shrink-0"
                 }>
-                  {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : "○"}
+                  {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
                 </span>
                 <span className="truncate flex-1 text-primary min-w-0" title={item.name}>{item.name}</span>
                 <span className="text-foreground/40 shrink-0 hidden sm:block">{item.size}</span>
-                <select
-                  value={item.stmtType}
-                  disabled={item.status !== "pending"}
-                  onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, stmtType: e.target.value as DocClass } : qi))}
-                  className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 shrink-0 disabled:opacity-40"
-                >
-                  {DOC_CLASSES.map(d => (
-                    <option key={d.value} value={d.value}>{d.value === "all_in_one" ? "AUTO" : d.value.replace(/_/g, " ").toUpperCase()}</option>
-                  ))}
-                </select>
-                <input
-                  type="number"
-                  value={item.fy}
-                  disabled={item.status !== "pending"}
-                  onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, fy: e.target.value } : qi))}
-                  placeholder="FY"
-                  className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 w-12 shrink-0 disabled:opacity-40"
-                />
+                {item.status === "duplicate" ? (
+                  <span className="text-warning text-[9px] tracking-widest shrink-0">ALREADY EXISTS</span>
+                ) : (
+                  <>
+                    <select
+                      value={item.stmtType}
+                      disabled={item.status !== "pending"}
+                      onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, stmtType: e.target.value as DocClass } : qi))}
+                      className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 shrink-0 disabled:opacity-40"
+                    >
+                      {DOC_CLASSES.map(d => (
+                        <option key={d.value} value={d.value}>{d.value === "all_in_one" ? "AUTO" : d.value.replace(/_/g, " ").toUpperCase()}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      value={item.fy}
+                      disabled={item.status !== "pending"}
+                      onChange={e => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, fy: e.target.value } : qi))}
+                      placeholder="FY"
+                      className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 w-12 shrink-0 disabled:opacity-40"
+                    />
+                  </>
+                )}
                 {item.status !== "processing" && (
                   <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))}
                     className="text-foreground/40 hover:text-destructive hover:bg-destructive/10 px-1.5 py-0.5 border border-transparent hover:border-destructive/20 text-[10px] shrink-0 transition-colors"

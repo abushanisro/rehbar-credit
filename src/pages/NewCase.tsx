@@ -54,7 +54,7 @@ type FileQueueItem = {
   size: string;
   fileType: "pdf" | "image" | "excel";
   excelText?: string;
-  status: "pending" | "uploading" | "done" | "error";
+  status: "pending" | "uploading" | "done" | "error" | "duplicate";
   uploadPct: number;
   storagePath?: string;
 };
@@ -290,7 +290,13 @@ export default function NewCase() {
       };
     };
 
-    const initialQueue = rawFiles.map(makeItem);
+    const seenNames = new Set<string>();
+    const initialQueue = rawFiles.map(f => {
+      const item = makeItem(f);
+      if (seenNames.has(f.name)) return { ...item, status: "duplicate" as const };
+      seenNames.add(f.name);
+      return item;
+    });
     setFileQueue(initialQueue);
     setScanning(true); setScanPct(5); setScanStage("Preparing…"); setScanResult(null);
 
@@ -300,6 +306,8 @@ export default function NewCase() {
       if (cancelledRef.current) return;
       const f    = rawFiles[i];
       const item = initialQueue[i];
+
+      if (item.status === "duplicate") continue;
 
       // Parse Excel client-side
       let excelText: string | undefined;
@@ -658,16 +666,20 @@ export default function NewCase() {
                       {fileQueue.map(item => (
                         <div key={item.id} className="flex items-center gap-1.5 text-[10px]">
                           <span className={
-                            item.status === "done"     ? "text-green-500" :
-                            item.status === "error"    ? "text-red-500"   :
-                            item.status === "uploading"? "text-primary"   : "text-foreground/30"
+                            item.status === "done"      ? "text-green-500" :
+                            item.status === "error"     ? "text-red-500"   :
+                            item.status === "uploading" ? "text-primary"   :
+                            item.status === "duplicate" ? "text-yellow-500": "text-foreground/30"
                           }>
-                            {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "uploading" ? "▶" : "○"}
+                            {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "uploading" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
                           </span>
                           <span className="truncate flex-1 text-primary">{item.name}</span>
                           <span className="text-foreground/40 shrink-0">{item.size}</span>
                           {item.status === "uploading" && (
                             <span className="text-primary shrink-0 w-8 text-right">{item.uploadPct}%</span>
+                          )}
+                          {item.status === "duplicate" && (
+                            <span className="text-yellow-500 shrink-0 text-[9px] tracking-widest">ALREADY EXISTS</span>
                           )}
                         </div>
                       ))}
