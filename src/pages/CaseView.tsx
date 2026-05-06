@@ -46,6 +46,51 @@ type UploadQueueItem = {
 };
 type FinQueueItem = UploadQueueItem & { stmtType: DocClass; fy: string };
 
+type EditScanResult = {
+  client_name?: string;
+  product_type?: ProductType;
+  product_type_custom?: string;
+  legal_constitution?: string;
+  industry?: string;
+  year_established?: number;
+  promoter_details?: string;
+  deal_amount?: number;
+  tenure_months?: number;
+  expected_irr?: number;
+  end_use?: string;
+  collateral_summary?: string;
+  strategic_rationale?: string;
+  website?: string;
+  summary?: string;
+  confidence?: number;
+};
+
+type EditFileQueueItem = {
+  id: string;
+  name: string;
+  size: string;
+  fileType: "pdf" | "image" | "excel";
+  status: "pending" | "uploading" | "done" | "error" | "duplicate";
+  uploadPct: number;
+  storagePath?: string;
+};
+
+const EDIT_SCANNABLE_FIELDS: { key: keyof EditScanResult; label: string }[] = [
+  { key: "client_name",         label: "Client Name" },
+  { key: "product_type",        label: "Product Type" },
+  { key: "legal_constitution",  label: "Legal Constitution" },
+  { key: "industry",            label: "Industry" },
+  { key: "year_established",    label: "Year Established" },
+  { key: "deal_amount",         label: "Deal Amount (Cr)" },
+  { key: "tenure_months",       label: "Tenure (months)" },
+  { key: "expected_irr",        label: "Expected IRR (%)" },
+  { key: "promoter_details",    label: "Promoter Details" },
+  { key: "end_use",             label: "End Use" },
+  { key: "collateral_summary",  label: "Collateral" },
+  { key: "strategic_rationale", label: "Strategic Rationale" },
+  { key: "website",             label: "Website" },
+];
+
 // ── Balance sheet auto-computation ────────────────────────────────────────────
 // Defines which labels are aggregate totals and what they sum from.
 // Order matters: dependencies must come before the rows that depend on them.
@@ -139,6 +184,16 @@ function CaseViewInner() {
     deal_amount: "", tenure_months: "", expected_irr: "",
     end_use: "", collateral_summary: "", analyst_notes: "", strategic_rationale: "",
   });
+  const [editScanFileQueue, setEditScanFileQueue] = useState<EditFileQueueItem[]>([]);
+  const [editScanning, setEditScanning] = useState(false);
+  const [editScanStage, setEditScanStage] = useState("");
+  const [editScanPct, setEditScanPct] = useState(0);
+  const [editScanResult, setEditScanResult] = useState<EditScanResult | null>(null);
+  const [editWebEnriching, setEditWebEnriching] = useState(false);
+  const [editWebEnrichPct, setEditWebEnrichPct] = useState(0);
+  const [editDragOver, setEditDragOver] = useState(false);
+  const editFileInputRef = useRef<HTMLInputElement>(null);
+  const editCancelledRef = useRef(false);
 
   const reload = useCallback(async () => {
     if (!id) return;
@@ -331,6 +386,183 @@ function CaseViewInner() {
     toast.success("Case updated");
     setEditingHeader(false);
     await reload();
+  };
+
+  const runEditWebEnrich = async () => {
+    if (!hd.client_name.trim() && !hd.website.trim()) return;
+    setEditWebEnriching(true);
+    setEditWebEnrichPct(5);
+    setEditScanResult(null);
+    const tick = setInterval(() => setEditWebEnrichPct(p => p < 88 ? p + 2 : p), 400);
+    try {
+      const { data, error } = await supabase.functions.invoke("web-enrich-company", {
+        body: {
+          company_name: hd.client_name.trim() || undefined,
+          website: hd.website.trim() || undefined,
+        },
+      });
+      clearInterval(tick);
+      if (error) throw new Error(error.message);
+      if (!data?.ok) throw new Error(data?.error ?? "Enrichment failed");
+      setEditWebEnrichPct(100);
+      setEditScanResult(data.extracted as EditScanResult);
+      toast.success("Company info found — review and apply");
+    } catch (e) {
+      clearInterval(tick);
+      toast.error("Web search failed: " + (e instanceof Error ? e.message : "unknown"));
+    } finally {
+      setTimeout(() => { setEditWebEnriching(false); setEditWebEnrichPct(0); }, 400);
+    }
+  };
+
+  const applyEditScanned = () => {
+    if (!editScanResult) return;
+    setHd(f => {
+      const next = { ...f };
+      if (editScanResult.client_name)         next.client_name         = editScanResult.client_name;
+      if (editScanResult.product_type)        next.product_type        = editScanResult.product_type;
+      if (editScanResult.product_type_custom) next.product_type_custom = editScanResult.product_type_custom!;
+      if (editScanResult.legal_constitution)  next.legal_constitution  = editScanResult.legal_constitution;
+      if (editScanResult.year_established)    next.year_established    = String(editScanResult.year_established);
+      if (editScanResult.deal_amount != null) next.deal_amount         = String(editScanResult.deal_amount);
+      if (editScanResult.tenure_months != null) next.tenure_months     = String(editScanResult.tenure_months);
+      if (editScanResult.expected_irr != null)  next.expected_irr      = String(editScanResult.expected_irr);
+      if (editScanResult.promoter_details)    next.promoter_details    = editScanResult.promoter_details;
+      if (editScanResult.end_use)             next.end_use             = editScanResult.end_use;
+      if (editScanResult.collateral_summary)  next.collateral_summary  = editScanResult.collateral_summary;
+      if (editScanResult.strategic_rationale) next.strategic_rationale = editScanResult.strategic_rationale;
+      if (editScanResult.website)             next.website             = editScanResult.website;
+      if (editScanResult.industry) {
+        const match = CASE_INDUSTRIES.find(i => i.toLowerCase() === editScanResult.industry!.toLowerCase());
+        if (match) {
+          next.industry = match;
+        } else {
+          next.industry = "Other";
+          next.industry_custom = editScanResult.industry;
+        }
+      }
+      return next;
+    });
+    toast.success("Form filled from document");
+    setEditScanResult(null);
+  };
+
+  const resetEditScan = () => {
+    editCancelledRef.current = true;
+    setEditScanning(false);
+    setEditScanPct(0);
+    setEditScanStage("");
+    setEditScanFileQueue([]);
+    setEditScanResult(null);
+  };
+
+  const handleEditScanFiles = async (rawFiles: File[]) => {
+    if (!user || rawFiles.length === 0) return;
+    editCancelledRef.current = false;
+
+    const makeItem = (f: File): EditFileQueueItem => {
+      const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
+      const isImage = ["jpg","jpeg","png","webp","gif"].includes(ext);
+      const isExcel = ["xlsx","xls","csv"].includes(ext);
+      const size = f.size < 1_048_576
+        ? `${(f.size / 1024).toFixed(1)} KB`
+        : `${(f.size / 1_048_576).toFixed(2)} MB`;
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: f.name, size,
+        fileType: isImage ? "image" : isExcel ? "excel" : "pdf",
+        status: "pending", uploadPct: 0,
+      };
+    };
+
+    const seenNames = new Set<string>();
+    const initialQueue = rawFiles.map(f => {
+      const item = makeItem(f);
+      if (seenNames.has(f.name)) return { ...item, status: "duplicate" as const };
+      seenNames.add(f.name);
+      return item;
+    });
+    setEditScanFileQueue(initialQueue);
+    setEditScanning(true); setEditScanPct(5); setEditScanStage("Preparing…"); setEditScanResult(null);
+
+    const toUpload: Array<{ file_path: string; file_type: "pdf"|"image"|"excel"; file_name: string; excel_text?: string }> = [];
+
+    for (let i = 0; i < rawFiles.length; i++) {
+      if (editCancelledRef.current) return;
+      const f    = rawFiles[i];
+      const item = initialQueue[i];
+      if (item.status === "duplicate") continue;
+
+      let excelText: string | undefined;
+      if (item.fileType === "excel") {
+        setEditScanStage(`Parsing ${item.name}…`);
+        const XLSX = await import("xlsx");
+        const buf  = await f.arrayBuffer();
+        const wb   = XLSX.read(buf, { type: "array" });
+        excelText  = wb.SheetNames.map(n =>
+          `=== SHEET: ${n} ===\n${XLSX.utils.sheet_to_csv(wb.Sheets[n], { FS: "\t" })}`
+        ).join("\n\n");
+      }
+
+      if (editCancelledRef.current) return;
+      setEditScanFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "uploading" } : qi));
+      setEditScanStage(`Uploading ${i + 1} of ${rawFiles.length}…`);
+
+      const path = `${user.id}/drafts/${Date.now()}-${f.name}`;
+      try {
+        await uploadWithProgress("case-files", path, f, (pct) => {
+          setEditScanFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, uploadPct: pct } : qi));
+          const perFile = 50 / rawFiles.length;
+          setEditScanPct(Math.min(55, Math.round(5 + i * perFile + (pct / 100) * perFile)));
+        });
+        setEditScanFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done", uploadPct: 100, storagePath: path } : qi));
+        toUpload.push({ file_path: path, file_type: item.fileType, file_name: item.name, excel_text: excelText });
+      } catch (e) {
+        if (editCancelledRef.current) return;
+        setEditScanFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "error" } : qi));
+        toast.error(`Upload failed: ${item.name}`);
+      }
+    }
+
+    if (editCancelledRef.current || toUpload.length === 0) { setEditScanning(false); return; }
+
+    const docWord = toUpload.length === 1 ? "document" : `${toUpload.length} documents`;
+    setEditScanStage(`Claude analysing ${docWord}…`);
+    setEditScanPct(60);
+    const tick = setInterval(() => {
+      if (editCancelledRef.current) { clearInterval(tick); return; }
+      setEditScanPct(p => p < 92 ? p + 1 : p);
+    }, 500);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("extract-case-meta", {
+        body: { files: toUpload },
+      });
+      clearInterval(tick);
+      if (editCancelledRef.current) return;
+
+      let result = data;
+      // The deployed function may be the old single-file version — auto-fallback
+      if ((data as any)?.error === "Missing fields" && toUpload.length > 0) {
+        const first = toUpload[0];
+        const { data: legacyData, error: legacyErr } = await supabase.functions.invoke("extract-case-meta", {
+          body: { file_path: first.file_path, file_type: first.file_type, file_name: first.file_name, excel_text: first.excel_text },
+        });
+        if (legacyErr || !legacyData?.ok) throw new Error((legacyData as any)?.error ?? legacyErr?.message ?? "Extraction failed");
+        result = legacyData;
+      } else if (error || !data?.ok) {
+        throw new Error((data as any)?.error ?? error?.message ?? "Extraction failed");
+      }
+
+      setEditScanPct(100); setEditScanStage("Done");
+      setEditScanResult(result.extracted as EditScanResult);
+      toast.success(`${toUpload.length} document${toUpload.length > 1 ? "s" : ""} analysed — review and apply below`);
+    } catch (e) {
+      clearInterval(tick);
+      if (!editCancelledRef.current) { toast.error(e instanceof Error ? e.message : "Analysis failed"); setEditScanStage(""); }
+    } finally {
+      setTimeout(() => { setEditScanning(false); setEditScanPct(0); setEditScanStage(""); }, 600);
+    }
   };
 
   const handleCancelUpload = () => {
@@ -754,6 +986,19 @@ function CaseViewInner() {
                   <label className={labelCls}>Website</label>
                   <input className={inputCls} placeholder="example.com" value={hd.website} onChange={sHd("website")} />
                 </div>
+                <div className="col-span-2">
+                  <button
+                    type="button"
+                    onClick={runEditWebEnrich}
+                    disabled={editWebEnriching || (!hd.client_name.trim() && !hd.website.trim())}
+                    className="w-full border border-primary/40 bg-primary/5 text-primary px-4 py-2 text-xs tracking-widest font-bold hover:bg-primary/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                  >
+                    {editWebEnriching ? "SEARCHING WEB & FILLING FORM…" : "WEB SEARCH & AUTO-FILL ALL FIELDS"}
+                  </button>
+                  {!hd.client_name.trim() && !hd.website.trim() && (
+                    <p className="text-[10px] text-foreground/40 mt-1 tracking-wider">Enter client name or website above first</p>
+                  )}
+                </div>
                 <div>
                   <label className={labelCls}>Legal Constitution</label>
                   <select className={inputCls} value={hd.legal_constitution} onChange={sHd("legal_constitution")}>
@@ -816,7 +1061,7 @@ function CaseViewInner() {
               </button>
             </form>
           </Panel>
-          <div className="xl:col-span-4">
+          <div className="xl:col-span-4 flex flex-col gap-3">
             <Panel title="PRODUCT RULES" ticker={PRODUCTS[hd.product_type as ProductType]?.short ?? "—"} status="warn">
               <div className="space-y-3 text-xs">
                 <div>
@@ -835,6 +1080,152 @@ function CaseViewInner() {
                     ))}
                   </ul>
                 </div>
+              </div>
+            </Panel>
+
+            {/* AI Document Scan for edit case */}
+            <Panel title="AI DOCUMENT SCAN" ticker="CLAUDE/4.6" status="live">
+              <div className="space-y-3 text-xs">
+                <p className="text-foreground/60 leading-relaxed">
+                  Upload a company profile, loan application, CMA, or any relevant document.
+                  Claude will read it and auto-fill the edit form.
+                </p>
+                <div
+                  className={`border-2 border-dashed transition-colors cursor-pointer ${
+                    editDragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+                  } ${editScanning ? "pointer-events-none opacity-50" : ""}`}
+                  onDragOver={(e) => { e.preventDefault(); setEditDragOver(true); }}
+                  onDragLeave={() => setEditDragOver(false)}
+                  onDrop={(e) => { e.preventDefault(); setEditDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) handleEditScanFiles(files); }}
+                  onClick={() => editFileInputRef.current?.click()}
+                >
+                  <input
+                    ref={editFileInputRef}
+                    type="file"
+                    className="hidden"
+                    accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp"
+                    multiple
+                    onChange={(e) => { const files = Array.from(e.target.files ?? []); if (files.length) handleEditScanFiles(files); e.target.value = ""; }}
+                  />
+                  {editScanFileQueue.length > 0 ? (
+                    <div className="px-3 py-2">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="terminal-label text-primary">
+                          {editScanFileQueue.length} FILE{editScanFileQueue.length > 1 ? "S" : ""}
+                        </span>
+                        <span className="text-foreground/40 text-[10px]">· drop more to add</span>
+                      </div>
+                      <div className="space-y-1 max-h-28 overflow-y-auto">
+                        {editScanFileQueue.map(item => (
+                          <div key={item.id} className="flex items-center gap-1.5 text-[10px]">
+                            <span className={
+                              item.status === "done"      ? "text-green-500" :
+                              item.status === "error"     ? "text-red-500"   :
+                              item.status === "uploading" ? "text-primary"   :
+                              item.status === "duplicate" ? "text-yellow-500": "text-foreground/30"
+                            }>
+                              {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "uploading" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
+                            </span>
+                            <span className="truncate flex-1 text-primary">{item.name}</span>
+                            <span className="text-foreground/40 shrink-0">{item.size}</span>
+                            {item.status === "uploading" && (
+                              <span className="text-primary shrink-0 w-8 text-right">{item.uploadPct}%</span>
+                            )}
+                            {item.status === "duplicate" && (
+                              <span className="text-yellow-500 shrink-0 text-[9px] tracking-widest">ALREADY EXISTS</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="px-3 py-5 text-center">
+                      <div className="text-primary text-lg mb-1">⬆</div>
+                      <div className="terminal-label">DROP FILES OR CLICK TO BROWSE</div>
+                      <div className="text-foreground/40 mt-1">PDF · Excel · Image · Multiple OK</div>
+                    </div>
+                  )}
+                </div>
+
+                {editWebEnriching && (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-foreground/60 text-xs">
+                      <span>Searching web &amp; analysing…</span>
+                      <span className="font-mono text-primary">{editWebEnrichPct}%</span>
+                    </div>
+                    <div className="w-full h-1 bg-border">
+                      <div className="h-1 bg-primary transition-all duration-300" style={{ width: `${editWebEnrichPct}%` }} />
+                    </div>
+                  </div>
+                )}
+
+                {editScanning && (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-foreground/60">
+                      <span>{editScanStage}</span>
+                      <span>{editScanPct}%</span>
+                    </div>
+                    <div className="w-full h-1 bg-border">
+                      <div className="h-1 bg-primary transition-all duration-300" style={{ width: `${editScanPct}%` }} />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={resetEditScan}
+                      className="w-full border border-border text-foreground/50 py-1 text-xs tracking-widest hover:border-red-500 hover:text-red-400 transition-colors"
+                    >
+                      [CANCEL]
+                    </button>
+                  </div>
+                )}
+
+                {editScanResult && (
+                  <div className="space-y-2">
+                    {editScanResult.summary && (
+                      <div className="border border-border p-2 bg-input/30">
+                        <div className="terminal-label mb-1">AI SUMMARY</div>
+                        <p className="text-foreground/80 leading-relaxed">{editScanResult.summary}</p>
+                        {editScanResult.confidence != null && (
+                          <div className="mt-1.5 flex items-center gap-2">
+                            <div className="flex-1 h-0.5 bg-border">
+                              <div
+                                className={`h-0.5 ${editScanResult.confidence >= 70 ? "bg-green-500" : editScanResult.confidence >= 40 ? "bg-yellow-500" : "bg-red-500"}`}
+                                style={{ width: `${editScanResult.confidence}%` }}
+                              />
+                            </div>
+                            <span className="text-foreground/50">{editScanResult.confidence}% conf.</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div className="terminal-label">EXTRACTED FIELDS</div>
+                    <div className="space-y-0.5 max-h-48 overflow-y-auto pr-1">
+                      {EDIT_SCANNABLE_FIELDS.map(({ key, label }) => {
+                        const val = editScanResult[key];
+                        if (val == null || val === "") return null;
+                        return (
+                          <div key={key} className="flex gap-2">
+                            <span className="text-foreground/40 shrink-0 w-28">{label}</span>
+                            <span className="text-primary truncate">{String(val)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={applyEditScanned}
+                      className="w-full bg-primary text-primary-foreground py-1.5 text-xs tracking-widest font-bold hover:opacity-90"
+                    >
+                      [APPLY TO FORM]
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setEditScanResult(null); setEditScanFileQueue([]); }}
+                      className="w-full border border-border text-foreground/50 py-1 text-xs tracking-widest hover:border-primary/50"
+                    >
+                      DISCARD
+                    </button>
+                  </div>
+                )}
               </div>
             </Panel>
           </div>

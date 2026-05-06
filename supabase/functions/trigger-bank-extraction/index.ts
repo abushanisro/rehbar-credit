@@ -54,7 +54,7 @@ const BANK_TOOL_SCHEMA = {
 async function extractSingleDoc(
   doc: DocRecord,
   excelText: string | undefined,
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   case_id: string,
   user_id: string,
 ): Promise<number> {
@@ -137,7 +137,7 @@ async function runBatchExtraction(
   user_id: string,
   document_ids: string[],
   excel_texts: Record<string, string>,
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
 ): Promise<void> {
   const { data: docs } = await (supabase as any)
     .from("financial_documents")
