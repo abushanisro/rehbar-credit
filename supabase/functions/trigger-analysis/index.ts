@@ -54,11 +54,13 @@ Deno.serve(async (req) => {
       }),
     });
 
-    const json = await res.json();
+    const json = await res.json().catch(() => ({})) as Record<string, unknown>;
     if (!res.ok) {
-      console.error("Trigger.dev error:", JSON.stringify(json));
-      return new Response(JSON.stringify({ error: json.message ?? "Trigger.dev error" }), {
-        status: res.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      const errMsg = (json.message ?? json.error ?? `Trigger.dev returned HTTP ${res.status}`) as string;
+      console.error("Trigger.dev error:", res.status, JSON.stringify(json));
+      return new Response(JSON.stringify({ error: errMsg }), {
+        status: res.status >= 500 ? 502 : res.status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 

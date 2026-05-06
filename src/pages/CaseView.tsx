@@ -1737,7 +1737,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
       setProgress(20); setLabel("Uploading…");
       const path = `${user.id}/${cc.id}/bank-${Date.now()}-${file.name}`;
       const { data: { session } } = await supabase.auth.getSession();
-      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/case-files/${encodeURIComponent(path)}`;
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/case-files/${path.split("/").map(encodeURIComponent).join("/")}`;
       await new Promise<void>((res, rej) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", url);
@@ -2173,7 +2173,7 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
       setProgress(20); setLabel("Uploading…");
       const path = `${user.id}/${cc.id}/gst-${Date.now()}-${file.name}`;
       const { data: { session } } = await supabase.auth.getSession();
-      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/case-files/${encodeURIComponent(path)}`;
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/case-files/${path.split("/").map(encodeURIComponent).join("/")}`;
       await new Promise<void>((res, rej) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", url);
@@ -3438,7 +3438,8 @@ function buildIcNoteHtml(
 async function uploadWithProgress(bucket: string, path: string, file: File, onPct: (pct: number) => void, signal?: AbortSignal): Promise<void> {
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
-  const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/${bucket}/${encodeURIComponent(path)}`;
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/${bucket}/${encodedPath}`;
   await new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
