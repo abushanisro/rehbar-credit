@@ -27,6 +27,20 @@ const SECTION_IDS = [
 type LineItem = { label: string; value: number | null; override_value?: number | null };
 type FinRow   = { fiscal_year: number; statement_type: string; line_items: unknown; unit?: string | null };
 type RatioRow = { fiscal_year: number; ratio_name: string; ratio_value: number | null; threshold_status: string; benchmark: number | null };
+type BankRow  = {
+  month: string; bank_name: string | null; account_number: string | null;
+  opening_balance: number | null; closing_balance: number | null;
+  avg_balance: number | null; min_balance: number | null; max_balance: number | null;
+  total_credits: number | null; total_debits: number | null;
+  credit_count: number | null; debit_count: number | null;
+  bounce_inward: number | null; bounce_outward: number | null; emi_outflows: number | null;
+};
+type GstRow = {
+  period: string; return_type: string | null;
+  taxable_turnover: number | null; exempt_turnover: number | null; total_turnover: number | null;
+  output_tax: number | null; itc_claimed: number | null; net_tax_paid: number | null;
+  filing_status: string | null; filing_date: string | null;
+};
 
 function lv(items: LineItem[], label: string): string {
   const it = items.find(i => i.label === label);
@@ -134,6 +148,60 @@ function buildTables(financials: FinRow[], ratios: RatioRow[]) {
   return { sectionV, sectionVI, sectionVII };
 }
 
+function inr(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  return `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
+
+function buildBankSection(rows: BankRow[]): string {
+  if (!rows.length) return "";
+  const sorted = [...rows].sort((a, b) => a.month.localeCompare(b.month));
+  const recent = sorted.slice(-12);
+  const bankName = recent[0]?.bank_name ?? "Bank";
+
+  const headers = ["Month", "Credits", "Debits", "Avg Bal", "Min Bal", "Bounces(In)", "EMI Out"];
+  const tableRows = recent.map(r => [
+    r.month, inr(r.total_credits), inr(r.total_debits),
+    inr(r.avg_balance), inr(r.min_balance),
+    r.bounce_inward != null ? String(r.bounce_inward) : "0",
+    inr(r.emi_outflows),
+  ]);
+
+  const totalCredits  = recent.reduce((s, r) => s + (r.total_credits  ?? 0), 0);
+  const totalDebits   = recent.reduce((s, r) => s + (r.total_debits   ?? 0), 0);
+  const avgBal        = recent.reduce((s, r) => s + (r.avg_balance    ?? 0), 0) / recent.length;
+  const totalBounceIn = recent.reduce((s, r) => s + (r.bounce_inward  ?? 0), 0);
+  const totalBounceOut= recent.reduce((s, r) => s + (r.bounce_outward ?? 0), 0);
+  const totalEmi      = recent.reduce((s, r) => s + (r.emi_outflows   ?? 0), 0);
+  const minBal        = Math.min(...recent.map(r => r.min_balance ?? Infinity).filter(Number.isFinite));
+
+  return `**Bank Statement — ${bankName} (${recent.length} months)**\n${mdTable(headers, tableRows)}\n\n` +
+    `**Totals:** Credits ${inr(totalCredits)} | Debits ${inr(totalDebits)} | Avg Balance ${inr(avgBal)} | Min Balance ${minBal === Infinity ? "—" : inr(minBal)} | Bounce-In ${totalBounceIn} | Bounce-Out ${totalBounceOut} | EMI Outflows ${inr(totalEmi)}`;
+}
+
+function buildGstSection(rows: GstRow[]): string {
+  if (!rows.length) return "";
+  const sorted = [...rows].sort((a, b) => a.period.localeCompare(b.period));
+  const recent = sorted.slice(-12);
+
+  const headers = ["Period", "Type", "Turnover", "Output Tax", "ITC", "Net Tax", "Status"];
+  const tableRows = recent.map(r => [
+    r.period, r.return_type ?? "—",
+    inr(r.total_turnover), inr(r.output_tax),
+    inr(r.itc_claimed), inr(r.net_tax_paid),
+    (r.filing_status ?? "—").toUpperCase(),
+  ]);
+
+  const totalTurnover = recent.reduce((s, r) => s + (r.total_turnover ?? 0), 0);
+  const totalTax      = recent.reduce((s, r) => s + (r.net_tax_paid  ?? 0), 0);
+  const totalItc      = recent.reduce((s, r) => s + (r.itc_claimed   ?? 0), 0);
+  const lateCount     = recent.filter(r => r.filing_status === "late").length;
+  const notFiledCount = recent.filter(r => r.filing_status === "not_filed").length;
+
+  return `**GST Returns (${recent.length} periods)**\n${mdTable(headers, tableRows)}\n\n` +
+    `**Totals:** GST Turnover ${inr(totalTurnover)} | Net Tax ${inr(totalTax)} | ITC ${inr(totalItc)} | Late: ${lateCount} | Not Filed: ${notFiledCount}`;
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -167,9 +235,11 @@ Deno.serve(async (req) => {
       status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
-    const [{ data: financials }, { data: ratios }] = await Promise.all([
+    const [{ data: financials }, { data: ratios }, { data: bankStatements }, { data: gstReturns }] = await Promise.all([
       supabase.from("extracted_financials").select("fiscal_year,statement_type,line_items,unit").eq("case_id", case_id),
       supabase.from("financial_ratios").select("fiscal_year,ratio_name,ratio_value,threshold_status,benchmark").eq("case_id", case_id),
+      supabase.from("bank_statement_data").select("*").eq("case_id", case_id).order("month"),
+      supabase.from("gst_return_data").select("*").eq("case_id", case_id).order("period"),
     ]);
 
     await supabase.from("credit_cases").update({ status: "narrative" }).eq("id", case_id);
@@ -185,7 +255,9 @@ Deno.serve(async (req) => {
       analyst_notes: cc.analyst_notes,
     };
 
-    const tables = buildTables((financials ?? []) as FinRow[], (ratios ?? []) as RatioRow[]);
+    const tables   = buildTables((financials ?? []) as FinRow[], (ratios ?? []) as RatioRow[]);
+    const bankTable = buildBankSection((bankStatements ?? []) as BankRow[]);
+    const gstTable  = buildGstSection((gstReturns ?? []) as GstRow[]);
 
     const args = await callAI({
       systemPrompt: `You are a senior credit analyst at Rehbar Financial Services writing a concise IC appraisal note.
@@ -198,7 +270,9 @@ NON-NEGOTIABLE RULES:
 5. All other sections: snapshot table (item | value) + ≤3 bullets. No sentences.
 6. Each bullet ≤ 12 words.
 7. SWOT: 3–5 items per quadrant, ≤ 10 words each.
-8. SOP: PF/TF — projections waived; HL — LTV ≤ 60%, FOIR ≤ 50%; PLS — monthly P&L mandatory; OL/FL — projections waived if exposure < ₹100L or DSCR covers deal.`,
+8. SOP: PF/TF — projections waived; HL — LTV ≤ 60%, FOIR ≤ 50%; PLS — monthly P&L mandatory; OL/FL — projections waived if exposure < ₹100L or DSCR covers deal.
+9. BANK DATA: Section VIII (cash_flow) must reference average monthly credits/debits and avg balance from bank statements. Highlight bounce counts and EMI burden.
+10. GST DATA: Section IX (due_diligence) must compare GST turnover vs P&L turnover. Flag late/not-filed returns as compliance risk. Compute GST-to-P&L turnover ratio if both available.`,
       userText: `Draft the IC Note for this case.
 
 ━━━ DEAL & CLIENT ━━━
@@ -214,6 +288,12 @@ ${tables.sectionVI || "No projection data extracted yet."}
 
 [SECTION VII — key_ratios]
 ${tables.sectionVII || "No ratio data computed yet."}
+
+━━━ BANK STATEMENT DATA (for Section VIII cash_flow + risk_assessment) ━━━
+${bankTable || "No bank statement data available."}
+
+━━━ GST RETURN DATA (for Section IX due_diligence — cross-check turnover, flag compliance) ━━━
+${gstTable || "No GST return data available."}
 
 ━━━ COMPUTED RATIOS (full detail — for bullet observations) ━━━
 ${JSON.stringify(ratios, null, 2)}
@@ -234,6 +314,9 @@ ${JSON.stringify(financials, null, 2)}`,
                   id === "historical_financial" ? "MUST start with Section V pre-built tables verbatim. Then ≤2 bullets." :
                   id === "projections"           ? "MUST start with Section VI pre-built table verbatim. Then ≤2 bullets." :
                   id === "key_ratios"            ? "MUST start with Section VII pre-built table verbatim. Then ≤2 bullets." :
+                  id === "cash_flow"             ? "Bank statement summary table (month | avg credits | avg debits | avg balance | bounces). Bullets: avg monthly inflows, EMI burden, minimum balance observation. Use pre-built bank data provided." :
+                  id === "due_diligence"         ? "GST compliance table (period | turnover | status). Bullets: GST vs P&L turnover variance %, late/not-filed count, ITC utilisation. Use pre-built GST data provided." :
+                  id === "risk_assessment"       ? "Risk table derived from financials, bank behaviour (bounces, low balances) and GST compliance. Each row: risk factor | observation | severity." :
                   "Snapshot table + ≤3 bullets. No prose.",
               },
             },

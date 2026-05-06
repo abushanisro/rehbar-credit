@@ -250,10 +250,22 @@ function CaseViewInner() {
         await supabase.from("financial_documents")
           .update({ extraction_status: "running", extraction_error: null })
           .eq("id", doc.id);
-        const { error } = await supabase.functions.invoke("trigger-analysis", {
-          body: { case_id: cc.id, user_id: user.id, document_ids: [doc.id] },
+        const { data: { session: retrySession } } = await supabase.auth.getSession();
+        const retryRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-analysis`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${retrySession?.access_token ?? ""}`,
+            "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+          },
+          body: JSON.stringify({ case_id: cc.id, user_id: user.id, document_ids: [doc.id] }),
         });
-        if (error) throw error;
+        if (!retryRes.ok) {
+          const raw = await retryRes.text().catch(() => "");
+          let errMsg = `trigger-analysis HTTP ${retryRes.status}`;
+          try { const j = JSON.parse(raw); if (j.error) errMsg = j.error; } catch { /* HTML or empty body */ }
+          throw new Error(errMsg);
+        }
         toast.success("Analysis re-queued");
       }
 
@@ -905,10 +917,10 @@ function CaseViewInner() {
             ["review",      "2 · REVIEW"],
             ["ratios",      "3 · RATIOS"],
             ["projections", "4 · PROJ"],
-            ["ic_note",     "5 · IC NOTE"],
-            ["emi",         "6 · EMI"],
-            ["bank",        "7 · BANK"],
-            ["gst",         "8 · GST"],
+            ["bank",        "5 · BANK"],
+            ["gst",         "6 · GST"],
+            ["ic_note",     "7 · IC NOTE"],
+            ["emi",         "8 · EMI"],
           ] as const).map(([k, l]) => (
             <button
               key={k}
