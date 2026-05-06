@@ -8,7 +8,7 @@
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
-import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
+
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -92,7 +92,15 @@ function imageMime(name: string): string {
   return "image/png";
 }
 
-async function downloadAsBase64(supabase: ReturnType<typeof createClient>, path: string): Promise<string> {
+function encodeBase64(data: Uint8Array): string {
+  let binary = "";
+  const cs = 0x8000;
+  for (let i = 0; i < data.length; i += cs)
+    binary += String.fromCharCode.apply(null, Array.from(data.subarray(i, i + cs)));
+  return btoa(binary);
+}
+
+async function downloadAsBase64(supabase: any, path: string): Promise<string> {
   const { data, error } = await supabase.storage.from("case-files").download(path);
   if (error || !data) throw new Error(`Download failed: ${path} — ${error?.message}`);
   const buf = await (data as Blob).arrayBuffer();
@@ -134,7 +142,7 @@ async function runAnalysis(
   user_id: string,
   excel_texts: Record<string, string>,
   apiKey: string,
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
 ): Promise<void> {
   try {
     const { data: docs, error: docsErr } = await supabase
@@ -184,7 +192,7 @@ async function runAnalysis(
 
     const requestBody = {
       model: CLAUDE_MODEL,
-      max_tokens: 8192,
+      max_tokens: 16000,
       system: `You are a senior financial data extraction engine for Rehbar Financial Services (Islamic NBFC).
 You will receive ${docIndex} financial document${docIndex > 1 ? "s" : ""} (PDFs, images, and Excel files). Each document is labelled with its filename and type.
 Extract ALL financial statements across ALL fiscal years from ALL documents.
@@ -253,6 +261,7 @@ EXTRACTION RULES:
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await fetch(CLAUDE_API, {
         method: "POST",
+        signal: AbortSignal.timeout(120_000),
         headers: {
           "x-api-key": apiKey,
           "anthropic-version": ANTHROPIC_VER,
@@ -298,7 +307,7 @@ EXTRACTION RULES:
         case_id, user_id, document_id: primaryDocId,
         fiscal_year: stmt.fiscal_year, statement_type: stmt.statement_type,
         line_items: lineItems, confirmed: false, unit: extracted.unit,
-      }, { onConflict: "case_id,fiscal_year,statement_type" });
+      }, { onConflict: "case_id,fiscal_year,statement_type" } as any);
 
       if (error) {
         console.error("Upsert failed", stmt.fiscal_year, stmt.statement_type, error.message);
@@ -314,7 +323,7 @@ EXTRACTION RULES:
       const ratios = computeRatiosForYear(extracted.statements, fy);
       await supabase.from("financial_ratios").upsert(
         { case_id, user_id, fiscal_year: fy, ...ratios },
-        { onConflict: "case_id,fiscal_year" },
+        { onConflict: "case_id,fiscal_year" } as any,
       );
     }
 
@@ -341,13 +350,11 @@ EXTRACTION RULES:
     const msg = e instanceof Error ? e.message : String(e);
     console.error("runAnalysis failed:", msg);
     await supabase.from("financial_documents")
-      .update({ extraction_status: "failed", extraction_error: msg })
-      .in("id", document_ids)
-      .catch(() => {});
+      .update({ extraction_status: "failed", extraction_error: msg.slice(0, 500) })
+      .in("id", document_ids);
     await supabase.from("credit_cases")
       .update({ status: "draft" })
-      .eq("id", case_id)
-      .catch(() => {});
+      .eq("id", case_id);
   }
 }
 
@@ -390,10 +397,24 @@ Deno.serve(async (req) => {
       .update({ extraction_status: "running", extraction_error: null })
       .in("id", body.document_ids);
 
-    // Run the heavy work (downloads + Claude) in background after response is sent
-    EdgeRuntime.waitUntil(
-      runAnalysis(body.case_id, body.document_ids, body.user_id, body.excel_texts ?? {}, apiKey, supabase)
-    );
+    // Run the heavy work in background — race against 130 s so our catch block
+    // always fires before Supabase's hard 150 s kill, leaving no stuck "running" docs.
+    const analysisWithTimeout = Promise.race([
+      runAnalysis(body.case_id, body.document_ids, body.user_id, body.excel_texts ?? {}, apiKey, supabase),
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Analysis timed out (130 s) — document may be too large; try splitting into smaller files")), 130_000)
+      ),
+    ]).catch(async (e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Analysis race failed:", msg);
+      await supabase.from("financial_documents")
+        .update({ extraction_status: "failed", extraction_error: msg.slice(0, 500) })
+        .in("id", body.document_ids);
+      await supabase.from("credit_cases")
+        .update({ status: "draft" })
+        .eq("id", body.case_id);
+    });
+    EdgeRuntime.waitUntil(analysisWithTimeout);
 
     return new Response(JSON.stringify({ ok: true }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

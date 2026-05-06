@@ -94,7 +94,7 @@ async function pollExtractionStatus(docId: string, signal: AbortSignal): Promise
     if (data?.extraction_status === "failed")
       throw new Error(data.extraction_error ?? "Extraction failed");
   }
-  throw new Error("Analysis timed out — check Trigger.dev dashboard for run status");
+  throw new Error("Analysis timed out — check Supabase Edge Function logs");
 }
 
 // ── Wrapper: provides the Liveblocks room scoped to this case ─────────────────
@@ -175,6 +175,7 @@ function CaseViewInner() {
     const ch = supabase
       .channel(`case-${id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "credit_cases", filter: `id=eq.${id}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "financial_documents", filter: `case_id=eq.${id}` }, scheduleReload)
       .on("postgres_changes", { event: "*", schema: "public", table: "extracted_financials", filter: `case_id=eq.${id}` }, scheduleReload)
       .on("postgres_changes", { event: "*", schema: "public", table: "financial_ratios", filter: `case_id=eq.${id}` }, scheduleReload)
       .subscribe();
@@ -412,7 +413,7 @@ function CaseViewInner() {
       };
 
       if (doc_class === "bank_statement") {
-        // Stage 4: queue all bank statement docs (this + any existing failed/pending) via Trigger.dev
+        // Stage 4: queue all bank statement docs (this + any existing failed/pending)
         setProgressLabel("Queuing bank statement extraction…");
         const { data: otherDocs } = await supabase.from("financial_documents")
           .select("id")
@@ -454,7 +455,7 @@ function CaseViewInner() {
           throw new Error(String(e?.error ?? `GST extraction failed (HTTP ${res.status})`));
         }
       } else {
-        // Stage 4: queue financial statement analysis via Trigger.dev (PDF, image, Excel all handled)
+        // Stage 4: queue financial statement analysis (PDF, image, Excel all handled)
         setProgressLabel("Queuing AI analysis...");
         const triggerRes = await fetch(
           `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-analysis`,
@@ -496,7 +497,13 @@ function CaseViewInner() {
         await reload();
         setProgressLabel("Cancelled");
       } else {
+        if (uploadedDocId) {
+          await supabase.from("financial_documents")
+            .update({ extraction_status: "failed", extraction_error: msg.slice(0, 500) })
+            .eq("id", uploadedDocId);
+        }
         setExtractError({ title: "Extraction failed", detail: msg });
+        await reload();
       }
     } finally {
       abortRef.current = null;
@@ -1684,7 +1691,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
     const raw = snap.value.trim().replace(/,/g, "");
     const num = raw === "" ? null : parseFloat(raw);
     if (raw !== "" && (isNaN(num!) || !isFinite(num!))) return;
-    await supabase.from("bank_statement_data").update({ [snap.field]: num }).eq("id", snap.id);
+    await supabase.from("bank_statement_data").update({ [snap.field]: num } as any).eq("id", snap.id);
     await onReload();
   };
 
@@ -2059,7 +2066,7 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
     const raw = snap.value.trim().replace(/,/g, "");
     const num = raw === "" ? null : parseFloat(raw);
     if (raw !== "" && (isNaN(num!) || !isFinite(num!))) return;
-    await supabase.from("gst_return_data").update({ [snap.field]: num }).eq("id", snap.id);
+    await supabase.from("gst_return_data").update({ [snap.field]: num } as any).eq("id", snap.id);
     await onReload();
   };
 
@@ -2068,7 +2075,7 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
     const snap = editCell;
     setEditCell(null);
     const val = snap.value.trim() || null;
-    await supabase.from("gst_return_data").update({ [snap.field]: val }).eq("id", snap.id);
+    await supabase.from("gst_return_data").update({ [snap.field]: val } as any).eq("id", snap.id);
     await onReload();
   };
 
