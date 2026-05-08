@@ -255,33 +255,48 @@ export const STANDARD_LINE_ITEMS: Record<StatementType, string[]> = {
 };
 
 export const RATIO_DISPLAY_NAMES: Record<string, string> = {
+  // Profitability
+  revenue_growth: "Revenue Growth (%)",
+  ebitda_margin: "EBITDA Margins (%)",
+  ebt_margin: "EBT Margins (%)",
+  net_profit_margin: "PAT Margins (%)",
+  roe: "Return on Equity (%)",
+  return_on_fixed_assets: "Return on Fixed Assets (%)",
+  roce: "Return on Capital Employed (%)",
+  gross_margin: "Gross Profit Margin (%)",
+  roa: "Return on Assets (%)",
   // Liquidity
   current_ratio: "Current Ratio",
   quick_ratio: "Quick Ratio",
   cash_ratio: "Cash Ratio",
   working_capital: "Working Capital",
   // Solvency
-  debt_to_equity: "Debt-to-Equity Ratio",
-  debt_to_assets: "Debt-to-Assets Ratio",
-  total_liab_to_networth: "Total Liab / Net Worth",
   interest_coverage: "Interest Coverage Ratio",
+  lt_debt_to_equity: "Long-term Debt / Equity",
+  total_assets_to_equity: "Total Assets / Equity",
+  debt_to_equity: "Total Debt / Equity",
+  debt_to_assets: "Total Debt / Total Assets",
+  debt_to_ebitda: "Total Debt / EBITDA",
+  total_liab_to_networth: "Total Liab / Net Worth",
   // Coverage
   dscr: "DSCR",
-  // Efficiency
-  asset_turnover: "Asset Turnover Ratio",
-  receivables_turnover: "Receivables Turnover Ratio",
+  // Efficiency / Turnover
+  fixed_assets_turnover: "Fixed Assets Turnover",
+  asset_turnover: "Total Asset Turnover",
+  working_capital_turnover: "Working Capital Turnover",
+  inventory_days: "Inventory Days",
+  debtor_days: "Receivables Days*",
+  creditor_days: "Payable Days*",
+  cash_conversion_cycle: "Cash Conversion Cycle*",
+  inventory_turnover: "Inventory Turnover",
+  receivables_turnover: "Receivables Turnover",
   capital_employed_turnover: "Cap Employed Turnover",
-  debtor_days: "Debtor Days",
-  creditor_days: "Creditor Days",
-  inventory_turnover: "Inventory Turnover Ratio",
-  // Profitability
-  gross_margin: "Gross Profit Margin",
-  ebitda_margin: "EBITDA Margin",
-  net_profit_margin: "Net Profit Margin",
-  roa: "Return on Assets (ROA)",
-  roe: "Return on Equity (ROE)",
+  // Expenses
+  raw_material_pct: "Raw Material Consumption (% of Sales)",
+  employee_cost_pct: "Total Employee Cost (% of Sales)",
+  finance_cost_pct: "Finance Cost (% of Sales)",
+  other_expenses_pct: "Total Other Expenses (% of Sales)",
   // Return
-  roce: "Return on Capital Employed (ROCE)",
   roic: "Return on Invested Capital (ROIC)",
   ronw: "Return on Net Worth (RONW)",
   // R' Score
@@ -293,18 +308,23 @@ export const RATIO_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const PCT_RATIOS = new Set([
-  "gross_margin", "ebitda_margin", "net_profit_margin", "pat_margin",
+  "gross_margin", "ebitda_margin", "ebt_margin", "net_profit_margin",
   "roa", "roe", "roce", "roic", "ronw",
+  "revenue_growth", "return_on_fixed_assets",
+  "raw_material_pct", "employee_cost_pct", "finance_cost_pct", "other_expenses_pct",
+]);
+const DAYS_RATIOS = new Set([
+  "debtor_days", "creditor_days", "inventory_days", "cash_conversion_cycle",
 ]);
 const R_SCORE_RATIOS = new Set([
   "r_score_composite", "r_score_wc_ta", "r_score_re_ta", "r_score_ebitda_ta", "r_score_equity_ol",
 ]);
 
 export function formatRatio(name: string, value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return "N/A";
-  if (["debtor_days", "creditor_days"].includes(name)) return value.toFixed(0);
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  if (DAYS_RATIOS.has(name)) return Math.round(value).toLocaleString("en-IN");
   if (name === "working_capital") return value.toLocaleString("en-IN", { maximumFractionDigits: 0 });
-  if (PCT_RATIOS.has(name)) return (value * 100).toFixed(1) + "%";
+  if (PCT_RATIOS.has(name)) return (value * 100).toFixed(2) + "%";
   if (R_SCORE_RATIOS.has(name)) return value.toFixed(2);
   return value.toFixed(2) + "x";
 }

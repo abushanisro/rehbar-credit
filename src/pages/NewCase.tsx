@@ -6,6 +6,7 @@ import { TerminalLayout } from "@/components/terminal/TerminalLayout";
 import { Panel } from "@/components/terminal/Panel";
 import { PRODUCTS, type ProductType } from "@/features/credit/domain";
 import { toast } from "sonner";
+import { parseAccumnExcel, mapToIndustry as _mapIndustry, mapToConstitution as _mapConstitution, type McaProfile, type Director } from "@/lib/mca-parser";
 
 const INDUSTRIES = [
   "Agriculture & Food Processing",
@@ -100,6 +101,7 @@ interface CompanySuggestion {
   gstin: string | null; website: string | null; promoter_details: string | null;
 }
 
+
 export default function NewCase() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -143,6 +145,9 @@ export default function NewCase() {
   const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([]);
   const cancelledRef = useRef(false);
   const currentXhrRef = useRef<XMLHttpRequest | null>(null);
+  const mcaFileInputRef = useRef<HTMLInputElement>(null);
+  const [mcaProfile, setMcaProfile] = useState<McaProfile | null>(null);
+  const [mcaImporting, setMcaImporting] = useState(false);
 
   const product = PRODUCTS[form.product_type];
 
@@ -270,6 +275,43 @@ export default function NewCase() {
     setScanResult(null);
   };
 
+  const handleMcaExcelImport = async (file: File) => {
+    setMcaImporting(true);
+    try {
+      const { profile, companyName, websiteUrl } = await parseAccumnExcel(file);
+      setMcaProfile(profile);
+
+      const industry = _mapIndustry(profile.sector || profile.nse_sector || "");
+      const constitution = _mapConstitution(profile.category || "", profile.mca_type || "");
+      let yearEst = "";
+      if (profile.date_of_incorporation) {
+        const parts = profile.date_of_incorporation.split("/");
+        const yr = parts.length === 3 ? parts[2] : parts[0];
+        if (yr && yr.length === 4) yearEst = yr;
+      }
+
+      setForm(f => ({
+        ...f,
+        client_name: companyName || f.client_name,
+        website: websiteUrl || f.website,
+        year_established: yearEst || f.year_established,
+        industry: industry && INDUSTRIES.includes(industry as typeof INDUSTRIES[number]) ? industry : f.industry,
+        legal_constitution: constitution || f.legal_constitution,
+        promoter_details: "",
+      }));
+
+      toast.success(
+        `Imported: ${companyName || "Company"} · ${profile.directors.length} director${profile.directors.length !== 1 ? "s" : ""}`
+      );
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to parse Excel — check the file format");
+    } finally {
+      setMcaImporting(false);
+      if (mcaFileInputRef.current) mcaFileInputRef.current.value = "";
+    }
+  };
+
   // ── multi-document scan ───────────────────────────────────────────────────
   const handleScanFiles = useCallback(async (rawFiles: File[]) => {
     if (!user || rawFiles.length === 0) return;
@@ -384,6 +426,39 @@ export default function NewCase() {
     if (files.length) handleScanFiles(files);
   };
 
+  // ── helpers to save MCA data to a company record ─────────────────────────
+  const saveMcaToCompany = async (companyId: string) => {
+    if (!mcaProfile) return;
+    const db = supabase as any;
+    await db.from("companies").update({
+      mca_cin: mcaProfile.cin ?? null,
+      mca_pan: mcaProfile.pan ?? null,
+      mca_lei: mcaProfile.lei ?? null,
+      mca_category: mcaProfile.category ?? null,
+      mca_sub_category: mcaProfile.sub_category ?? null,
+      mca_type: mcaProfile.mca_type ?? null,
+      mca_authorized_capital: mcaProfile.authorized_capital ?? null,
+      mca_paid_up_capital: mcaProfile.paid_up_capital ?? null,
+      mca_status: mcaProfile.mca_status ?? null,
+      mca_nse_sector: mcaProfile.nse_sector ?? null,
+      mca_sector: mcaProfile.sector ?? null,
+      mca_products_services: mcaProfile.products_services ?? null,
+      mca_email: mcaProfile.email ?? null,
+      mca_telephone: mcaProfile.telephone ?? null,
+      mca_date_of_incorp: mcaProfile.date_of_incorporation ?? null,
+      mca_date_last_bs: mcaProfile.date_of_last_bs ?? null,
+      mca_date_last_agm: mcaProfile.date_of_last_agm ?? null,
+      mca_about: mcaProfile.about ?? null,
+    }).eq("id", companyId);
+
+    if (mcaProfile.directors.length > 0) {
+      await db.from("company_directors").delete().eq("company_id", companyId);
+      await db.from("company_directors").insert(
+        mcaProfile.directors.map((d: import("@/lib/mca-parser").Director) => ({ ...d, company_id: companyId }))
+      );
+    }
+  };
+
   // ── case submit ───────────────────────────────────────────────────────────
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -394,11 +469,27 @@ export default function NewCase() {
     const resolvedIndustry =
       form.industry === "Other" ? form.industry_custom : form.industry;
 
+    // If MCA data imported but no company selected, auto-create a company
+    let companyId = selectedCompanyId || null;
+    if (mcaProfile && !companyId && form.client_name.trim()) {
+      const db = supabase as any;
+      const { data: newCo, error: coErr } = await db.from("companies").insert({
+        name: form.client_name.trim(),
+        legal_constitution: form.legal_constitution || null,
+        industry: resolvedIndustry || null,
+        year_established: form.year_established ? Number(form.year_established) : null,
+        website: form.website || null,
+        registered_address: mcaProfile.raw_address || null,
+        created_by: user.id,
+      }).select("id").single();
+      if (!coErr && newCo?.id) companyId = newCo.id;
+    }
+
     const { data, error } = await (supabase.from("credit_cases") as any).insert({
       user_id: user.id,
       case_code: code,
       client_name: form.client_name,
-      company_id: selectedCompanyId || null,
+      company_id: companyId,
       product_type: form.product_type,
       product_type_custom: form.product_type === "other" ? form.product_type_custom || null : null,
       industry: resolvedIndustry || null,
@@ -418,6 +509,10 @@ export default function NewCase() {
 
     setSubmitting(false);
     if (error) { toast.error(error.message); return; }
+
+    // Save MCA data to the company (whether newly created or pre-existing)
+    if (mcaProfile && companyId) await saveMcaToCompany(companyId);
+
     toast.success(`Case ${code} created`);
     navigate(`/case/${data.id}`);
   };
@@ -428,6 +523,7 @@ export default function NewCase() {
 
   return (
     <TerminalLayout>
+      <div className="space-y-3">
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
 
         {/* ── LEFT: case form ─────────────────────────────────────────────── */}
@@ -511,6 +607,41 @@ export default function NewCase() {
                 </button>
                 {!form.client_name.trim() && !form.website.trim() && (
                   <p className="text-[10px] text-foreground/40 mt-1 tracking-wider">Enter client name or website above first</p>
+                )}
+              </div>
+
+              {/* MCA / Corpository Excel import */}
+              <div className="col-span-2">
+                <input
+                  ref={mcaFileInputRef}
+                  type="file"
+                  className="hidden"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={e => {
+                    const f = e.target.files?.[0];
+                    if (f) handleMcaExcelImport(f);
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => mcaFileInputRef.current?.click()}
+                  disabled={mcaImporting}
+                  className="w-full border border-border bg-surface-2 text-muted-foreground px-4 py-2 text-xs tracking-widest font-bold hover:border-primary hover:text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                >
+                  {mcaImporting ? "IMPORTING MCA EXCEL…" : "↑ IMPORT CORPOSITORY / MCA EXCEL  (auto-fills company + directors)"}
+                </button>
+                {mcaProfile && (
+                  <p className="text-[10px] text-success mt-1 tracking-wider">
+                    ● MCA profile imported — {mcaProfile.directors.length} director{mcaProfile.directors.length !== 1 ? "s" : ""} · see Directors tab below
+                    {mcaProfile.cin ? ` · CIN: ${mcaProfile.cin}` : ""}
+                    <button
+                      type="button"
+                      onClick={() => setMcaProfile(null)}
+                      className="ml-2 text-destructive hover:opacity-70"
+                    >
+                      ✕ clear
+                    </button>
+                  </p>
                 )}
               </div>
 
@@ -792,6 +923,122 @@ export default function NewCase() {
           </Panel>
 
         </div>
+      </div>
+
+      {/* ── MCA PROFILE + DIRECTORS — full width, below grid ─────────────── */}
+      {mcaProfile && (
+        <div className="space-y-3">
+
+          {/* Company MCA details */}
+          <Panel title="MCA / CORPOSITORY PROFILE" ticker={mcaProfile.cin ?? "IMPORTED"} status="live">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-xs">
+              {[
+                { label: "CIN",                value: mcaProfile.cin },
+                { label: "PAN",                value: mcaProfile.pan },
+                { label: "LEI",                value: mcaProfile.lei },
+                { label: "CATEGORY",           value: mcaProfile.category },
+                { label: "SUB CATEGORY",       value: mcaProfile.sub_category },
+                { label: "COMPANY TYPE",       value: mcaProfile.mca_type },
+                { label: "AUTH. CAPITAL",      value: mcaProfile.authorized_capital },
+                { label: "PAID UP CAPITAL",    value: mcaProfile.paid_up_capital },
+                { label: "STATUS",             value: mcaProfile.mca_status },
+                { label: "NSE SECTOR",         value: mcaProfile.nse_sector },
+                { label: "SECTOR",             value: mcaProfile.sector },
+                { label: "PRODUCTS/SERVICES",  value: mcaProfile.products_services },
+                { label: "EMAIL",              value: mcaProfile.email },
+                { label: "TELEPHONE",          value: mcaProfile.telephone },
+                { label: "INCORPORATION DATE", value: mcaProfile.date_of_incorporation },
+                { label: "LAST BALANCE SHEET", value: mcaProfile.date_of_last_bs },
+                { label: "LAST AGM",           value: mcaProfile.date_of_last_agm },
+              ].filter(f => f.value).map(f => (
+                <div key={f.label}>
+                  <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">{f.label}</div>
+                  <div className="text-primary font-mono">{f.value}</div>
+                </div>
+              ))}
+              {mcaProfile.raw_address && (
+                <div className="col-span-2 sm:col-span-3 lg:col-span-5">
+                  <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">REGISTERED ADDRESS</div>
+                  <div className="text-primary">{mcaProfile.raw_address}</div>
+                </div>
+              )}
+            </div>
+          </Panel>
+
+          {/* Directors table */}
+          {mcaProfile.directors.length > 0 && (
+            <Panel title="DIRECTORS" ticker={`${mcaProfile.directors.length} DIRECTORS`} status="live">
+              <div className="overflow-x-auto">
+                <table className="text-[11px] font-mono border-collapse" style={{ minWidth: "2400px" }}>
+                  <thead>
+                    <tr className="border-b border-border bg-surface/60 text-[9px] tracking-widest text-muted-foreground">
+                      {["NAME","DIN","PAN","DIN STATUS","DSC STATUS","DOB","AGE","GENDER","NATIONALITY",
+                        "DESIGNATION","CATEGORY","APPOINTED CURRENT","ORIGINALLY APPOINTED",
+                        "CESSATION","% SHAREHOLDING","EMAIL","PHONE","REMARKS","ADDRESS"].map(h => (
+                        <th key={h} className="text-left py-2 px-3 font-normal whitespace-nowrap border-r border-border/30">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mcaProfile.directors.map((d, i) => {
+                      const dm = d.designation?.match(/^(.+?)\((.+?)\)$/);
+                      const role = dm ? dm[1].trim() : (d.designation || "");
+                      const cat  = dm ? dm[2].trim() : "";
+                      return (
+                        <tr key={i} className="border-b border-border/40 hover:bg-surface-2 transition-colors align-top">
+                          <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                            <div className="font-bold text-primary">{d.name}</div>
+                            {d.dob && <div className="text-[9px] text-muted-foreground mt-0.5">DOB: {d.dob}</div>}
+                          </td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.din || "—"}</td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.pan || "—"}</td>
+                          <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                            {d.din_status ? <span className={`text-[9px] font-bold tracking-widest ${d.din_status.toLowerCase() === "approved" ? "text-success" : "text-muted-foreground"}`}>{d.din_status.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dsc_status || "—"}</td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dob || "—"}</td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.age || "—"}</td>
+                          <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                            {d.gender ? <span className={`text-[9px] font-bold tracking-widest ${d.gender.toLowerCase() === "female" ? "text-accent" : "text-primary"}`}>{d.gender.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.nationality || "—"}</td>
+                          <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-primary">{role || "—"}</td>
+                          <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                            {cat && cat !== "-" ? <span className="text-accent text-[9px] tracking-widest">{cat}</span> : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.appointed_current || "—"}</td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.originally_appointed || "—"}</td>
+                          <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                            {d.cessation_date && d.cessation_date !== "-"
+                              ? <span className="text-[9px] font-bold tracking-widest text-destructive">{d.cessation_date}</span>
+                              : <span className="text-[9px] text-success font-bold tracking-widest">ACTIVE</span>}
+                          </td>
+                          <td className="py-2 px-3 border-r border-border/20 whitespace-nowrap">
+                            {d.shareholding ? (() => {
+                              const m = String(d.shareholding).match(/^(.+?)\s*(\(.+\))$/);
+                              return m ? <><div className="text-muted-foreground">{m[1].trim()}</div><div className="text-[8px] text-muted-foreground/50 mt-0.5">{m[2]}</div></> : <span className="text-muted-foreground">{d.shareholding}</span>;
+                            })() : "—"}
+                          </td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.email || "—"}</td>
+                          <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.phone || "—"}</td>
+                          <td className="py-2 px-3 border-r border-border/20" style={{maxWidth:"180px"}}>
+                            <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2" style={{wordBreak:"break-word"}} title={d.remarks||""}>{d.remarks || "—"}</div>
+                          </td>
+                          <td className="py-2 px-3" style={{maxWidth:"200px"}}>
+                            <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2" style={{wordBreak:"break-word"}} title={d.address||""}>{d.address || "—"}</div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Panel>
+          )}
+
+        </div>
+      )}
+
       </div>
     </TerminalLayout>
   );

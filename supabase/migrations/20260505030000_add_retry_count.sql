@@ -9,3 +9,4 @@ RETURNS void LANGUAGE sql AS $$
   SET retry_count = retry_count + 1
   WHERE id = ANY(doc_ids);
 $$;
+

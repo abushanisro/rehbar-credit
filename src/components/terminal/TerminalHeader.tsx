@@ -274,12 +274,69 @@ function NotificationBell({ userId }: { userId: string }) {
   );
 }
 
+// ── AI Token Usage meter (fed by CustomEvent from anywhere in the app) ────────
+type TokenPayload =
+  | { status: "loading"; label: string; max_tokens: number }
+  | { status: "complete"; label: string; input_tokens: number; output_tokens: number; max_tokens: number; model: string };
+
+interface TokenState {
+  status: "idle" | "loading" | "complete";
+  label: string;
+  input_tokens: number;
+  output_tokens: number;   // live-estimated during loading, actual on complete
+  max_tokens: number;
+  model: string;
+  sessionTotal: number;
+}
+
+function useAiTokenUsage() {
+  const [state, setState] = useState<TokenState>({
+    status: "idle", label: "", input_tokens: 0, output_tokens: 0, max_tokens: 2500, model: "claude-sonnet-4-6", sessionTotal: 0,
+  });
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const d = (e as CustomEvent<TokenPayload>).detail;
+
+      if (d.status === "loading") {
+        // Start animated estimate: Claude Sonnet ~35 output tokens/sec
+        if (tickRef.current) clearInterval(tickRef.current);
+        setState(prev => ({ ...prev, status: "loading", label: d.label, max_tokens: d.max_tokens, output_tokens: 0, input_tokens: 0 }));
+        tickRef.current = setInterval(() => {
+          setState(prev => ({
+            ...prev,
+            output_tokens: Math.min(prev.output_tokens + 35, prev.max_tokens - 10),
+          }));
+        }, 1000);
+      } else {
+        // Complete — snap to real values
+        if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
+        setState(prev => ({
+          status: "complete",
+          label: d.label,
+          input_tokens: d.input_tokens,
+          output_tokens: d.output_tokens,
+          max_tokens: d.max_tokens,
+          model: d.model,
+          sessionTotal: prev.sessionTotal + d.input_tokens + d.output_tokens,
+        }));
+      }
+    };
+    window.addEventListener("ai-token-usage", handler);
+    return () => { window.removeEventListener("ai-token-usage", handler); if (tickRef.current) clearInterval(tickRef.current); };
+  }, []);
+
+  return state;
+}
+
 // ── TerminalHeader ────────────────────────────────────────────────────────────
 export const TerminalHeader = () => {
   const [now, setNow]   = useState(new Date());
   const { user, signOut } = useAuth();
   const loc             = useLocation();
   const navigate        = useNavigate();
+  const tokenState = useAiTokenUsage();
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -320,6 +377,66 @@ export const TerminalHeader = () => {
           <span className="text-muted-foreground hidden sm:block">v1.0.0</span>
           <span className="text-success ticker-blink hidden sm:block">● LIVE</span>
           <span className="text-muted-foreground hidden md:block">AI ENGINE</span>
+
+          {/* ── AI Token Meter — always visible ─────────────────────── */}
+          {(() => {
+            const { status, label, input_tokens, output_tokens, max_tokens, model, sessionTotal } = tokenState;
+            const outPct    = Math.min(100, Math.round((output_tokens / max_tokens) * 100));
+            const pctColor  = outPct >= 85 ? "text-destructive" : outPct >= 60 ? "text-warning" : "text-success";
+            const barFill   = outPct >= 85 ? "bg-destructive" : outPct >= 60 ? "bg-warning" : "bg-success";
+            const isLoading = status === "loading";
+            return (
+              <div className="hidden sm:flex items-center gap-3 border-l border-border/50 pl-3">
+                <div className="flex flex-col gap-1 min-w-[160px]">
+                  {/* top: counts */}
+                  {status !== "idle" && (
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] text-muted-foreground/60 tracking-widest font-medium">{label.toUpperCase()}</span>
+                        {isLoading && <span className="text-warning text-[9px] animate-pulse font-bold">▸</span>}
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[9px] tabular-nums">
+                        <span className="text-muted-foreground/50">IN</span>
+                        <span className="text-foreground/70 font-medium">{input_tokens > 0 ? input_tokens.toLocaleString("en-IN") : "—"}</span>
+                        <span className="text-border">·</span>
+                        <span className="text-muted-foreground/50">OUT</span>
+                        <span className={`font-bold ${isLoading ? "text-warning animate-pulse" : "text-foreground/90"}`}>
+                          {output_tokens.toLocaleString("en-IN")}
+                        </span>
+                        <span className="text-muted-foreground/40">/ {max_tokens.toLocaleString("en-IN")}</span>
+                      </div>
+                    </div>
+                  )}
+                  {/* bar */}
+                  <div className="relative w-full h-[6px] bg-border/40 rounded-sm overflow-hidden">
+                    {status !== "idle" && (
+                      <div
+                        className={`h-full rounded-sm transition-all duration-700 ${isLoading ? "bg-warning" : barFill}`}
+                        style={{
+                          width: `${outPct}%`,
+                          boxShadow: isLoading ? "0 0 6px hsl(var(--warning))" : undefined,
+                        }}
+                      />
+                    )}
+                  </div>
+                  {/* bottom: pct + session + model */}
+                  <div className="flex items-center justify-between text-[8px]">
+                    <span className={`font-bold tabular-nums ${status === "idle" ? "text-muted-foreground/30" : isLoading ? "text-warning/80" : pctColor}`}>
+                      {status === "idle" ? "0%" : `${outPct}%`}
+                    </span>
+                    <div className="flex items-center gap-2 text-muted-foreground/35">
+                      {sessionTotal > 0 && (
+                        <span className="tabular-nums hidden md:inline">{(sessionTotal / 1000).toFixed(1)}k session</span>
+                      )}
+                      {model && status === "complete" && (
+                        <span className="hidden lg:inline truncate max-w-[90px]">{model}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
         <div className="flex items-center gap-2 sm:gap-3 text-muted-foreground shrink-0">
           <span className="hidden md:block">{user?.email}</span>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { TerminalLayout } from "@/components/terminal/TerminalLayout";
@@ -8,6 +8,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip as RTooltip, ResponsiveContainer, Legend,
 } from "recharts";
+import { parseAccumnExcel, mapToIndustry, mapToConstitution, type McaProfile, type Director } from "@/lib/mca-parser";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -17,6 +18,14 @@ interface CompanyRow {
   gstin: string | null; website: string | null;
   promoter_details: string | null; registered_address: string | null;
   notes: string | null; is_active: boolean; created_at: string;
+  // MCA columns
+  mca_cin?: string | null; mca_pan?: string | null; mca_lei?: string | null;
+  mca_category?: string | null; mca_sub_category?: string | null; mca_type?: string | null;
+  mca_authorized_capital?: string | null; mca_paid_up_capital?: string | null;
+  mca_status?: string | null; mca_nse_sector?: string | null; mca_sector?: string | null;
+  mca_products_services?: string | null; mca_email?: string | null; mca_telephone?: string | null;
+  mca_date_of_incorp?: string | null; mca_date_last_bs?: string | null;
+  mca_date_last_agm?: string | null; mca_about?: string | null;
 }
 
 interface CaseRow {
@@ -36,6 +45,7 @@ interface TrendPoint {
   turnover: number | null; ebitda: number | null; pat: number | null;
   netWorth: number | null; totalDebt: number | null;
 }
+
 
 const INDUSTRIES = [
   "Agriculture & Food Processing","Automotive","Chemicals & Petrochemicals",
@@ -68,16 +78,18 @@ function lv(items: { label: string; value: number | null; override_value?: numbe
   return (v !== null && v !== undefined && Number.isFinite(Number(v))) ? Number(v) : null;
 }
 
+
 const inputCls = "w-full bg-input border border-border px-2 py-1.5 text-xs text-primary focus:outline-none focus:border-primary placeholder:text-muted-foreground/40";
 const labelCls = "block text-[9px] tracking-widest text-muted-foreground mb-1 uppercase";
 
-type Tab = "overview" | "deals" | "financials";
+type Tab = "overview" | "deals" | "financials" | "directors";
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function CompanyView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [company, setCompany] = useState<CompanyRow | null>(null);
   const [cases, setCases]     = useState<CaseRow[]>([]);
@@ -88,6 +100,10 @@ export default function CompanyView() {
   const [saving, setSaving]     = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [mcaProfile, setMcaProfile] = useState<McaProfile | null>(null);
+  const [dbDirectors, setDbDirectors] = useState<import("@/lib/mca-parser").Director[]>([]);
+
   const [form, setForm]       = useState({
     name: "", legal_constitution: "", industry: "",
     year_established: "", gstin: "", website: "",
@@ -98,22 +114,53 @@ export default function CompanyView() {
     if (!id) return;
     setLoading(true);
     const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
-    const [{ data: co }, { data: cs }, { data: fin }] = await Promise.all([
+    const [{ data: co }, { data: cs }, { data: dirs }] = await Promise.all([
       db.from("companies").select("*").eq("id", id).single(),
       supabase.from("credit_cases")
         .select("id,case_code,client_name,status,product_type,deal_amount,tenure_months,expected_irr,created_at,user_id")
         .eq("company_id" as never, id)
         .order("created_at", { ascending: false }),
-      supabase.from("extracted_financials")
-        .select("fiscal_year,statement_type,line_items,unit")
-        .in("case_id" as never, []) as ReturnType<typeof supabase.from>, // filled below
+      db.from("company_directors").select("*").eq("company_id", id).order("name"),
     ]);
 
-    setCompany(co as CompanyRow ?? null);
+    const companyRow = co as CompanyRow ?? null;
+    setCompany(companyRow);
+
+    // Load directors from DB
+    const dirList = (dirs ?? []) as import("@/lib/mca-parser").Director[];
+    setDbDirectors(dirList);
+
+    // Build mcaProfile from company MCA columns + DB directors (no JSON needed)
+    if (companyRow?.mca_cin || companyRow?.mca_pan || dirList.length > 0) {
+      setMcaProfile({
+        __type: "mca",
+        cin: companyRow.mca_cin ?? undefined,
+        pan: companyRow.mca_pan ?? undefined,
+        lei: companyRow.mca_lei ?? undefined,
+        category: companyRow.mca_category ?? undefined,
+        sub_category: companyRow.mca_sub_category ?? undefined,
+        mca_type: companyRow.mca_type ?? undefined,
+        authorized_capital: companyRow.mca_authorized_capital ?? undefined,
+        paid_up_capital: companyRow.mca_paid_up_capital ?? undefined,
+        mca_status: companyRow.mca_status ?? undefined,
+        nse_sector: companyRow.mca_nse_sector ?? undefined,
+        sector: companyRow.mca_sector ?? undefined,
+        products_services: companyRow.mca_products_services ?? undefined,
+        email: companyRow.mca_email ?? undefined,
+        telephone: companyRow.mca_telephone ?? undefined,
+        date_of_incorporation: companyRow.mca_date_of_incorp ?? undefined,
+        date_of_last_bs: companyRow.mca_date_last_bs ?? undefined,
+        date_of_last_agm: companyRow.mca_date_last_agm ?? undefined,
+        about: companyRow.mca_about ?? undefined,
+        directors: dirList,
+      });
+    } else {
+      setMcaProfile(null);
+    }
+
     const caseList = (cs ?? []) as CaseRow[];
     setCases(caseList);
 
-    // Load financials across all cases for this company
     if (caseList.length > 0) {
       const { data: finData } = await supabase
         .from("extracted_financials")
@@ -125,7 +172,6 @@ export default function CompanyView() {
     }
 
     setLoading(false);
-    void fin; // unused — loaded above
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
@@ -151,6 +197,28 @@ export default function CompanyView() {
     if (!id || !form.name.trim()) return;
     setSaving(true);
     const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+
+    const mcaCols = mcaProfile ? {
+      mca_cin: mcaProfile.cin ?? null,
+      mca_pan: mcaProfile.pan ?? null,
+      mca_lei: mcaProfile.lei ?? null,
+      mca_category: mcaProfile.category ?? null,
+      mca_sub_category: mcaProfile.sub_category ?? null,
+      mca_type: mcaProfile.mca_type ?? null,
+      mca_authorized_capital: mcaProfile.authorized_capital ?? null,
+      mca_paid_up_capital: mcaProfile.paid_up_capital ?? null,
+      mca_status: mcaProfile.mca_status ?? null,
+      mca_nse_sector: mcaProfile.nse_sector ?? null,
+      mca_sector: mcaProfile.sector ?? null,
+      mca_products_services: mcaProfile.products_services ?? null,
+      mca_email: mcaProfile.email ?? null,
+      mca_telephone: mcaProfile.telephone ?? null,
+      mca_date_of_incorp: mcaProfile.date_of_incorporation ?? null,
+      mca_date_last_bs: mcaProfile.date_of_last_bs ?? null,
+      mca_date_last_agm: mcaProfile.date_of_last_agm ?? null,
+      mca_about: mcaProfile.about ?? null,
+    } : {};
+
     const { error } = await db.from("companies").update({
       name: form.name.trim(),
       legal_constitution: form.legal_constitution || null,
@@ -161,9 +229,20 @@ export default function CompanyView() {
       promoter_details: form.promoter_details || null,
       registered_address: form.registered_address || null,
       notes: form.notes || null,
+      ...mcaCols,
     }).eq("id", id);
+
+    if (error) { setSaving(false); toast.error(error.message); return; }
+
+    // Save directors if MCA data is present
+    if (mcaProfile && mcaProfile.directors.length > 0) {
+      await db.from("company_directors").delete().eq("company_id", id);
+      await db.from("company_directors").insert(
+        mcaProfile.directors.map(d => ({ ...d, company_id: id }))
+      );
+    }
+
     setSaving(false);
-    if (error) { toast.error(error.message); return; }
     toast.success("Company updated");
     setEditing(false);
     load();
@@ -181,6 +260,46 @@ export default function CompanyView() {
     if (error) { toast.error(error.message); return; }
     toast.success("Company removed from master data");
     navigate("/companies");
+  };
+
+  const handleExcelImport = async (file: File) => {
+    setImporting(true);
+    try {
+      const { profile, companyName, websiteUrl } = await parseAccumnExcel(file);
+      setMcaProfile(profile);
+
+      const industry = mapToIndustry(profile.sector || profile.nse_sector || "");
+      const constitution = mapToConstitution(profile.category || "", profile.mca_type || "");
+      let yearEst = "";
+      if (profile.date_of_incorporation) {
+        const parts = profile.date_of_incorporation.split("/");
+        const yr = parts.length === 3 ? parts[2] : parts[0];
+        if (yr && yr.length === 4) yearEst = yr;
+      }
+
+      setForm(f => ({
+        ...f,
+        name: companyName || f.name,
+        website: websiteUrl || f.website,
+        registered_address: profile.raw_address || f.registered_address,
+        year_established: yearEst || f.year_established,
+        industry: industry || f.industry,
+        legal_constitution: constitution || f.legal_constitution,
+        promoter_details: "",
+      }));
+
+      setEditing(true);
+      setTab("overview");
+      toast.success(
+        `Imported: ${companyName || "Company"} · ${profile.directors.length} director${profile.directors.length !== 1 ? "s" : ""}`
+      );
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to parse Excel — check the file format");
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   // ── Financial trend data ───────────────────────────────────────────────────
@@ -222,6 +341,18 @@ export default function CompanyView() {
 
   return (
     <TerminalLayout>
+      {/* Hidden file input for Excel */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        className="hidden"
+        onChange={e => {
+          const f = e.target.files?.[0];
+          if (f) handleExcelImport(f);
+        }}
+      />
+
       <div className="space-y-3">
 
         {/* ── Breadcrumb ─────────────────────────────────────────────────── */}
@@ -254,9 +385,20 @@ export default function CompanyView() {
               {company.gstin && (
                 <span className="text-[9px] tracking-widest text-muted-foreground font-mono">GSTIN: {company.gstin}</span>
               )}
+              {mcaProfile?.cin && (
+                <span className="text-[9px] tracking-widest text-muted-foreground font-mono">CIN: {mcaProfile.cin}</span>
+              )}
             </div>
           </div>
           <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              className="px-3 py-1.5 text-[10px] font-bold tracking-widest border border-border bg-surface-2 text-muted-foreground hover:text-primary hover:border-primary disabled:opacity-40 transition-colors"
+              title="Upload Corpository / MCA Excel"
+            >
+              {importing ? "IMPORTING…" : "↑ IMPORT EXCEL"}
+            </button>
             <button
               onClick={openEdit}
               className="px-3 py-1.5 text-[10px] font-bold tracking-widest border border-border bg-surface-2 text-primary hover:bg-surface transition-colors"
@@ -313,7 +455,7 @@ export default function CompanyView() {
 
         {/* ── Tabs ───────────────────────────────────────────────────────── */}
         <div className="flex border-b border-border">
-          {(["overview","deals","financials"] as Tab[]).map(t => (
+          {(["overview","directors","deals","financials"] as Tab[]).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -323,7 +465,9 @@ export default function CompanyView() {
                   : "border-transparent text-muted-foreground hover:text-primary"
               }`}
             >
-              {t.toUpperCase()}
+              {t === "directors"
+                ? `DIRECTORS${mcaProfile?.directors?.length ? ` (${mcaProfile.directors.length})` : ""}`
+                : t.toUpperCase()}
             </button>
           ))}
         </div>
@@ -331,33 +475,74 @@ export default function CompanyView() {
         {/* ── OVERVIEW tab ───────────────────────────────────────────────── */}
         {tab === "overview" && !editing && (
           <Panel title="COMPANY PROFILE" ticker="MASTER/PROFILE" status="live">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
-              {[
-                { label: "LEGAL CONSTITUTION", value: company.legal_constitution },
-                { label: "INDUSTRY",           value: company.industry },
-                { label: "YEAR ESTABLISHED",   value: company.year_established ? String(company.year_established) : null },
-                { label: "GSTIN",              value: company.gstin },
-                { label: "WEBSITE",            value: company.website },
-                { label: "REGISTERED ADDRESS", value: company.registered_address },
-                { label: "DATE NOTED",         value: new Date(company.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) },
-              ].map(f => (
-                <div key={f.label}>
-                  <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">{f.label}</div>
-                  <div className={f.value ? "text-primary font-mono" : "text-muted-foreground/40"}>
-                    {f.value ?? "—"}
+            <div className="space-y-4">
+              {/* Core fields */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+                {[
+                  { label: "LEGAL CONSTITUTION", value: company.legal_constitution },
+                  { label: "INDUSTRY",           value: company.industry },
+                  { label: "YEAR ESTABLISHED",   value: company.year_established ? String(company.year_established) : null },
+                  { label: "GSTIN",              value: company.gstin },
+                  { label: "WEBSITE",            value: company.website },
+                  { label: "REGISTERED ADDRESS", value: company.registered_address },
+                  { label: "DATE NOTED",         value: new Date(company.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) },
+                ].map(f => (
+                  <div key={f.label}>
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">{f.label}</div>
+                    <div className={f.value ? "text-primary font-mono" : "text-muted-foreground/40"}>
+                      {f.value ?? "—"}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
+
+              {/* MCA / Corpository extended fields */}
+              {mcaProfile && (
+                <>
+                  <div className="border-t border-border/40 pt-4">
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-3">MCA / CORPOSITORY PROFILE</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+                      {[
+                        { label: "CIN",                 value: mcaProfile.cin },
+                        { label: "PAN",                 value: mcaProfile.pan },
+                        { label: "LEI",                 value: mcaProfile.lei },
+                        { label: "CATEGORY",            value: mcaProfile.category },
+                        { label: "SUB CATEGORY",        value: mcaProfile.sub_category },
+                        { label: "COMPANY TYPE",        value: mcaProfile.mca_type },
+                        { label: "AUTHORIZED CAPITAL",  value: mcaProfile.authorized_capital },
+                        { label: "PAID UP CAPITAL",     value: mcaProfile.paid_up_capital },
+                        { label: "MCA STATUS",          value: mcaProfile.mca_status },
+                        { label: "NSE SECTOR",          value: mcaProfile.nse_sector },
+                        { label: "SECTOR",              value: mcaProfile.sector },
+                        { label: "PRODUCTS / SERVICES", value: mcaProfile.products_services },
+                        { label: "EMAIL",               value: mcaProfile.email },
+                        { label: "TELEPHONE",           value: mcaProfile.telephone },
+                        { label: "DATE OF INCORPORATION", value: mcaProfile.date_of_incorporation },
+                        { label: "LAST BALANCE SHEET",  value: mcaProfile.date_of_last_bs },
+                        { label: "LAST AGM",            value: mcaProfile.date_of_last_agm },
+                      ].filter(f => f.value).map(f => (
+                        <div key={f.label}>
+                          <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">{f.label}</div>
+                          <div className="text-primary font-mono">{f.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Promoter details */}
               {company.promoter_details && (
                 <div className="sm:col-span-2 lg:col-span-3">
                   <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">PROMOTER DETAILS</div>
-                  <div className="text-primary whitespace-pre-wrap">{company.promoter_details}</div>
+                  <div className="text-primary whitespace-pre-wrap text-xs">{company.promoter_details}</div>
                 </div>
               )}
+
               {company.notes && (
                 <div className="sm:col-span-2 lg:col-span-3">
                   <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">NOTES</div>
-                  <div className="text-primary whitespace-pre-wrap">{company.notes}</div>
+                  <div className="text-primary whitespace-pre-wrap text-xs">{company.notes}</div>
                 </div>
               )}
             </div>
@@ -407,6 +592,11 @@ export default function CompanyView() {
                   <label className={labelCls}>Promoter Details</label>
                   <textarea className={inputCls} rows={2} value={form.promoter_details} onChange={set("promoter_details")} />
                 </div>
+                {mcaProfile && (
+                  <div className="lg:col-span-3 border border-primary/20 bg-primary/5 px-3 py-2 text-[10px] text-primary tracking-widest">
+                    MCA DATA IMPORTED — {mcaProfile.directors.length} DIRECTORS · WILL BE SAVED TO DIRECTORS TAB ON SAVE
+                  </div>
+                )}
                 <div className="lg:col-span-3">
                   <label className={labelCls}>Notes</label>
                   <textarea className={inputCls} rows={2} value={form.notes} onChange={set("notes")} />
@@ -427,6 +617,107 @@ export default function CompanyView() {
                 </button>
               </div>
             </form>
+          </Panel>
+        )}
+
+        {/* ── DIRECTORS tab ──────────────────────────────────────────────── */}
+        {tab === "directors" && (
+          <Panel
+            title="DIRECTORS"
+            ticker={mcaProfile?.directors?.length ? `${mcaProfile.directors.length} DIRECTORS` : "NO DATA"}
+            status="live"
+          >
+            {!mcaProfile || mcaProfile.directors.length === 0 ? (
+              <div className="py-10 text-center space-y-3">
+                <div className="text-muted-foreground text-xs tracking-widest">
+                  NO DIRECTOR DATA — IMPORT A CORPOSITORY / MCA EXCEL TO POPULATE
+                </div>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={importing}
+                  className="px-4 py-2 text-[10px] font-bold tracking-widest border border-border text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40 transition-colors"
+                >
+                  {importing ? "IMPORTING…" : "↑ IMPORT EXCEL"}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-0">
+                <div className="overflow-x-auto">
+                  <table className="text-[11px] font-mono border-collapse" style={{ minWidth: "2400px" }}>
+                    <thead>
+                      <tr className="border-b border-border bg-surface/60 text-[9px] tracking-widest text-muted-foreground">
+                        {["NAME","DIN","PAN","DIN STATUS","DSC STATUS","DOB","AGE","GENDER","NATIONALITY",
+                          "DESIGNATION","CATEGORY","APPOINTED CURRENT","ORIGINALLY APPOINTED",
+                          "CESSATION","% SHAREHOLDING","EMAIL","PHONE","REMARKS","ADDRESS"].map(h => (
+                          <th key={h} className="text-left py-2 px-3 font-normal whitespace-nowrap border-r border-border/30">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mcaProfile.directors.map((d, i) => {
+                        const dm = d.designation?.match(/^(.+?)\((.+?)\)$/);
+                        const role = dm ? dm[1].trim() : (d.designation || "");
+                        const cat  = dm ? dm[2].trim() : "";
+                        return (
+                          <tr key={i} className="border-b border-border/40 hover:bg-surface-2 transition-colors align-top">
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              <div className="font-bold text-primary">{d.name}</div>
+                              {d.dob && <div className="text-[9px] text-muted-foreground mt-0.5">DOB: {d.dob}</div>}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.din || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.pan || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {d.din_status ? <span className={`text-[9px] font-bold tracking-widest ${d.din_status.toLowerCase() === "approved" ? "text-success" : "text-muted-foreground"}`}>{d.din_status.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dsc_status || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dob || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.age || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {d.gender ? <span className={`text-[9px] font-bold tracking-widest ${d.gender.toLowerCase() === "female" ? "text-accent" : "text-primary"}`}>{d.gender.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.nationality || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-primary">{role || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {cat && cat !== "-" ? <span className="text-accent text-[9px] tracking-widest">{cat}</span> : <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.appointed_current || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.originally_appointed || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {d.cessation_date && d.cessation_date !== "-"
+                                ? <span className="text-[9px] font-bold tracking-widest text-destructive">{d.cessation_date}</span>
+                                : <span className="text-[9px] text-success font-bold tracking-widest">ACTIVE</span>}
+                            </td>
+                            <td className="py-2 px-3 border-r border-border/20 whitespace-nowrap">
+                              {d.shareholding ? (() => {
+                                const m = String(d.shareholding).match(/^(.+?)\s*(\(.+\))$/);
+                                return m ? <><div className="text-muted-foreground">{m[1].trim()}</div><div className="text-[8px] text-muted-foreground/50 mt-0.5">{m[2]}</div></> : <span className="text-muted-foreground">{d.shareholding}</span>;
+                              })() : "—"}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.email || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.phone || "—"}</td>
+                            <td className="py-2 px-3 border-r border-border/20" style={{maxWidth:"180px"}}>
+                              <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2" style={{wordBreak:"break-word"}} title={d.remarks||""}>{d.remarks || "—"}</div>
+                            </td>
+                            <td className="py-2 px-3" style={{maxWidth:"200px"}}>
+                              <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2" style={{wordBreak:"break-word"}} title={d.address||""}>{d.address || "—"}</div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {/* About the company */}
+                {mcaProfile.about && (
+                  <div className="border-t border-border/40 pt-4 mt-2">
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-2">ABOUT THE COMPANY</div>
+                    <div className="text-xs text-primary/80 leading-relaxed whitespace-pre-line max-h-48 overflow-y-auto pr-2">
+                      {mcaProfile.about}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </Panel>
         )}
 
@@ -540,7 +831,6 @@ export default function CompanyView() {
                   </div>
                 </Panel>
 
-                {/* Tabular summary */}
                 <Panel title="YEAR-WISE SUMMARY" ticker="P&L + BS" status="live">
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs font-mono">

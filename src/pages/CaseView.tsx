@@ -22,19 +22,66 @@ const CASE_INDUSTRIES = [
 ] as const;
 import {
   ComposedChart, Bar, Line, LineChart, XAxis, YAxis,
-  CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine, Legend,
+  CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine, Legend, LabelList,
 } from "recharts";
 import type { Tables } from "@/integrations/supabase/types";
 import { toast } from "sonner";
+import { extractPdfText } from "@/lib/pdf-text-extractor";
 
 type CaseRow = Tables<"credit_cases">;
 type DocRow = Tables<"financial_documents">;
 type ExtractedRow = Tables<"extracted_financials">;
 type RatioRow = Tables<"financial_ratios">;
 
+interface RatioRiskFactor { severity: "HIGH" | "MEDIUM" | "LOW"; category: string; description: string }
+interface RatioAnalysisResult {
+  profitability_insight: string;
+  liquidity_insight: string;
+  solvency_insight: string;
+  efficiency_insight: string;
+  expense_insight: string;
+  r_score_insight: string;
+  risk_factors: RatioRiskFactor[];
+  positive_factors: string[];
+  data_accuracy_notes: string[];
+  overall_observation: string;
+}
+interface RatioAnalysisUsage {
+  input_tokens: number;
+  output_tokens: number;
+  max_tokens: number;
+  model: string;
+}
+
 interface LineItem {
   label: string; value: number | null; confidence: number;
   reviewed: boolean; override_value?: number | null; note?: string;
+  is_section?: boolean; indent?: number; sort_order?: number;
+}
+
+// ── Accumn GST Analytical Report types ────────────────────────────────────────
+interface AccumnFlag { flag_name: string; severity: "HIGH" | "MEDIUM" | "LOW"; description: string }
+interface AccumnSalesSummary { period: string; adjusted_revenue?: number|null; net_revenue?: number|null; sales_return_pct?: number|null; advance_pct?: number|null; gross_margin_pct?: number|null; ebitda_pct?: number|null; pat_pct?: number|null }
+interface AccumnConcentration { period: string; rank: number; name: string; gstin?: string; amount: number; pct: number }
+interface AccumnGeography { period: string; state: string; amount: number; pct: number }
+interface AccumnProduct { period: string; chapter?: string; hsn?: string; description: string; amount: number; pct: number }
+interface AccumnTaxDetail { period: string; wc_investment?: number|null; output_tax?: number|null; igst?: number|null; cgst?: number|null; sgst?: number|null; itc_availed?: number|null; net_tax?: number|null }
+interface AccumnGstrRow { period: string; gstr1_turnover?: number|null; gstr3b_turnover?: number|null; gstr9_turnover?: number|null; gstr1_tax?: number|null; gstr3b_tax?: number|null; difference?: number|null }
+interface AccumnCircular { entity: string; gstin?: string; sale_amount?: number|null; purchase_amount?: number|null; note?: string }
+interface AccumnCategoryRow { period: string; b2b?: number|null; b2c_small?: number|null; b2c_large?: number|null; export?: number|null; nil_rated?: number|null; total?: number|null }
+interface AccumnReport {
+  is_accumn: boolean;
+  flags?: AccumnFlag[];
+  company_profile?: { name?: string; gstin?: string; pan?: string; constitution?: string; state?: string; business_type?: string; registration_date?: string; report_date?: string };
+  sales_summary?: AccumnSalesSummary[];
+  customer_categories?: AccumnCategoryRow[];
+  geography?: AccumnGeography[];
+  customer_concentration?: AccumnConcentration[];
+  supplier_concentration?: AccumnConcentration[];
+  product_concentration?: AccumnProduct[];
+  tax_details?: AccumnTaxDetail[];
+  gstr_comparison?: AccumnGstrRow[];
+  circular_transactions?: AccumnCircular[];
 }
 
 const STATEMENT_TYPES: StatementType[] = ["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"];
@@ -91,33 +138,174 @@ const EDIT_SCANNABLE_FIELDS: { key: keyof EditScanResult; label: string }[] = [
   { key: "website",             label: "Website" },
 ];
 
-// ── Balance sheet auto-computation ────────────────────────────────────────────
-// Defines which labels are aggregate totals and what they sum from.
-// Order matters: dependencies must come before the rows that depend on them.
-const BS_AGGREGATIONS: [string, string[]][] = [
-  ["Current Assets",      ["Inventory", "Trade Receivables", "Cash & Bank", "Other Current Assets"]],
-  ["Total Assets",        ["Fixed Assets (Net)", "Current Assets"]],
-  ["Net Worth",           ["Share Capital", "Reserves & Surplus"]],
-  ["Total Debt",          ["Long Term Borrowings", "Short Term Borrowings"]],
-  ["Current Liabilities", ["Trade Payables", "Other Current Liabilities"]],
-  ["Total Liabilities",   ["Net Worth", "Total Debt", "Current Liabilities"]],
-  ["Capital Employed",    ["Net Worth", "Total Debt"]],
-];
-const BS_TOTAL_LABELS = new Set(BS_AGGREGATIONS.map(([label]) => label));
+// ── Financial auto-computation rules ──────────────────────────────────────────
+// Each rule: [target, addComponents[], subtractComponents[]]
+// Order matters — upstream totals must be computed before downstream ones.
+// Covers both the simple AI-extraction labels AND the full Accumn Excel labels.
 
-function recomputeBS(items: LineItem[]): LineItem[] {
+type Rule = [string, string[], string[]?];
+
+const RULES: Record<string, Rule[]> = {
+  balance_sheet: [
+    // ── Simple / AI-extracted format ──
+    ["Current Assets",      ["Inventory","Trade Receivables","Cash & Bank","Other Current Assets"]],
+    ["Total Assets",        ["Fixed Assets (Net)","Current Assets"]],
+    ["Net Worth",           ["Share Capital","Reserves & Surplus"]],
+    ["Total Debt",          ["Long Term Borrowings","Short Term Borrowings"]],
+    ["Current Liabilities", ["Trade Payables","Other Current Liabilities"]],
+    ["Total Liabilities",   ["Net Worth","Total Debt","Current Liabilities"]],
+    ["Capital Employed",    ["Net Worth","Total Debt"]],
+
+    // ── Full Accumn / Corpository Excel format ──
+    // Liabilities side (dependencies first)
+    ["Networth",                   ["Share Capital","Reserves & Surplus","Money Received against Warrants","Share Application Money Pending Allotment","Deffered Government Grants","Minority Interest"]],
+    ["Total Non Current Liabilities", ["Long-term Borrowings","Deferred Tax Liabilities","Other Non Current Liabilities","Long-term Provisions"]],
+    ["Total Current Liabilities",  ["Total Short-term Borrowings","Trade Payables","Other Current Liabilities","Short-term Provisions"]],
+    ["Total Equity & Liabilities", ["Networth","Total Non Current Liabilities","Total Current Liabilities","Other Equity & Liabilities"]],
+
+    // Asset side
+    ["Net Block of Assets",        ["Tangible Assets","Intangible Assets"]],
+    ["Total Fixed Asset",          ["Net Block of Assets","Capital Work in Progress","Intangible Asset under Development"]],
+    ["Total Non Current Assets",   ["Total Fixed Asset","Non Current Investment","Deferred Tax Assets (Net)","Long-term Loans & Advances","Other Non Current Assets"]],
+    ["Total Current Assets",       ["Current Investment","Inventories","Trade Receivables","Cash & Cash Equivalents","Short-term Loans & Advances","Other Current Assets"]],
+    ["TOTAL ASSETS",               ["Total Non Current Assets","Total Current Assets","Other Total Assets"]],
+
+    // ── Canonical labels for ratio engine ──
+    ["Net Worth",           ["Networth"]],
+    ["Current Assets",      ["Total Current Assets"]],
+    ["Current Liabilities", ["Total Current Liabilities"]],
+    ["Fixed Assets (Net)",  ["Total Fixed Asset"]],
+    ["Total Assets",        ["TOTAL ASSETS"]],
+    ["Long Term Borrowings",["Long-term Borrowings"]],
+    ["Short Term Borrowings",["Total Short-term Borrowings"]],
+    ["Inventory",           ["Inventories"]],
+    ["Cash & Bank",         ["Cash & Cash Equivalents"]],
+    ["Total Debt",          ["Long Term Borrowings","Short Term Borrowings"]],
+    ["Capital Employed",    ["Net Worth","Total Debt"]],
+    ["Total Liabilities",   ["Net Worth","Total Debt","Current Liabilities"]],
+  ],
+
+  profit_loss: [
+    // Revenue build-up
+    ["Gross Sales",                   ["Revenue from Sale of Products","Revenue from Sale of Services","Other Operating Revenues"]],
+    ["Total Revenue from Operations", ["Gross Sales"], ["Less:Duties"]],
+    ["Total Revenue",                 ["Total Revenue from Operations","Other Income"]],
+    // Canonical "Turnover" for ratio engine
+    ["Turnover",                      ["Total Revenue from Operations"]],
+
+    // EBITDA = Revenue from Ops - operating costs
+    ["EBITDA", ["Total Revenue from Operations"],
+               ["Cost of Materials Consumed","Purchases of Stock in Trade",
+                "Changes in Inventories of Finished Goods, Work In Progress and Stock In Trade",
+                "Total Employee Benefit Expense","Total Other Expenses"]],
+
+    // Total Expenses (all costs incl finance & depreciation)
+    ["Total Expenses", ["Cost of Materials Consumed","Purchases of Stock in Trade",
+                        "Changes in Inventories of Finished Goods, Work In Progress and Stock In Trade",
+                        "Total Employee Benefit Expense","Total Other Expenses",
+                        "Finance Costs","Total Depreciation, Depletion and Amortization Expense"]],
+
+    // Profit cascade
+    ["Profit before Exceptional and Extraordinary Items and Tax", ["Total Revenue"], ["Total Expenses"]],
+    ["Profit before Extraordinary Items and Tax",
+      ["Profit before Exceptional and Extraordinary Items and Tax","Prior Period Items before Tax","Exceptional Items"]],
+    ["Profit before Tax",
+      ["Profit before Extraordinary Items and Tax","Extraordinary Items"]],
+    ["Profit/(Loss) for the Period from Continuing Operations",
+      ["Profit before Tax"], ["Current Tax","Deferred Tax",
+       "Net Movement in Regulatory Deferral Account Balances related to Profit or Loss and the Related Deferred Tax Movement"]],
+    ["Profit/(Loss)",
+      ["Profit/(Loss) for the Period from Continuing Operations",
+       "Profit/(Loss) from Discontinuing Operations (After Tax)"]],
+    // Canonical labels for ratio engine
+    ["PAT",               ["Profit/(Loss)"]],
+    ["Interest Expense",  ["Finance Costs"]],
+    ["Depreciation",      ["Total Depreciation, Depletion and Amortization Expense"]],
+    ["Employee Benefit Expense", ["Total Employee Benefit Expense"]],
+    ["Other Expenses",    ["Total Other Expenses"]],
+    // EBIT = PBT + Interest
+    ["EBIT",              ["Profit before Tax","Finance Costs"]],
+    ["Gross Profit",      ["Total Revenue from Operations"],
+                          ["Cost of Materials Consumed","Purchases of Stock in Trade",
+                           "Changes in Inventories of Finished Goods, Work In Progress and Stock In Trade"]],
+  ],
+
+  cash_flow: [
+    // Net increase in cash = operating + investing + financing
+    ["Net increase (decrease) in cash and cash equivalents before effect of exchange rate changes",
+      ["Net cash flows from (used in) operating activities",
+       "Net cash flows from (used in) investing activities",
+       "Net cash flows from (used in) financing activities"]],
+    ["Net increase (decrease) in cash and cash equivalents",
+      ["Net increase (decrease) in cash and cash equivalents before effect of exchange rate changes",
+       "Effect of exchange rate changes on cash and cash equivalents"]],
+    // Closing balance
+    ["Cash and cash equivalents cash flow statement at end of period",
+      ["Cash and cash equivalents cash flow statement at beginning of period",
+       "Net increase (decrease) in cash and cash equivalents"]],
+  ],
+};
+
+// All computed/total labels across all statement types
+const COMPUTED_LABELS = new Set(
+  Object.values(RULES).flat().map(([label]) => label)
+);
+
+// Grand-total rows — strongest visual emphasis
+const GRAND_TOTAL_LABELS = new Set([
+  "TOTAL ASSETS","Total Assets","Total Equity & Liabilities","Total Liabilities",
+  "Profit/(Loss)","Profit before Tax","Total Revenue","EBITDA",
+  "Net increase (decrease) in cash and cash equivalents",
+  "Net increase (decrease) in cash and cash equivalents before effect of exchange rate changes",
+  "Cash and cash equivalents cash flow statement at end of period",
+]);
+
+// Section header name → the key total row that represents its value
+const SECTION_TOTAL_MAP: Record<string, string> = {
+  "SHAREHOLDERS FUND":              "Networth",
+  "NON CURRENT LIABILITIES":        "Total Non Current Liabilities",
+  "CURRENT LIABILITIES":            "Total Current Liabilities",
+  "FIXED ASSET":                    "Total Fixed Asset",
+  "NON CURRENT ASSETS":             "Total Non Current Assets",
+  "CURRENT ASSETS":                 "Total Current Assets",
+  "REVENUE":                        "Total Revenue",
+  "EXPENSES":                       "Total Expenses",
+  "TAX EXPENSE":                    "Profit/(Loss) for the Period from Continuing Operations",
+  "Cash flows from used in operating activities":  "Net cash flows from (used in) operating activities",
+  "Cash flows from used in investing activities":  "Net cash flows from (used in) investing activities",
+  "Cash flows from used in financing activities":  "Net cash flows from (used in) financing activities",
+};
+
+// Aggregate label → bold row highlight (kept for backward compat)
+const BS_TOTAL_LABELS = new Set(COMPUTED_LABELS);
+
+function applyStatementRules(items: LineItem[], stmtType: string): LineItem[] {
+  const rules = RULES[stmtType];
+  if (!rules) return items;
+
   const result = items.map(i => ({ ...i }));
-  const getVal = (label: string): number => {
+
+  const get = (label: string): number => {
     const it = result.find(i => i.label === label);
     return it != null ? (it.override_value ?? it.value ?? 0) : 0;
   };
-  for (const [totalLabel, components] of BS_AGGREGATIONS) {
-    const idx = result.findIndex(i => i.label === totalLabel);
-    if (idx === -1) continue; // don't create rows that don't exist
-    const hasComponents = components.some(c => result.some(i => i.label === c && (i.override_value ?? i.value) != null));
-    if (!hasComponents) continue;
-    const sum = components.reduce((acc, c) => acc + getVal(c), 0);
-    result[idx] = { ...result[idx], override_value: parseFloat(sum.toFixed(2)) };
+
+  for (const [target, addCols, subCols = []] of rules) {
+    // Skip if no component has data yet (avoids zeroing out rows with no data)
+    const allCols = [...addCols, ...subCols];
+    const hasData = allCols.some(c => result.some(i => i.label === c && (i.override_value ?? i.value) != null));
+    if (!hasData) continue;
+
+    const sum = addCols.reduce((acc, c) => acc + get(c), 0)
+              - subCols.reduce((acc, c) => acc + get(c), 0);
+
+    const idx = result.findIndex(i => i.label === target);
+    if (idx === -1) {
+      // Create the computed row if it doesn't exist yet
+      result.push({ label: target, value: parseFloat(sum.toFixed(2)), override_value: null, confidence: 100, reviewed: true, note: "auto-derived" });
+    } else {
+      result[idx] = { ...result[idx], override_value: parseFloat(sum.toFixed(2)) };
+    }
   }
   return result;
 }
@@ -157,16 +345,32 @@ function CaseViewInner() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [tab, setTabRaw] = useState<"upload" | "review" | "ratios" | "projections" | "ic_note" | "emi" | "bank" | "gst">("upload");
+  const [tab, setTabRaw] = useState<"upload" | "review" | "ratios" | "projections" | "ic_note" | "bank" | "gst">("upload");
   const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
   const setTab = (t: typeof tab) => { setTabRaw(t); };
   const [cc, setCc] = useState<CaseRow | null>(null);
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [extracted, setExtracted] = useState<ExtractedRow[]>([]);
   const [ratios, setRatios] = useState<RatioRow[]>([]);
-  const [emiPayments, setEmiPayments]       = useState<Tables<"emi_payments">[]>([]);
+  const [ratioAnalysis, setRatioAnalysis] = useState<RatioAnalysisResult | null>(null);
+  const [ratioAnalysisUsage, setRatioAnalysisUsage] = useState<RatioAnalysisUsage | null>(null);
+  const [ratioAnalysisLoading, setRatioAnalysisLoading] = useState(false);
+  const [ratioAiProgress, setRatioAiProgress] = useState(0);
+  const [ratioAiLabel, setRatioAiLabel] = useState("");
   const [bankData, setBankData]             = useState<Tables<"bank_statement_data">[]>([]);
   const [gstData, setGstData]               = useState<Tables<"gst_return_data">[]>([]);
+  const [accumnData, setAccumnData]         = useState<AccumnReport | null>(null);
+  const [linkedCompany, setLinkedCompany]   = useState<Record<string, string | null> | null>(null);
+  const [linkedDirs, setLinkedDirs]         = useState<Record<string, string | null>[]>([]);
+  const [coDetailTab, setCoDetailTab]       = useState<"company" | "directors">("company");
+  const [textPopover, setTextPopover]       = useState<{label:string;text:string}|null>(null);
+  const [editCoOpen, setEditCoOpen]         = useState(false);
+  const [editCoForm, setEditCoForm]         = useState<Record<string,string>>({});
+  const [savingCo, setSavingCo]             = useState(false);
+  const [editDirOpen, setEditDirOpen]       = useState(false);
+  const [editDirId, setEditDirId]           = useState<string | null>(null);
+  const [editDirForm, setEditDirForm]       = useState<Record<string,string>>({});
+  const [savingDir, setSavingDir]           = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
@@ -177,6 +381,13 @@ function CaseViewInner() {
   const [editingHeader, setEditingHeader] = useState(false);
   const [addStmtForm, setAddStmtForm] = useState<{ type: StatementType; fy: string; unit: string } | null>(null);
   const [addingYearFor, setAddingYearFor] = useState<{ stmtType: string; fy: string } | null>(null);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const [undoStack, setUndoStack] = useState<Record<string, LineItem[]>[]>([]);
+  const [redoStack, setRedoStack] = useState<Record<string, LineItem[]>[]>([]);
+  const [importingFinExcel, setImportingFinExcel] = useState(false);
+  const finExcelInputRef = useRef<HTMLInputElement>(null);
+  const [dragRow, setDragRow] = useState<{ stmtType: string; label: string } | null>(null);
+  const [dragOverRow, setDragOverRow] = useState<{ stmtType: string; label: string } | null>(null);
   const [hd, setHd] = useState({
     client_name: "", product_type: "operating_lease" as string, product_type_custom: "",
     industry: "", industry_custom: "", legal_constitution: "", year_established: "",
@@ -197,12 +408,11 @@ function CaseViewInner() {
 
   const reload = useCallback(async () => {
     if (!id) return;
-    const [c, d, e, r, em, bk, gs] = await Promise.all([
+    const [c, d, e, r, bk, gs] = await Promise.all([
       supabase.from("credit_cases").select("*").eq("id", id).single(),
       supabase.from("financial_documents").select("*").eq("case_id", id).order("created_at"),
       supabase.from("extracted_financials").select("*").eq("case_id", id),
       supabase.from("financial_ratios").select("*").eq("case_id", id).order("fiscal_year"),
-      supabase.from("emi_payments").select("*").eq("case_id", id).order("emi_number"),
       supabase.from("bank_statement_data").select("*").eq("case_id", id).order("month"),
       supabase.from("gst_return_data").select("*").eq("case_id", id).order("period"),
     ]);
@@ -211,12 +421,140 @@ function CaseViewInner() {
     setDocs(d.data ?? []);
     setExtracted(e.data ?? []);
     setRatios(r.data ?? []);
-    setEmiPayments(em.data ?? []);
     setBankData(bk.data ?? []);
     setGstData(gs.data ?? []);
+
+    // Load Accumn GST analytical report (not in generated TS types)
+    const dbRaw = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+    const { data: accumnRow } = await (dbRaw.from("gst_accumn_reports")
+      .select("report_data")
+      .eq("case_id", id)
+      .maybeSingle() as Promise<{ data: { report_data: AccumnReport } | null }>);
+    setAccumnData(accumnRow?.report_data ?? null);
+
+    // Load linked company MCA profile + directors
+    const companyId = (c.data as unknown as { company_id?: string }).company_id;
+    if (companyId) {
+      const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+      const [{ data: co }, { data: dirs }] = await Promise.all([
+        db.from("companies").select("*").eq("id", companyId).single(),
+        db.from("company_directors").select("*").eq("company_id", companyId).order("name"),
+      ]);
+      setLinkedCompany(co as Record<string, string | null> ?? null);
+      setLinkedDirs((dirs ?? []) as Record<string, string | null>[]);
+    } else {
+      setLinkedCompany(null);
+      setLinkedDirs([]);
+    }
   }, [id]);
 
   useEffect(() => { reload(); }, [reload]);
+
+  const openEditCo = () => {
+    if (!linkedCompany) return;
+    setEditCoForm({
+      name:                   String(linkedCompany.name ?? ""),
+      registered_address:     String(linkedCompany.registered_address ?? ""),
+      website:                String(linkedCompany.website ?? ""),
+      mca_cin:                String(linkedCompany.mca_cin ?? ""),
+      mca_pan:                String(linkedCompany.mca_pan ?? ""),
+      mca_lei:                String(linkedCompany.mca_lei ?? ""),
+      mca_category:           String(linkedCompany.mca_category ?? ""),
+      mca_sub_category:       String(linkedCompany.mca_sub_category ?? ""),
+      mca_type:               String(linkedCompany.mca_type ?? ""),
+      mca_authorized_capital: String(linkedCompany.mca_authorized_capital ?? ""),
+      mca_paid_up_capital:    String(linkedCompany.mca_paid_up_capital ?? ""),
+      mca_status:             String(linkedCompany.mca_status ?? ""),
+      mca_nse_sector:         String(linkedCompany.mca_nse_sector ?? ""),
+      mca_sector:             String(linkedCompany.mca_sector ?? ""),
+      mca_products_services:  String(linkedCompany.mca_products_services ?? ""),
+      mca_email:              String(linkedCompany.mca_email ?? ""),
+      mca_telephone:          String(linkedCompany.mca_telephone ?? ""),
+      mca_date_of_incorp:     String(linkedCompany.mca_date_of_incorp ?? ""),
+      mca_date_last_bs:       String(linkedCompany.mca_date_last_bs ?? ""),
+      mca_date_last_agm:      String(linkedCompany.mca_date_last_agm ?? ""),
+      mca_about:              String(linkedCompany.mca_about ?? ""),
+    });
+    setEditCoOpen(true);
+  };
+
+  const saveEditCo = async () => {
+    if (!linkedCompany?.id) return;
+    setSavingCo(true);
+    try {
+      const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+      const update: Record<string, string | null> = {};
+      Object.entries(editCoForm).forEach(([k, v]) => { update[k] = v.trim() || null; });
+      await db.from("companies").update(update).eq("id", linkedCompany.id);
+      await reload();
+      setEditCoOpen(false);
+      toast.success("Company details saved");
+    } catch (e) {
+      toast.error("Save failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSavingCo(false);
+    }
+  };
+
+  const openEditDir = (dir?: Record<string, string | null>) => {
+    if (dir) {
+      setEditDirId(String(dir.id ?? ""));
+      setEditDirForm({
+        name:                 String(dir.name ?? ""),
+        din:                  String(dir.din ?? ""),
+        pan:                  String(dir.pan ?? ""),
+        dob:                  String(dir.dob ?? ""),
+        age:                  String(dir.age ?? ""),
+        gender:               String(dir.gender ?? ""),
+        nationality:          String(dir.nationality ?? ""),
+        address:              String(dir.address ?? ""),
+        designation:          String(dir.designation ?? ""),
+        din_status:           String(dir.din_status ?? ""),
+        dsc_status:           String(dir.dsc_status ?? ""),
+        appointed_current:    String(dir.appointed_current ?? ""),
+        originally_appointed: String(dir.originally_appointed ?? ""),
+        cessation_date:       String(dir.cessation_date ?? ""),
+        shareholding:         String(dir.shareholding ?? ""),
+        email:                String(dir.email ?? ""),
+        phone:                String(dir.phone ?? ""),
+        remarks:              String(dir.remarks ?? ""),
+      });
+    } else {
+      setEditDirId(null);
+      setEditDirForm({ name:"",din:"",pan:"",dob:"",age:"",gender:"",nationality:"",address:"",designation:"",din_status:"",dsc_status:"",appointed_current:"",originally_appointed:"",cessation_date:"",shareholding:"",email:"",phone:"",remarks:"" });
+    }
+    setEditDirOpen(true);
+  };
+
+  const saveEditDir = async () => {
+    if (!linkedCompany?.id || !editDirForm.name.trim()) { toast.error("Director name is required"); return; }
+    setSavingDir(true);
+    try {
+      const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+      const row: Record<string, string | null> = { company_id: String(linkedCompany.id) };
+      Object.entries(editDirForm).forEach(([k, v]) => { row[k] = v.trim() || null; });
+      if (editDirId) {
+        await db.from("company_directors").update(row).eq("id", editDirId);
+      } else {
+        await db.from("company_directors").insert(row);
+      }
+      await reload();
+      setEditDirOpen(false);
+      toast.success(editDirId ? "Director updated" : "Director added");
+    } catch (e) {
+      toast.error("Save failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSavingDir(false);
+    }
+  };
+
+  const deleteDir = async (dirId: string) => {
+    if (!window.confirm("Delete this director?")) return;
+    const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+    await db.from("company_directors").delete().eq("id", dirId);
+    await reload();
+    toast.success("Director removed");
+  };
 
   // Realtime: debounce so batch upserts (many rows at once) coalesce into one reload
   // rather than firing one fetch per row and exhausting the browser connection pool.
@@ -330,6 +668,57 @@ function CaseViewInner() {
       toast.error("Retry failed: " + (e instanceof Error ? e.message : String(e)));
     }
   }, [user, cc, reload]);
+
+  // ── Undo / Redo (must be before early return) ─────────────────────────────
+  const captureSnapshot = useCallback((rows: ExtractedRow[]): Record<string, LineItem[]> => {
+    const snap: Record<string, LineItem[]> = {};
+    for (const r of rows) snap[r.id] = (r.line_items as unknown as LineItem[]).map(i => ({ ...i }));
+    return snap;
+  }, []);
+
+  const applySnapshot = useCallback(async (snap: Record<string, LineItem[]>) => {
+    await Promise.all(
+      Object.entries(snap).map(([id, items]) =>
+        supabase.from("extracted_financials").update({ line_items: items as never }).eq("id", id)
+      )
+    );
+    await reload();
+  }, [reload]);
+
+  const performUndo = useCallback(async () => {
+    if (undoStack.length === 0) return;
+    const snap = undoStack[undoStack.length - 1];
+    const current = captureSnapshot(extracted);
+    setUndoStack(prev => prev.slice(0, -1));
+    setRedoStack(prev => [...prev.slice(-49), current]);
+    await applySnapshot(snap);
+  }, [undoStack, extracted, captureSnapshot, applySnapshot]);
+
+  const performRedo = useCallback(async () => {
+    if (redoStack.length === 0) return;
+    const snap = redoStack[redoStack.length - 1];
+    const current = captureSnapshot(extracted);
+    setRedoStack(prev => prev.slice(0, -1));
+    setUndoStack(prev => [...prev.slice(-49), current]);
+    await applySnapshot(snap);
+  }, [redoStack, extracted, captureSnapshot, applySnapshot]);
+
+  const performUndoRef = useRef(performUndo);
+  const performRedoRef = useRef(performRedo);
+  useEffect(() => { performUndoRef.current = performUndo; }, [performUndo]);
+  useEffect(() => { performRedoRef.current = performRedo; }, [performRedo]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.key === "z" && !e.shiftKey) { e.preventDefault(); performUndoRef.current(); }
+      if (e.key === "y" || (e.key === "z" && e.shiftKey)) { e.preventDefault(); performRedoRef.current(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   if (!cc) return <TerminalLayout><div className="text-muted-foreground">LOADING CASE...</div></TerminalLayout>;
 
@@ -743,7 +1132,11 @@ function CaseViewInner() {
     }
   };
 
-  const patchItems = async (rowId: string, items: LineItem[]) => {
+
+  const patchItems = async (rowId: string, items: LineItem[], _skipHistory = false) => {
+    // Push snapshot of ALL rows before this mutation
+    setUndoStack(prev => [...prev.slice(-49), captureSnapshot(extracted)]);
+    setRedoStack([]);
     await supabase.from("extracted_financials").update({ line_items: items as never }).eq("id", rowId);
     await reload();
   };
@@ -756,12 +1149,14 @@ function CaseViewInner() {
     const v = rawValue === "" ? null : Number(rawValue);
     if (idx === -1) items.push({ label, value: v, confidence: 100, reviewed: true, override_value: null, note: "manual" });
     else items[idx] = { ...items[idx], value: v, override_value: null, reviewed: true };
-    if (stmtType === "balance_sheet") items = recomputeBS(items);
+    items = applyStatementRules(items, stmtType);
     await patchItems(row.id, items);
   };
 
   const updateCellLabel = async (stmtType: string, oldLabel: string, newLabel: string) => {
     if (!newLabel.trim() || newLabel.trim() === oldLabel) { setEditingCell(null); return; }
+    setUndoStack(prev => [...prev.slice(-49), captureSnapshot(extracted)]);
+    setRedoStack([]);
     const rows = extracted.filter(r => r.statement_type === stmtType);
     for (const row of rows) {
       const items = (row.line_items as unknown as LineItem[]).slice();
@@ -787,6 +1182,8 @@ function CaseViewInner() {
   };
 
   const addRowToType = async (stmtType: string) => {
+    setUndoStack(prev => [...prev.slice(-49), captureSnapshot(extracted)]);
+    setRedoStack([]);
     const rows = extracted.filter(r => r.statement_type === stmtType);
     const existing = new Set(rows.flatMap(r => (r.line_items as unknown as LineItem[]).map(i => i.label)));
     let newLabel = "New Item"; let n = 1;
@@ -802,6 +1199,8 @@ function CaseViewInner() {
   };
 
   const deleteRowFromType = async (stmtType: string, label: string) => {
+    setUndoStack(prev => [...prev.slice(-49), captureSnapshot(extracted)]);
+    setRedoStack([]);
     const rows = extracted.filter(r => r.statement_type === stmtType);
     for (const row of rows) {
       const items = (row.line_items as unknown as LineItem[]).filter(i => i.label !== label);
@@ -810,11 +1209,73 @@ function CaseViewInner() {
     await reload();
   };
 
+  const importFinancialExcel = async (file: File) => {
+    if (!cc || !user) return;
+    setImportingFinExcel(true);
+    try {
+      const { parseFinancialExcel } = await import("@/lib/financial-excel-parser");
+      const statements = await parseFinancialExcel(file);
+      if (statements.length === 0) { toast.error("No financial statements found in this Excel"); return; }
+      for (const stmt of statements) {
+        for (const fy of stmt.fiscal_years) {
+          const existing = extracted.find(r => r.statement_type === stmt.stmt_type && r.fiscal_year === fy);
+          const items = applyStatementRules(stmt.line_items_by_fy[fy] as unknown as LineItem[], stmt.stmt_type) as never;
+          if (existing) {
+            await supabase.from("extracted_financials").update({ line_items: items, unit: stmt.unit } as never).eq("id", existing.id);
+          } else {
+            await supabase.from("extracted_financials").insert({
+              case_id: cc.id, user_id: user.id,
+              statement_type: stmt.stmt_type as never,
+              fiscal_year: fy,
+              line_items: items,
+              unit: stmt.unit,
+              confirmed: false,
+            } as never);
+          }
+        }
+      }
+      await reload();
+      toast.success(`Imported ${statements.length} statement${statements.length > 1 ? "s" : ""} (${statements.map(s => s.fiscal_years.length + " years").join(", ")})`);
+    } catch (e) {
+      toast.error("Import failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setImportingFinExcel(false);
+    }
+  };
+
   const confirmExtraction = async (rowId: string) => {
     await supabase.from("extracted_financials").update({
       confirmed: true, confirmed_at: new Date().toISOString(),
     }).eq("id", rowId);
     toast.success("Extraction confirmed");
+    await reload();
+  };
+
+  const toggleSection = (stmtType: string, label: string) => {
+    const key = `${stmtType}:${label}`;
+    setCollapsedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const moveRow = async (stmtType: string, fromLabel: string, toLabel: string) => {
+    setUndoStack(prev => [...prev.slice(-49), captureSnapshot(extracted)]);
+    setRedoStack([]);
+    const typeRows = extracted.filter(r => r.statement_type === stmtType);
+    for (const row of typeRows) {
+      const items = (row.line_items as unknown as LineItem[]).map(i => ({ ...i })); // deep copy
+      const fromIdx = items.findIndex(i => i.label === fromLabel);
+      const toIdx   = items.findIndex(i => i.label === toLabel);
+      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) continue;
+      const [moved] = items.splice(fromIdx, 1);
+      // adjust target index after removal
+      const insertAt = fromIdx < toIdx ? toIdx - 1 : toIdx;
+      items.splice(insertAt, 0, moved);
+      items.forEach((item, i) => { item.sort_order = i; });
+      await supabase.from("extracted_financials").update({ line_items: items as never }).eq("id", row.id);
+    }
     await reload();
   };
 
@@ -870,16 +1331,337 @@ function CaseViewInner() {
     await reload();
   };
 
+  const generateRatioAnalysis = async () => {
+    if (!cc) return;
+    setRatioAnalysisLoading(true);
+    setRatioAiProgress(0);
+    setRatioAiLabel("Preparing ratio data");
+    const AI_LABELS = [
+      "Preparing ratio data",
+      "Reading financial trends",
+      "Analysing category ratios",
+      "Identifying risk factors",
+      "Drafting AI insights",
+    ];
+    let p = 0;
+    const tick = setInterval(() => {
+      p = Math.min(p + 2, 88);
+      setRatioAiProgress(p);
+      setRatioAiLabel(AI_LABELS[Math.min(Math.floor(p / 20), AI_LABELS.length - 1)]);
+    }, 150);
+    try {
+      window.dispatchEvent(new CustomEvent("ai-token-usage", {
+        detail: { status: "loading", label: "Ratio Analysis", max_tokens: 2500 },
+      }));
+      const { data, error } = await supabase.functions.invoke("generate-credit-summary", {
+        body: { case_id: cc.id },
+      });
+      clearInterval(tick);
+      if (error) {
+        // Extract actual error message from the 500 response body
+        let msg = "Edge function error";
+        try { const body = await (error as { context?: Response }).context?.json?.(); msg = body?.error ?? error.message ?? msg; } catch { msg = error.message ?? msg; }
+        throw new Error(msg);
+      }
+      if (data?.analysis) {
+        setRatioAiProgress(100);
+        setRatioAiLabel("Complete");
+        setRatioAnalysis(data.analysis as RatioAnalysisResult);
+        if (data.usage) {
+          setRatioAnalysisUsage(data.usage as RatioAnalysisUsage);
+          window.dispatchEvent(new CustomEvent("ai-token-usage", {
+            detail: {
+              status:        "complete",
+              input_tokens:  data.usage.input_tokens,
+              output_tokens: data.usage.output_tokens,
+              max_tokens:    data.usage.max_tokens,
+              model:         data.usage.model,
+              label:         "Ratio Analysis",
+            },
+          }));
+        }
+      } else throw new Error(data?.error ?? "No analysis returned");
+    } catch (e) {
+      clearInterval(tick);
+      toast.error("AI analysis failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setTimeout(() => { setRatioAnalysisLoading(false); setRatioAiProgress(0); setRatioAiLabel(""); }, 600);
+    }
+  };
+
   const runRatios = async () => {
+    if (!cc || !user) return;
     setBusy(true);
     try {
-      const { error } = await supabase.functions.invoke("compute-ratios", { body: { case_id: cc.id } });
-      if (error) throw error;
-      toast.success("Ratios computed");
+      // ── helpers ──────────────────────────────────────────────────────────
+      const _safe = (n: unknown): number | null => {
+        const v = Number(n);
+        return n == null || !Number.isFinite(v) ? null : v;
+      };
+      const _div = (a: number | null, b: number | null): number | null =>
+        a == null || b == null || b === 0 ? null : a / b;
+
+      // ── normalize labels so the ratio engine sees consistent keys ────────
+      const normalize = (
+        pl: Record<string, number | null>,
+        bs: Record<string, number | null>,
+      ) => {
+        const p = { ...pl }, b = { ...bs };
+
+        // BS authoritative overrides: Accumn totals always win over stale derived values
+        const bsAlways: [string, string[]][] = [
+          ["Net Worth",            ["Networth","Net worth","Shareholders Equity","Total Equity","Shareholders' Funds","Total Shareholders Funds"]],
+          ["Total Assets",         ["TOTAL ASSETS","Total Asset"]],
+          ["Current Assets",       ["Total Current Assets"]],
+          ["Current Liabilities",  ["Total Current Liabilities"]],
+          ["Fixed Assets (Net)",   ["Total Fixed Asset","Net Block","Net Block of Assets","Net Fixed Assets"]],
+        ];
+        for (const [t, srcs] of bsAlways) {
+          for (const s of srcs) { if (b[s] != null) { b[t] = b[s]; break; } }
+        }
+        // BS aliases (fill-only for non-authoritative fields)
+        const bsAl: [string, string[]][] = [
+          ["Long Term Borrowings", ["Long-term Borrowings","Long-Term Borrowings","Non-current Borrowings"]],
+          ["Short Term Borrowings",["Total Short-term Borrowings","Short-term Borrowings","Current Borrowings"]],
+          ["Inventory",            ["Inventories","Stock"]],
+          ["Cash & Bank",          ["Cash & Cash Equivalents","Cash and Cash Equivalents","Cash and Bank"]],
+          ["Trade Receivables",    ["Debtors","Trade Debtors","Accounts Receivable","Sundry Debtors"]],
+          ["Trade Payables",       ["Creditors","Trade Creditors","Accounts Payable","Sundry Creditors"]],
+          ["Reserves & Surplus",   ["Reserves and Surplus","Other Equity","Retained Earnings"]],
+        ];
+        for (const [t, srcs] of bsAl) {
+          if (b[t] == null) for (const s of srcs) { if (b[s] != null) { b[t] = b[s]; break; } }
+        }
+        // Derived BS
+        if (b["Total Debt"] == null) {
+          const lt = _safe(b["Long Term Borrowings"]), st = _safe(b["Short Term Borrowings"]);
+          if (lt != null || st != null) b["Total Debt"] = (lt ?? 0) + (st ?? 0);
+        }
+        if (b["Capital Employed"] == null) {
+          const nw = _safe(b["Net Worth"]), td = _safe(b["Total Debt"]);
+          if (nw != null && td != null) b["Capital Employed"] = nw + td;
+        }
+        if (b["Total Assets"] == null) {
+          const fa = _safe(b["Fixed Assets (Net)"]), ca = _safe(b["Current Assets"]);
+          if (fa != null && ca != null) b["Total Assets"] = fa + ca;
+        }
+        if (b["Total Liabilities"] == null) {
+          const ta = _safe(b["Total Assets"]), nw = _safe(b["Net Worth"]);
+          if (ta != null && nw != null) b["Total Liabilities"] = ta - nw;
+        }
+
+        // P&L aliases
+        const plAl: [string, string[]][] = [
+          ["Turnover",                  ["Total Revenue from Operations","Net Revenue from Operations","Revenue from Operations","Net Sales","Gross Sales","Revenue","Total Revenue"]],
+          ["Interest Expense",          ["Finance Costs","Finance Cost","Interest & Finance Charges","Financial Charges","Borrowing Costs","Interest Cost"]],
+          ["PAT",                       ["Profit/(Loss)","Profit for the Year","Net Profit","Profit After Tax","Net Profit/(Loss)","Profit for the period","Net Income"]],
+          ["Profit Before Tax",         ["Profit before Tax","Profit Before Taxation","Profit/(Loss) before Tax","Profit before Exceptional and Extraordinary Items and Tax","Profit before Extraordinary Items and Tax"]],
+          ["Depreciation",              ["Total Depreciation, Depletion and Amortization Expense","Depreciation & Amortization","Depreciation and Amortization","D&A"]],
+          ["Employee Benefit Expense",  ["Total Employee Benefit Expense","Employee Benefits Expense","Employee Benefits","Personnel Expenses","Staff Cost","Staff Costs","Employee Costs"]],
+          ["Other Expenses",            ["Total Other Expenses","Other Operating Expenses","Other Expenses (Net)","Miscellaneous Expenses"]],
+          ["Cost of Materials Consumed",["Cost of Material Consumed","Raw Material Consumed","Material Cost"]],
+          ["Gross Profit",              ["Gross Margin","Gross Profit/(Loss)"]],
+        ];
+        for (const [t, srcs] of plAl) {
+          if (p[t] == null) for (const s of srcs) { if (p[s] != null) { p[t] = p[s]; break; } }
+        }
+
+        // Proper COGS = Materials + Purchases of Stock in Trade + Changes in Inventories
+        // (matches Accumn methodology; used for Inventory Days, Payable Days, CCC, Raw Material %)
+        const cogsProper =
+          (_safe(p["Cost of Materials Consumed"]) ?? 0)
+          + (_safe(p["Purchases of Stock in Trade"]) ?? 0)
+          + (_safe(p["Changes in Inventories of Finished Goods, Work In Progress and Stock In Trade"]) ?? 0);
+        if (cogsProper !== 0) {
+          p["Cost of Goods Sold"] = cogsProper;
+        } else if (p["Cost of Goods Sold"] == null) {
+          // fallback: map from any single COGS alias
+          for (const s of ["Cost of Material Consumed","Cost of Materials Consumed","Total Cost of Materials","COGS","Direct Costs"]) {
+            if (p[s] != null) { p["Cost of Goods Sold"] = p[s]; break; }
+          }
+        }
+
+        // Derived P&L
+        // EBIT = EBITDA − Depreciation (operating, preferred) → fallback PBT + Interest
+        if (p["EBIT"] == null) {
+          const ebitda = _safe(p["EBITDA"]), dep = _safe(p["Depreciation"]) ?? 0;
+          if (ebitda != null) p["EBIT"] = ebitda - dep;
+          else {
+            const pbt = _safe(p["Profit Before Tax"]), int_ = _safe(p["Interest Expense"]);
+            if (pbt != null && int_ != null) p["EBIT"] = pbt + int_;
+          }
+        }
+        if (p["EBITDA"] == null && p["EBIT"] != null) p["EBITDA"] = (_safe(p["EBIT"]) ?? 0) + (_safe(p["Depreciation"]) ?? 0);
+        if (p["Gross Profit"] == null && p["Turnover"] != null && p["Cost of Goods Sold"] != null)
+          p["Gross Profit"] = (_safe(p["Turnover"]) ?? 0) - (_safe(p["Cost of Goods Sold"]) ?? 0);
+
+        return { pl: p, bs: b };
+      };
+
+      // ── fetch thresholds ─────────────────────────────────────────────────
+      const industry = cc.industry ?? "default";
+      const { data: threshData } = await supabase
+        .from("ratio_thresholds").select("*").in("industry", ["default", industry]);
+      const tMap: Record<string, { green_min: number|null; amber_min: number|null; peer_median: number|null; higher_is_better: boolean; formula_note: string|null }> = {};
+      for (const t of (threshData ?? []).filter(t => t.industry === "default")) tMap[t.ratio_name] = t;
+      for (const t of (threshData ?? []).filter(t => t.industry === industry)) tMap[t.ratio_name] = t;
+
+      const thresh = (name: string, val: number | null): "green"|"amber"|"red"|"na" => {
+        const t = tMap[name];
+        if (val == null || !t) return "na";
+        const { green_min, amber_min, higher_is_better } = t;
+        if (green_min == null || amber_min == null) return "na";
+        if (higher_is_better) return val >= green_min ? "green" : val >= amber_min ? "amber" : "red";
+        return val <= green_min ? "green" : val <= amber_min ? "amber" : "red";
+      };
+
+      // ── build year map from extracted data ───────────────────────────────
+      const yearMap = new Map<number, { pl: Record<string, number|null>; bs: Record<string, number|null>; cf: Record<string, number|null> }>();
+      for (const row of extracted) {
+        const y = yearMap.get(row.fiscal_year) ?? { pl: {}, bs: {}, cf: {} };
+        const dict: Record<string, number|null> = {};
+        for (const it of (row.line_items as unknown as LineItem[])) {
+          const v = it.override_value != null ? it.override_value : it.value;
+          dict[it.label] = v;
+        }
+        if (row.statement_type === "profit_loss") y.pl = { ...y.pl, ...dict };
+        if (row.statement_type === "balance_sheet") y.bs = { ...y.bs, ...dict };
+        if (row.statement_type === "cash_flow") y.cf = { ...y.cf, ...dict };
+        yearMap.set(row.fiscal_year, y);
+      }
+      if (yearMap.size === 0) { toast.error("No financial data found"); return; }
+
+      const principalPerYear = cc.deal_amount && cc.tenure_months
+        ? Number(cc.deal_amount) / (Number(cc.tenure_months) / 12) : 0;
+
+      // ── compute ratios year by year ──────────────────────────────────────
+      type RatioInsert = { case_id: string; user_id: string; fiscal_year: number; category: string; ratio_name: string; ratio_value: number|null; benchmark: number|null; threshold_status: string; formula_note: string };
+      const rows: RatioInsert[] = [];
+      const sortedYears = Array.from(yearMap.entries()).sort((a, b) => a[0] - b[0]);
+      let prevTurnover: number | null = null;
+
+      for (const [fy, fin] of sortedYears) {
+        const { pl, bs } = normalize(fin.pl, fin.bs);
+
+        const nw   = _safe(bs["Net Worth"]);
+        const negEq = nw !== null && nw < 0;
+        const td   = _safe(bs["Total Debt"]);
+        const ta   = _safe(bs["Total Assets"]);
+        const tl   = _safe(bs["Total Liabilities"]);
+        const ce   = _safe(bs["Capital Employed"]);
+        const ltB  = _safe(bs["Long Term Borrowings"]);
+        const fa   = _safe(bs["Fixed Assets (Net)"]);
+        const ca   = _safe(bs["Current Assets"]);
+        const cl   = _safe(bs["Current Liabilities"]);
+        const inv  = _safe(bs["Inventory"]) ?? 0;
+        const cash = _safe(bs["Cash & Bank"]);
+        const dbtr = _safe(bs["Trade Receivables"]);
+        const cred = _safe(bs["Trade Payables"]);
+        const resSurp = _safe(bs["Reserves & Surplus"]);
+        const wc   = ca != null && cl != null ? ca - cl : null;
+
+        const turn = _safe(pl["Turnover"]);
+        const cogs = _safe(pl["Cost of Goods Sold"]);
+        const gp   = _safe(pl["Gross Profit"]);
+        const ebitda= _safe(pl["EBITDA"]);
+        const dep  = _safe(pl["Depreciation"]) ?? 0;
+        const ebit = _safe(pl["EBIT"]);
+        const intE = _safe(pl["Interest Expense"]) ?? 0;
+        const pat  = _safe(pl["PAT"]);
+        const pbt  = _safe(pl["Profit Before Tax"]);
+        const empC = _safe(pl["Employee Benefit Expense"]);
+        const othE = _safe(pl["Other Expenses"]);
+        const rawM = _safe(pl["Cost of Materials Consumed"]);
+
+        const revGrowth = prevTurnover != null && prevTurnover !== 0 && turn != null
+          ? (turn - prevTurnover) / Math.abs(prevTurnover) : null;
+
+        const invDays  = inv !== 0 && cogs ? (inv / cogs) * 365 : null;
+        const dDays    = dbtr != null && turn ? (dbtr / turn) * 365 : null;
+        const cDays    = cred != null && cogs ? (cred / cogs) * 365 : null;
+        const ccc      = invDays != null && dDays != null && cDays != null ? invDays + dDays - cDays : null;
+
+        const outsideLiab = ta != null && nw != null ? ta - nw : null;
+        const rsWcTa    = wc != null && ta != null && ta !== 0 ? wc / ta : null;
+        const rsReTa    = resSurp != null && ta != null && ta !== 0 ? resSurp / ta : null;
+        const rsEbTa    = ebitda != null && ta != null && ta !== 0 ? ebitda / ta : null;
+        const rsEqOl    = nw != null && outsideLiab != null && outsideLiab !== 0 ? nw / outsideLiab : null;
+        const rsComp    = rsWcTa != null && rsReTa != null && rsEbTa != null && rsEqOl != null
+          ? 6*rsWcTa + 3*rsReTa + 7*rsEbTa + rsEqOl : null;
+
+        const calc: [string, string, number|null, string][] = [
+          ["profitability","revenue_growth",         revGrowth,                                                     "(Revenue_curr − Revenue_prev) / |Revenue_prev|"],
+          ["profitability","ebitda_margin",          _div(ebitda, turn),                                            "EBITDA / Turnover"],
+          ["profitability","ebt_margin",             _div(pbt, turn),                                               "Profit Before Tax / Turnover"],
+          ["profitability","net_profit_margin",      _div(pat, turn),                                               "PAT / Turnover"],
+          ["profitability","roe",                    negEq ? null : _div(pat, nw),                                  "PAT / Net Worth"],
+          ["profitability","return_on_fixed_assets", _div(pat, fa),                                                 "PAT / Fixed Assets (Net)"],
+          ["profitability","roce",                   _div(ebit, nw),                                                "EBIT / Net Worth"],
+          ["profitability","gross_margin",           _div(gp, turn),                                                "Gross Profit / Turnover"],
+          ["profitability","roa",                    _div(pat, ta),                                                 "PAT / Total Assets"],
+          ["liquidity",    "current_ratio",          _div(ca, cl),                                                  "Current Assets / Current Liabilities"],
+          ["liquidity",    "quick_ratio",            _div(ca != null ? ca - inv : null, cl),                        "(CA − Inventory) / CL"],
+          ["liquidity",    "cash_ratio",             _div(cash, cl),                                                "Cash / Current Liabilities"],
+          ["liquidity",    "working_capital",        wc,                                                            "CA − CL"],
+          ["solvency",     "interest_coverage",      _div(ebit, intE || null),                                      "EBIT / Interest Expense"],
+          ["solvency",     "lt_debt_to_equity",      negEq ? null : _div(ltB, nw),                                  "Long Term Borrowings / Net Worth"],
+          ["solvency",     "total_assets_to_equity", negEq ? null : _div(ta, nw),                                   "Total Assets / Net Worth"],
+          ["solvency",     "debt_to_equity",         negEq ? null : _div(td, nw),                                   "Total Debt / Net Worth"],
+          ["solvency",     "debt_to_assets",         _div(td, ta),                                                  "Total Debt / Total Assets"],
+          ["solvency",     "debt_to_ebitda",         _div(td, ebitda),                                              "Total Debt / EBITDA"],
+          ["solvency",     "total_liab_to_networth", negEq ? null : _div(tl, nw),                                   "Total Liabilities / Net Worth"],
+          ["coverage",     "dscr",                   _div((pat ?? 0) + dep + intE, intE + (principalPerYear||0) || null), "STANDARDISED: (PAT + Dep + Int) / (Int + Principal)"],
+          ["efficiency",   "fixed_assets_turnover",  _div(turn, fa),                                                "Turnover / Fixed Assets (Net)"],
+          ["efficiency",   "asset_turnover",         _div(turn, ta),                                                "Turnover / Total Assets"],
+          ["efficiency",   "working_capital_turnover",_div(turn, wc),                                               "Turnover / Working Capital"],
+          ["efficiency",   "inventory_days",         invDays,                                                       "(Inventory / COGS) × 365"],
+          ["efficiency",   "debtor_days",            dDays,                                                         "In the absence of credit sales details, (Debtors / Turnover) × 365"],
+          ["efficiency",   "creditor_days",          cDays,                                                         "In the absence of credit purchase details, (Creditors / COGS) × 365"],
+          ["efficiency",   "cash_conversion_cycle",  ccc,                                                           "Inventory Days + Receivables Days − Payable Days"],
+          ["efficiency",   "inventory_turnover",     _div(cogs, inv || null),                                       "COGS / Inventory"],
+          ["efficiency",   "receivables_turnover",   _div(turn, dbtr),                                              "Turnover / Trade Receivables"],
+          ["efficiency",   "capital_employed_turnover",_div(turn, ce),                                              "Turnover / Capital Employed"],
+          ["expenses",     "raw_material_pct",       _div(rawM, turn),                                              "Cost of Materials Consumed / Turnover"],
+          ["expenses",     "employee_cost_pct",      _div(empC, turn),                                              "Employee Benefit Expense / Turnover"],
+          ["expenses",     "finance_cost_pct",       turn ? _div(intE || null, turn) : null,                        "Finance Cost / Turnover"],
+          ["expenses",     "other_expenses_pct",     _div(othE, turn),                                              "Other Expenses / Turnover"],
+          ["return",       "roic",                   negEq ? null : _div(pat, ce),                                  "PAT / Capital Employed"],
+          ["return",       "ronw",                   negEq ? null : _div(pat, nw),                                  "PAT / Net Worth"],
+          ["r_score",      "r_score_wc_ta",          rsWcTa,                                                        "Working Capital / Total Assets"],
+          ["r_score",      "r_score_re_ta",          rsReTa,                                                        "Retained Earnings / Total Assets"],
+          ["r_score",      "r_score_ebitda_ta",      rsEbTa,                                                        "EBITDA / Total Assets"],
+          ["r_score",      "r_score_equity_ol",      rsEqOl,                                                        "Equity / Outside Liabilities"],
+          ["r_score",      "r_score_composite",      rsComp,                                                        "6×(WC/TA)+3×(RE/TA)+7×(EBITDA/TA)+Equity/OL"],
+        ];
+
+        const negEqNames = ["debt_to_equity","lt_debt_to_equity","total_liab_to_networth","total_assets_to_equity","roe","ronw"];
+        for (const [cat, name, val, formula] of calc) {
+          const reviewReq = negEq && negEqNames.includes(name);
+          rows.push({
+            case_id: cc.id, user_id: user.id,
+            fiscal_year: fy, category: cat, ratio_name: name,
+            ratio_value: val,
+            benchmark: tMap[name]?.peer_median ?? null,
+            threshold_status: thresh(name, reviewReq ? null : val),
+            formula_note: tMap[name]?.formula_note ?? formula,
+          });
+        }
+        prevTurnover = turn;
+      }
+
+      // ── save to DB ───────────────────────────────────────────────────────
+      await supabase.from("financial_ratios").delete().eq("case_id", cc.id);
+      if (rows.length) {
+        const { error: insErr } = await supabase.from("financial_ratios").insert(rows as never);
+        if (insErr) throw insErr;
+      }
+      await supabase.from("credit_cases").update({ status: "analysis" }).eq("id", cc.id);
+
+      toast.success(`${rows.length} ratio values computed across ${sortedYears.length} years`);
       await reload();
       setTab("ratios");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(e instanceof Error ? e.message : "Ratio computation failed");
     } finally { setBusy(false); }
   };
 
@@ -901,11 +1683,26 @@ function CaseViewInner() {
       setProgressLabel(LABELS[Math.min(Math.floor(p / 20), LABELS.length - 1)]);
     }, 600);
     try {
-      const { error } = await supabase.functions.invoke("generate-narrative", { body: { case_id: cc.id } });
+      window.dispatchEvent(new CustomEvent("ai-token-usage", {
+        detail: { status: "loading", label: "IC Note", max_tokens: 8192 },
+      }));
+      const { data: narData, error } = await supabase.functions.invoke("generate-narrative", { body: { case_id: cc.id } });
       clearInterval(tick);
       if (error) throw error;
       setProgress(100);
       setProgressLabel("Complete");
+      if (narData?.usage) {
+        window.dispatchEvent(new CustomEvent("ai-token-usage", {
+          detail: {
+            status:        "complete",
+            input_tokens:  narData.usage.input_tokens  ?? 0,
+            output_tokens: narData.usage.output_tokens ?? 0,
+            max_tokens:    narData.usage.max_tokens    ?? 8192,
+            model:         narData.usage.model         ?? "claude-sonnet-4-6",
+            label:         "IC Note",
+          },
+        }));
+      }
       toast.success("IC Note draft generated");
       await reload();
       setTab("ic_note");
@@ -1142,7 +1939,7 @@ function CaseViewInner() {
                     <div className="px-3 py-5 text-center">
                       <div className="text-primary text-lg mb-1">⬆</div>
                       <div className="terminal-label">DROP FILES OR CLICK TO BROWSE</div>
-                      <div className="text-foreground/40 mt-1">PDF · Excel · Image · Multiple OK</div>
+                      <div className="text-foreground/40 mt-1">PDF · Image · Multiple OK</div>
                     </div>
                   )}
                 </div>
@@ -1279,35 +2076,197 @@ function CaseViewInner() {
             </Panel>
           </div>
 
-          <Panel title="COMPANY DETAILS" ticker={cc.case_code}>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-xs">
-              {([
-                ["Legal Constitution",  cc.legal_constitution],
-                ["Industry / Sector",   cc.industry],
-                ["Year Established",    cc.year_established],
-                ["Principal Borrower",  cc.principal_borrower],
-                ["Website",             cc.website],
-              ] as const).map(([label, val]) => val != null && val !== "" ? (
-                <div key={label}>
-                  <div className="terminal-label">{label}</div>
-                  <div className="text-primary mt-0.5">{String(val)}</div>
+          <Panel
+            title="COMPANY DETAILS"
+            ticker={cc.case_code}
+            actions={
+              <div className="flex items-center gap-2">
+                {coDetailTab === "company" && linkedCompany && (
+                  <button onClick={openEditCo} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[EDIT]</button>
+                )}
+                {coDetailTab === "directors" && linkedCompany && (
+                  <button onClick={() => openEditDir()} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[+ ADD DIRECTOR]</button>
+                )}
+                <div className="flex border border-border">
+                  <button
+                    onClick={() => setCoDetailTab("company")}
+                    className={`px-3 py-1 text-[9px] tracking-widest font-bold transition-colors ${coDetailTab === "company" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-primary"}`}
+                  >
+                    COMPANY
+                  </button>
+                  {linkedCompany && (
+                    <button
+                      onClick={() => setCoDetailTab("directors")}
+                      className={`px-3 py-1 text-[9px] tracking-widest font-bold border-l border-border transition-colors ${coDetailTab === "directors" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-primary"}`}
+                    >
+                      DIRECTORS {linkedDirs.length > 0 ? `(${linkedDirs.length})` : ""}
+                    </button>
+                  )}
                 </div>
-              ) : null)}
-            </div>
-            {(cc.end_use || cc.collateral_summary || cc.strategic_rationale || cc.promoter_details || cc.analyst_notes) && (
-              <div className="border-t border-border/40 mt-3 pt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-xs">
-                {([
-                  ["End Use of Funds",    cc.end_use],
-                  ["Collateral Summary",  cc.collateral_summary],
-                  ["Strategic Rationale", cc.strategic_rationale],
-                  ["Promoter Details",    cc.promoter_details],
-                  ["Analyst Notes",       cc.analyst_notes],
-                ] as const).map(([label, val]) => val ? (
-                  <div key={label}>
-                    <div className="terminal-label">{label}</div>
-                    <div className="text-foreground/90 mt-0.5 leading-relaxed whitespace-pre-wrap">{val}</div>
+              </div>
+            }
+          >
+            {coDetailTab === "company" && (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-xs">
+                  {([
+                    ["Legal Constitution",  cc.legal_constitution],
+                    ["Industry / Sector",   cc.industry],
+                    ["Year Established",    cc.year_established],
+                    ["Principal Borrower",  cc.principal_borrower],
+                    ["Website",             cc.website],
+                  ] as const).map(([label, val]) => val != null && val !== "" ? (
+                    <div key={label}>
+                      <div className="terminal-label">{label}</div>
+                      <div className="text-primary mt-0.5">{String(val)}</div>
+                    </div>
+                  ) : null)}
+                </div>
+
+                {linkedCompany && (linkedCompany.mca_cin || linkedCompany.mca_pan) && (
+                  <div className="border-t border-border/40 mt-3 pt-3">
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-3">MCA / CORPOSITORY PROFILE</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-xs">
+                      {([
+                        ["CIN",                  linkedCompany.mca_cin],
+                        ["PAN",                  linkedCompany.mca_pan],
+                        ["LEI",                  linkedCompany.mca_lei],
+                        ["CATEGORY",             linkedCompany.mca_category],
+                        ["SUB CATEGORY",         linkedCompany.mca_sub_category],
+                        ["COMPANY TYPE",         linkedCompany.mca_type],
+                        ["AUTH. CAPITAL",        linkedCompany.mca_authorized_capital],
+                        ["PAID UP CAPITAL",      linkedCompany.mca_paid_up_capital],
+                        ["STATUS",               linkedCompany.mca_status],
+                        ["NSE SECTOR",           linkedCompany.mca_nse_sector],
+                        ["SECTOR",               linkedCompany.mca_sector],
+                        ["PRODUCTS/SERVICES",    linkedCompany.mca_products_services],
+                        ["EMAIL",                linkedCompany.mca_email],
+                        ["TELEPHONE",            linkedCompany.mca_telephone],
+                        ["INCORPORATION DATE",   linkedCompany.mca_date_of_incorp],
+                        ["LAST BALANCE SHEET",   linkedCompany.mca_date_last_bs],
+                        ["LAST AGM",             linkedCompany.mca_date_last_agm],
+                      ] as const).filter(([, v]) => v).map(([label, val]) => (
+                        <div key={label}>
+                          <div className="terminal-label">{label}</div>
+                          <div className="text-primary mt-0.5 font-mono">{val}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {linkedCompany.mca_about && (
+                      <div className="mt-3 text-xs text-foreground/80 leading-relaxed whitespace-pre-wrap border-t border-border/30 pt-3">
+                        {linkedCompany.mca_about}
+                      </div>
+                    )}
                   </div>
-                ) : null)}
+                )}
+
+                {(cc.end_use || cc.collateral_summary || cc.strategic_rationale || cc.promoter_details || cc.analyst_notes) && (
+                  <div className="border-t border-border/40 mt-3 pt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-xs">
+                    {([
+                      ["End Use of Funds",    cc.end_use],
+                      ["Collateral Summary",  cc.collateral_summary],
+                      ["Strategic Rationale", cc.strategic_rationale],
+                      ["Promoter Details",    cc.promoter_details],
+                      ["Analyst Notes",       cc.analyst_notes],
+                    ] as const).map(([label, val]) => val ? (
+                      <div key={label}>
+                        <div className="terminal-label">{label}</div>
+                        <div className="text-foreground/90 mt-0.5 leading-relaxed whitespace-pre-wrap">{val}</div>
+                      </div>
+                    ) : null)}
+                  </div>
+                )}
+              </>
+            )}
+
+            {coDetailTab === "directors" && (
+              <div className="overflow-x-auto">
+                <table className="text-[11px] border-collapse" style={{ minWidth: "2200px" }}>
+                  <thead>
+                    <tr className="border-b border-border bg-surface/60">
+                      {[
+                        "","NAME","DIN","PAN","DIN STATUS","DSC STATUS",
+                        "DOB","AGE","GENDER","NATIONALITY",
+                        "DESIGNATION","CATEGORY","APPOINTED CURRENT","ORIGINALLY APPOINTED",
+                        "CESSATION","% SHAREHOLDING","EMAIL","PHONE","REMARKS","ADDRESS",
+                      ].map(h => (
+                        <th key={h} className="text-left py-2 px-3 text-[9px] tracking-widest text-muted-foreground font-normal whitespace-nowrap border-r border-border/30">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {linkedDirs.map((d, i) => (
+                      <tr key={i} className="border-b border-border/20 hover:bg-surface/40 transition-colors align-top">
+                        <td className="py-2 px-2 whitespace-nowrap border-r border-border/20">
+                          <div className="flex gap-1">
+                            <button onClick={() => openEditDir(d)} className="text-[9px] border border-border/60 text-muted-foreground hover:text-primary hover:border-primary/40 px-1.5 py-0.5 transition-colors">✎</button>
+                            <button onClick={() => deleteDir(String(d.id))} className="text-[9px] border border-border/60 text-muted-foreground hover:text-destructive hover:border-destructive/40 px-1.5 py-0.5 transition-colors">✕</button>
+                          </div>
+                        </td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                          <div className="text-primary font-medium">{d.name}</div>
+                          {d.dob && <div className="text-muted-foreground text-[9px] mt-0.5">DOB: {d.dob}</div>}
+                        </td>
+                        <td className="py-2 px-3 font-mono text-primary/80 whitespace-nowrap border-r border-border/20">{d.din || "—"}</td>
+                        <td className="py-2 px-3 font-mono text-primary/80 whitespace-nowrap border-r border-border/20">{d.pan || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                          <span className={d.din_status?.toLowerCase().includes("approved") ? "text-success" : "text-muted-foreground"}>
+                            {d.din_status || "—"}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-muted-foreground">{d.dsc_status || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">{d.dob || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-center">{d.age || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">{d.gender || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">{d.nationality || "—"}</td>
+                        {(() => {
+                          const m = d.designation?.match(/^(.+?)\((.+?)\)$/);
+                          const role = m ? m[1].trim() : (d.designation || "—");
+                          const cat  = m ? m[2].trim() : "";
+                          return (
+                            <>
+                              <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-primary">{role}</td>
+                              <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                                {cat && cat !== "-" ? <span className="text-accent text-[9px] tracking-widest">{cat}</span> : <span className="text-muted-foreground">—</span>}
+                              </td>
+                            </>
+                          );
+                        })()}
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">{d.appointed_current || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">{d.originally_appointed || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                          {d.cessation_date && d.cessation_date !== "-"
+                            ? <span className="text-destructive">{d.cessation_date}</span>
+                            : <span className="text-success text-[9px] tracking-widest">ACTIVE</span>}
+                        </td>
+                        <td className="py-2 px-3 border-r border-border/20 whitespace-nowrap">
+                          {d.shareholding ? (() => {
+                            const m = String(d.shareholding).match(/^(.+?)\s*(\(.+\))$/);
+                            return m ? <><div>{m[1].trim()}</div><div className="text-[8px] text-muted-foreground/50 mt-0.5">{m[2]}</div></> : <span>{d.shareholding}</span>;
+                          })() : "—"}
+                        </td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-muted-foreground">{d.email || "—"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 font-mono text-muted-foreground">{d.phone || "—"}</td>
+                        <td className="py-2 px-3 border-r border-border/20" style={{maxWidth:"180px"}}>
+                          {d.remarks && d.remarks !== "—" ? (
+                            <div className="relative">
+                              <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2 pr-14" style={{wordBreak:"break-word"}}>{d.remarks}</div>
+                              <button onClick={()=>setTextPopover({label:"REMARKS",text:String(d.remarks)})} className="absolute bottom-0 right-0 text-[8px] text-primary/60 hover:text-primary tracking-widest bg-card pl-1">read more</button>
+                            </div>
+                          ) : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="py-2 px-3" style={{maxWidth:"200px"}}>
+                          {d.address && d.address !== "—" ? (
+                            <div className="relative">
+                              <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2 pr-14" style={{wordBreak:"break-word"}}>{d.address}</div>
+                              <button onClick={()=>setTextPopover({label:"ADDRESS",text:String(d.address)})} className="absolute bottom-0 right-0 text-[8px] text-primary/60 hover:text-primary tracking-widest bg-card pl-1">read more</button>
+                            </div>
+                          ) : <span className="text-muted-foreground">—</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </Panel>
@@ -1325,7 +2284,6 @@ function CaseViewInner() {
             ["bank",        "5 · BANK"],
             ["gst",         "6 · GST"],
             ["ic_note",     "7 · IC NOTE"],
-            ["emi",         "8 · EMI"],
           ] as const).map(([k, l]) => (
             <button
               key={k}
@@ -1361,8 +2319,32 @@ function CaseViewInner() {
 
       {tab === "review" && (
         <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <input ref={finExcelInputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFinancialExcel(f); e.target.value = ""; }} />
+            <button
+              onClick={() => finExcelInputRef.current?.click()}
+              disabled={importingFinExcel}
+              className="text-[10px] tracking-widest border border-primary/40 text-primary/70 hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5"
+            >{importingFinExcel ? "IMPORTING…" : "⬆ IMPORT FINANCIAL EXCEL"}</button>
+            <span className="text-[9px] text-muted-foreground/50 tracking-wide">Supports Balance Sheet · P&L · Cash Flow sheets</span>
+            <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={performUndo}
+                disabled={undoStack.length === 0}
+                title="Undo (Ctrl+Z)"
+                className="text-[9px] tracking-widest border border-border px-2 py-1 text-muted-foreground hover:text-primary hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >↩ UNDO {undoStack.length > 0 && <span className="text-[8px] opacity-60">({undoStack.length})</span>}</button>
+              <button
+                onClick={performRedo}
+                disabled={redoStack.length === 0}
+                title="Redo (Ctrl+Y)"
+                className="text-[9px] tracking-widest border border-border px-2 py-1 text-muted-foreground hover:text-primary hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >↪ REDO {redoStack.length > 0 && <span className="text-[8px] opacity-60">({redoStack.length})</span>}</button>
+            </div>
+          </div>
+
           {extracted.length === 0 ? (
-            <Panel title="NO EXTRACTION YET"><div className="text-muted-foreground text-xs">Upload documents in the previous step to begin extraction.</div></Panel>
+            <Panel title="NO EXTRACTION YET"><div className="text-muted-foreground text-xs">Upload documents in the UPLOAD tab or import a financial Excel above.</div></Panel>
           ) : (() => {
             // Standard label order per type for consistent row ordering
             const STD_ORDER: Record<string, string[]> = {
@@ -1379,13 +2361,27 @@ function CaseViewInner() {
               const abbr = unitAbbr(unit);
               const allConfirmed = typeRows.every(r => r.confirmed);
               const anyLow = typeRows.some(r => (r.line_items as unknown as LineItem[]).some(i => i.confidence < 80));
-              // Build ordered union of labels
-              const std = STD_ORDER[type] ?? [];
-              const seen = new Set<string>(std.filter(l => typeRows.some(r => (r.line_items as unknown as LineItem[]).some(i => i.label === l))));
-              for (const row of typeRows)
-                for (const it of (row.line_items as unknown as LineItem[]))
-                  if (!seen.has(it.label)) { seen.add(it.label); }
-              const labels = [...seen];
+              // Build ordered union of labels, respecting sort_order if present
+              const allItems = typeRows[0] ? (typeRows[0].line_items as unknown as LineItem[]) : [];
+              const hasOrder = allItems.some(i => i.sort_order !== undefined);
+              let labels: string[];
+              if (hasOrder) {
+                // Use sort_order from first year's line_items
+                const sorted = [...allItems].sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
+                const seen = new Set<string>();
+                labels = sorted.map(i => i.label).filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
+                // Add any labels from other years not in first year
+                for (const row of typeRows)
+                  for (const it of (row.line_items as unknown as LineItem[]))
+                    if (!seen.has(it.label)) { seen.add(it.label); labels.push(it.label); }
+              } else {
+                const std = STD_ORDER[type] ?? [];
+                const seen = new Set<string>(std.filter(l => typeRows.some(r => (r.line_items as unknown as LineItem[]).some(i => i.label === l))));
+                for (const row of typeRows)
+                  for (const it of (row.line_items as unknown as LineItem[]))
+                    if (!seen.has(it.label)) { seen.add(it.label); }
+                labels = [...seen];
+              }
 
               return (
                 <Panel
@@ -1459,91 +2455,248 @@ function CaseViewInner() {
                         </tr>
                       </thead>
                       <tbody>
-                        {labels.map(label => {
-                          const isEditingLabel = editingCell?.field === "label" && editingCell.stmtType === type && editingCell.label === label;
-                          // Best AI note: first non-empty, non-manual note across all years (newest → oldest)
-                          const bestNote = [...typeRows].reverse().reduce<string>((found, row) => {
-                            if (found) return found;
-                            const it = (row.line_items as unknown as LineItem[]).find(i => i.label === label);
-                            const n = it?.note ?? "";
-                            return (n && n !== "manual" && n !== "auto-derived") ? n : "";
-                          }, "");
-                          return (
-                            <tr key={label} className={`border-b border-border/30 group ${type === "balance_sheet" && BS_TOTAL_LABELS.has(label) ? "bg-surface/60 font-semibold" : ""}`}>
-                              <td className="py-0.5 pr-3">
-                                {isEditingLabel ? (
-                                  <input
-                                    autoFocus
-                                    defaultValue={label}
-                                    onBlur={e => updateCellLabel(type, label, e.target.value)}
-                                    onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
-                                    className="w-full bg-input border border-primary px-1 text-primary text-xs"
-                                  />
-                                ) : (
-                                  <span
-                                    className="cursor-pointer hover:text-primary text-foreground/90"
-                                    title="Click to rename (updates all years)"
-                                    onClick={() => setEditingCell({ stmtType: type, fy: years[0] ?? 0, label, field: "label" })}
-                                  >{label}</span>
-                                )}
-                              </td>
-                              {years.map(fy => {
-                                const fyRow = typeRows.find(r => r.fiscal_year === fy);
-                                const item = fyRow ? (fyRow.line_items as unknown as LineItem[]).find(i => i.label === label) : undefined;
-                                const val = item ? (item.override_value ?? item.value) : null;
-                                const conf = item?.confidence ?? 100;
-                                const confCls = conf >= 90 ? "text-primary" : conf >= 80 ? "text-warning" : "text-destructive";
-                                const isEditingVal = editingCell?.field === "value" && editingCell.stmtType === type && editingCell.fy === fy && editingCell.label === label;
-                                return (
-                                  <td key={fy} className="text-right tabular-nums pr-2">
-                                    {isEditingVal ? (
-                                      <input
-                                        autoFocus
-                                        type="number"
-                                        defaultValue={val ?? ""}
-                                        onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
+                        {(() => {
+                          // Track which section we're in for collapse filtering
+                          let currentSection: string | null = null;
+                          return labels.map(label => {
+                            const anyItem = typeRows.map(r => (r.line_items as unknown as LineItem[]).find(i => i.label === label)).find(Boolean);
+                            const isSection = anyItem?.is_section ?? false;
+
+                            if (isSection) currentSection = label;
+                            const sectionKey = `${type}:${currentSection}`;
+                            const isHidden = !isSection && currentSection !== null && collapsedSections.has(sectionKey);
+                            if (isHidden) return null;
+
+                            const isCollapsed = isSection && collapsedSections.has(`${type}:${label}`);
+                            const isEditingLabel = editingCell?.field === "label" && editingCell.stmtType === type && editingCell.label === label;
+                            const bestNote = [...typeRows].reverse().reduce<string>((found, row) => {
+                              if (found) return found;
+                              const it = (row.line_items as unknown as LineItem[]).find(i => i.label === label);
+                              const n = it?.note ?? "";
+                              return (n && n !== "manual" && n !== "auto-derived") ? n : "";
+                            }, "");
+
+                            const isDragTarget = dragOverRow?.stmtType === type && dragOverRow?.label === label;
+
+                            // ── Row type classification ──────────────────────
+                            const isGrandTotal  = GRAND_TOTAL_LABELS.has(label);
+                            const isSubTotal    = !isGrandTotal && COMPUTED_LABELS.has(label);
+                            const isLeaf        = !isSection && !isGrandTotal && !isSubTotal;
+
+                            const isDragging = dragRow?.stmtType === type && dragRow?.label === label;
+
+                            const dragProps = {
+                              draggable: true,
+                              onDragStart: (e: React.DragEvent) => {
+                                setDragRow({ stmtType: type, label });
+                                e.dataTransfer.effectAllowed = "move";
+                              },
+                              onDragOver:  (e: React.DragEvent) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOverRow({ stmtType: type, label }); },
+                              onDrop:      (e: React.DragEvent) => { e.preventDefault(); if (dragRow && dragRow.stmtType === type && dragRow.label !== label) moveRow(type, dragRow.label, label); setDragRow(null); setDragOverRow(null); },
+                              onDragEnd:   () => { setDragRow(null); setDragOverRow(null); },
+                              style: {
+                                opacity: isDragging ? 0.35 : 1,
+                                ...(isDragTarget ? { borderTop: "2px solid hsl(var(--primary))" } : {}),
+                              },
+                            };
+
+                            if (isSection) {
+                              // Look up the section's representative total for each year
+                              const totalRowLabel = SECTION_TOTAL_MAP[label];
+                              return (
+                                <tr key={label} {...dragProps}
+                                  className="border-t-2 border-border/60 bg-surface select-none group"
+                                >
+                                  <td className="py-1.5 pr-3 pl-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        onClick={() => toggleSection(type, label)}
+                                        className="w-4 h-4 flex items-center justify-center border border-primary/40 text-primary/60 hover:bg-primary/10 hover:border-primary text-[10px] font-bold flex-shrink-0 transition-colors"
+                                      >{isCollapsed ? "+" : "−"}</button>
+                                      <span className="text-[10px] font-bold tracking-widest text-foreground uppercase">{label}</span>
+                                    </div>
+                                  </td>
+                                  {years.map(fy => {
+                                    const fyRow = typeRows.find(r => r.fiscal_year === fy);
+                                    const items = fyRow ? (fyRow.line_items as unknown as LineItem[]) : [];
+                                    const totalItem = totalRowLabel ? items.find(i => i.label === totalRowLabel) : null;
+                                    const totalVal = totalItem ? (totalItem.override_value ?? totalItem.value) : null;
+                                    return (
+                                      <td key={fy} className="text-right pr-2 tabular-nums font-bold text-primary/70 text-[11px]">
+                                        {totalVal != null ? totalVal.toLocaleString("en-IN") : ""}
+                                        {abbr && totalVal != null && <span className="text-[8px] text-muted-foreground ml-0.5">{abbr}</span>}
+                                      </td>
+                                    );
+                                  })}
+                                  <td /><td />
+                                  <td className="text-center">
+                                    <button
+                                      onClick={() => deleteRowFromType(type, label)}
+                                      className="opacity-0 group-hover:opacity-100 text-destructive/60 hover:text-destructive text-[10px] px-1"
+                                      title="Remove this row from all years"
+                                    >✕</button>
+                                  </td>
+                                </tr>
+                              );
+                            }
+
+                            // ── Grand total row ──────────────────────────────
+                            if (isGrandTotal) {
+                              return (
+                                <tr key={label} {...dragProps}
+                                  className="border-t-2 border-primary/40 bg-primary/5 group"
+                                >
+                                  <td className="py-1.5 pr-3 pl-2 font-bold text-primary tracking-wide">
+                                    {label}
+                                  </td>
+                                  {years.map(fy => {
+                                    const fyRow = typeRows.find(r => r.fiscal_year === fy);
+                                    const item = fyRow ? (fyRow.line_items as unknown as LineItem[]).find(i => i.label === label) : undefined;
+                                    const val = item ? (item.override_value ?? item.value) : null;
+                                    const isEditingVal = editingCell?.field === "value" && editingCell.stmtType === type && editingCell.fy === fy && editingCell.label === label;
+                                    return (
+                                      <td key={fy} className="text-right tabular-nums pr-2 font-bold text-primary text-[12px]">
+                                        {isEditingVal ? (
+                                          <input autoFocus type="number" defaultValue={val ?? ""}
+                                            onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
+                                            onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
+                                            className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
+                                          />
+                                        ) : (
+                                          <span className="cursor-pointer hover:opacity-70"
+                                            onClick={() => { setEditingCell({ stmtType: type, fy, label, field: "value" }); setEditing(`${type}.${fy}.${label}`); }}>
+                                            {val != null ? val.toLocaleString("en-IN") : <span className="text-muted-foreground font-normal">—</span>}
+                                            {abbr && val != null && <span className="text-[9px] text-primary/50 ml-0.5 font-normal">{abbr}</span>}
+                                          </span>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                  <td /><td className="pl-3 text-[10px] text-muted-foreground/50 italic">auto</td><td />
+                                </tr>
+                              );
+                            }
+
+                            // ── Sub-total row ────────────────────────────────
+                            if (isSubTotal) {
+                              return (
+                                <tr key={label} {...dragProps}
+                                  className="border-b border-border/50 bg-surface/50 group font-semibold"
+                                >
+                                  <td className="py-1 pr-3 pl-4 text-foreground/80 border-l-2 border-primary/30">
+                                    <span className="text-muted-foreground/40 mr-1 cursor-grab text-[9px]">⠿</span>
+                                    {isEditingLabel ? (
+                                      <input autoFocus defaultValue={label}
+                                        onBlur={e => updateCellLabel(type, label, e.target.value)}
                                         onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
-                                        className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
+                                        className="w-full bg-input border border-primary px-1 text-primary text-xs"
                                       />
                                     ) : (
-                                      <span
-                                        className={`cursor-pointer hover:text-primary ${confCls}`}
-                                        title={`Confidence: ${conf} — click to edit`}
-                                        onClick={() => { setEditingCell({ stmtType: type, fy, label, field: "value" }); setEditing(`${type}.${fy}.${label}`); }}
-                                      >
-                                        {val != null ? val.toLocaleString("en-IN") : <span className="text-muted-foreground">—</span>}
-                                        {abbr && val != null && <span className="text-[9px] text-muted-foreground ml-0.5">{abbr}</span>}
-                                      </span>
+                                      <span className="cursor-pointer hover:text-primary"
+                                        onClick={() => setEditingCell({ stmtType: type, fy: years[0] ?? 0, label, field: "label" })}>{label}</span>
                                     )}
                                   </td>
-                                );
-                              })}
-                              <td />{/* spacer under + YEAR header */}
-                              <td className="pl-3">
-                                <input
-                                  type="text"
-                                  key={`${type}-${label}-note`}
-                                  defaultValue={bestNote}
-                                  placeholder="add note…"
-                                  onBlur={async e => {
-                                    const v = e.target.value;
-                                    await Promise.all(typeRows.map(row => updateRowNote(type, row.fiscal_year, label, v)));
-                                    await reload();
-                                  }}
-                                  onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                                  className="w-full bg-transparent border-b border-border/40 focus:border-primary px-0 text-muted-foreground focus:text-primary text-xs outline-none placeholder:text-border/60"
-                                />
-                              </td>
-                              <td className="text-center">
-                                <button
-                                  onClick={() => deleteRowFromType(type, label)}
-                                  className="opacity-0 group-hover:opacity-100 text-destructive/60 hover:text-destructive text-[10px] px-1"
-                                  title="Remove this row from all years"
-                                >✕</button>
-                              </td>
-                            </tr>
-                          );
-                        })}
+                                  {years.map(fy => {
+                                    const fyRow = typeRows.find(r => r.fiscal_year === fy);
+                                    const item = fyRow ? (fyRow.line_items as unknown as LineItem[]).find(i => i.label === label) : undefined;
+                                    const val = item ? (item.override_value ?? item.value) : null;
+                                    const isEditingVal = editingCell?.field === "value" && editingCell.stmtType === type && editingCell.fy === fy && editingCell.label === label;
+                                    return (
+                                      <td key={fy} className="text-right tabular-nums pr-2 text-foreground/90">
+                                        {isEditingVal ? (
+                                          <input autoFocus type="number" defaultValue={val ?? ""}
+                                            onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
+                                            onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
+                                            className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
+                                          />
+                                        ) : (
+                                          <span className="cursor-pointer hover:text-primary italic"
+                                            title="auto-calculated — click to override"
+                                            onClick={() => { setEditingCell({ stmtType: type, fy, label, field: "value" }); setEditing(`${type}.${fy}.${label}`); }}>
+                                            {val != null ? val.toLocaleString("en-IN") : <span className="text-muted-foreground font-normal">—</span>}
+                                            {abbr && val != null && <span className="text-[9px] text-muted-foreground ml-0.5 font-normal">{abbr}</span>}
+                                          </span>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                  <td /><td className="pl-3 text-[9px] text-muted-foreground/40 italic">auto</td><td />
+                                </tr>
+                              );
+                            }
+
+                            // ── Leaf (input) row ─────────────────────────────
+                            return (
+                              <tr key={label} {...dragProps}
+                                className="border-b border-border/20 group hover:bg-surface/30 transition-colors"
+                              >
+                                <td className="py-0.5 pr-3 pl-8">
+                                  <span className="text-muted-foreground/30 mr-1 cursor-grab text-[9px]">⠿</span>
+                                  {isEditingLabel ? (
+                                    <input autoFocus defaultValue={label}
+                                      onBlur={e => updateCellLabel(type, label, e.target.value)}
+                                      onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
+                                      className="w-full bg-input border border-primary px-1 text-primary text-xs"
+                                    />
+                                  ) : (
+                                    <span className="cursor-pointer hover:text-primary text-foreground/75"
+                                      title="Click to rename"
+                                      onClick={() => setEditingCell({ stmtType: type, fy: years[0] ?? 0, label, field: "label" })}>{label}</span>
+                                  )}
+                                </td>
+                                {years.map(fy => {
+                                  const fyRow = typeRows.find(r => r.fiscal_year === fy);
+                                  const item = fyRow ? (fyRow.line_items as unknown as LineItem[]).find(i => i.label === label) : undefined;
+                                  const val = item ? (item.override_value ?? item.value) : null;
+                                  const conf = item?.confidence ?? 100;
+                                  const confCls = conf >= 90 ? "text-foreground/80" : conf >= 80 ? "text-warning" : "text-destructive";
+                                  const isEditingVal = editingCell?.field === "value" && editingCell.stmtType === type && editingCell.fy === fy && editingCell.label === label;
+                                  return (
+                                    <td key={fy} className="text-right tabular-nums pr-2">
+                                      {isEditingVal ? (
+                                        <input autoFocus type="number" defaultValue={val ?? ""}
+                                          onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
+                                          onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
+                                          className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
+                                        />
+                                      ) : (
+                                        <span className={`cursor-pointer hover:text-primary ${confCls}`}
+                                          title="Click to edit"
+                                          onClick={() => { setEditingCell({ stmtType: type, fy, label, field: "value" }); setEditing(`${type}.${fy}.${label}`); }}>
+                                          {val != null ? val.toLocaleString("en-IN") : <span className="text-muted-foreground/40">—</span>}
+                                          {abbr && val != null && <span className="text-[9px] text-muted-foreground ml-0.5">{abbr}</span>}
+                                        </span>
+                                      )}
+                                    </td>
+                                  );
+                                })}
+                                <td />{/* spacer */}
+                                <td className="pl-3">
+                                  <input
+                                    type="text"
+                                    key={`${type}-${label}-note`}
+                                    defaultValue={bestNote}
+                                    placeholder="add note…"
+                                    onBlur={async e => {
+                                      const v = e.target.value;
+                                      await Promise.all(typeRows.map(row => updateRowNote(type, row.fiscal_year, label, v)));
+                                      await reload();
+                                    }}
+                                    onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                                    className="w-full bg-transparent border-b border-border/40 focus:border-primary px-0 text-muted-foreground focus:text-primary text-xs outline-none placeholder:text-border/60"
+                                  />
+                                </td>
+                                <td className="text-center">
+                                  <button
+                                    onClick={() => deleteRowFromType(type, label)}
+                                    className="opacity-0 group-hover:opacity-100 text-destructive/60 hover:text-destructive text-[10px] px-1"
+                                    title="Remove this row from all years"
+                                  >✕</button>
+                                </td>
+                              </tr>
+                            );
+                          });
+                        })()}
                       </tbody>
                     </table>
                   </div>
@@ -1552,106 +2705,7 @@ function CaseViewInner() {
                     className="mt-2 text-[10px] border border-dashed border-border/60 text-muted-foreground hover:border-primary hover:text-primary px-3 py-1 w-full tracking-widest"
                   >+ ADD ROW</button>
 
-                  {/* ── Balance sheet tally check ────────────────────────── */}
-                  {type === "balance_sheet" && (
-                    <div className="mt-3 border border-border/50 bg-surface p-3 space-y-2">
-                      <div className="text-[9px] text-muted-foreground tracking-widest mb-1">
-                        BALANCE CHECK &nbsp;·&nbsp; Total Assets = Net Worth + Total Debt + Current Liabilities
-                      </div>
-                      {years.map(fy => {
-                        const fyRow = typeRows.find(r => r.fiscal_year === fy);
-                        const items = (fyRow?.line_items ?? []) as unknown as LineItem[];
-                        const get = (lbl: string) => { const it = items.find(i => i.label === lbl); return it != null ? (it.override_value ?? it.value ?? 0) : 0; };
-                        const assets   = get("Total Assets");
-                        const nw       = get("Net Worth");
-                        const debt     = get("Total Debt");
-                        const currLiab = get("Current Liabilities");
-                        const liabSide = nw + debt + currLiab;
-                        const diff     = parseFloat((assets - liabSide).toFixed(2));
-                        const balanced = Math.abs(diff) < 0.01;
-                        const unit     = fyRow?.unit;
-                        const fmt      = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
-                        const au       = unitAbbr(unit ?? "");
-                        return (
-                          <div key={fy} className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs px-2 py-1.5 border ${balanced ? "border-success/30 bg-success/5" : "border-destructive/40 bg-destructive/5"}`}>
-                            <span className="text-muted-foreground font-bold">FY{fy}</span>
-                            <span>Assets <span className="text-primary tabular-nums font-bold">{fmt(assets)}{au ? ` ${au}` : ""}</span></span>
-                            <span className="text-muted-foreground">=</span>
-                            <span>NW <span className="text-primary tabular-nums">{fmt(nw)}</span> + Debt <span className="text-primary tabular-nums">{fmt(debt)}</span> + CL <span className="text-primary tabular-nums">{fmt(currLiab)}</span> = <span className="text-primary tabular-nums font-bold">{fmt(liabSide)}{au ? ` ${au}` : ""}</span></span>
-                            <span className={`ml-auto font-bold tracking-widest text-[10px] ${balanced ? "text-success" : "text-destructive"}`}>
-                              {balanced ? "✓ BALANCED" : `DIFF ${diff > 0 ? "+" : ""}${fmt(diff)}${au ? ` ${au}` : ""} — adjust an asset or liability`}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
 
-                  {/* ── Year-over-year comparison chart ─────────────────── */}
-                  {years.length >= 1 && (() => {
-                    const METRICS: Record<string, { key: string; color: string; name: string }[]> = {
-                      profit_loss: [
-                        { key: "Turnover",       color: "#22c55e", name: "Turnover" },
-                        { key: "EBITDA",         color: "#f59e0b", name: "EBITDA" },
-                        { key: "PAT",            color: "#60a5fa", name: "PAT" },
-                      ],
-                      balance_sheet: [
-                        { key: "Total Assets",   color: "#60a5fa", name: "Total Assets" },
-                        { key: "Net Worth",      color: "#22c55e", name: "Net Worth" },
-                        { key: "Total Debt",     color: "#ef4444", name: "Total Debt" },
-                      ],
-                      cash_flow: [
-                        { key: "Cash from Operations", color: "#22c55e", name: "Operations" },
-                        { key: "Cash from Investing",  color: "#f59e0b", name: "Investing" },
-                        { key: "Cash from Financing",  color: "#60a5fa", name: "Financing" },
-                      ],
-                      projections: [
-                        { key: "Projected Turnover", color: "#22c55e", name: "Revenue (P)" },
-                        { key: "Projected EBITDA",   color: "#f59e0b", name: "EBITDA (P)" },
-                        { key: "Projected PAT",      color: "#60a5fa", name: "PAT (P)" },
-                      ],
-                    };
-                    const metrics = METRICS[type] ?? [];
-                    const chartData = years.map(fy => {
-                      const row = typeRows.find(r => r.fiscal_year === fy);
-                      const items = (row?.line_items ?? []) as unknown as LineItem[];
-                      const entry: Record<string, number | string | null> = { fy: `FY${fy}` };
-                      for (const m of metrics) {
-                        const it = items.find(i => i.label === m.key);
-                        entry[m.key] = it ? (it.override_value ?? it.value) : null;
-                      }
-                      return entry;
-                    });
-                    const hasData = chartData.some(d => metrics.some(m => d[m.key] != null));
-                    if (!hasData) return null;
-                    return (
-                      <div className="mt-4 border-t border-border/40 pt-3">
-                        <div className="text-[9px] text-muted-foreground tracking-widest mb-2">
-                          YEAR-ON-YEAR COMPARISON{unit ? ` · ₹ ${unit}` : ""}
-                        </div>
-                        <div className="h-44">
-                          <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                              <XAxis dataKey="fy" tick={{ fill: "#6b7280", fontSize: 10 }} />
-                              <YAxis tick={{ fill: "#6b7280", fontSize: 10 }} width={54}
-                                tickFormatter={v => Math.abs(v) >= 1000 ? `${(v/1000).toFixed(1)}K` : String(v)} />
-                              <RTooltip
-                                contentStyle={{ background: "#0f172a", border: "1px solid #1f2937", fontSize: 11 }}
-                                formatter={(v: number, name: string) => [v != null ? v.toLocaleString("en-IN") : "—", name]}
-                              />
-                              <Legend wrapperStyle={{ fontSize: 10, color: "#9ca3af" }} />
-                              {metrics.map((m, i) => (
-                                <Bar key={m.key} dataKey={m.key} name={m.name} fill={m.color}
-                                  opacity={0.85} radius={[2, 2, 0, 0]}
-                                  barSize={years.length > 4 ? 10 : years.length > 2 ? 14 : 20} />
-                              ))}
-                            </ComposedChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </div>
-                    );
-                  })()}
                   <StatementInsights type={type} typeRows={typeRows} years={years} unit={unit} />
                 </Panel>
               );
@@ -1724,34 +2778,49 @@ function CaseViewInner() {
           {/* Auto-derived fields panel */}
           {extracted.length > 0 && (() => {
             const histYears = Array.from(new Set(extracted.filter(r => r.statement_type !== "projections").map(r => r.fiscal_year))).sort();
-            const derivedRows: { fy: number; label: string; value: number }[] = [];
+            // pivot: label → { fy → value }
+            const pivot: Record<string, Record<number, number>> = {};
+            const labelOrder: string[] = [];
             for (const fy of histYears) {
               const raw: LineItem[] = [];
               const seen = new Set<string>();
               for (const row of extracted.filter(r => r.fiscal_year === fy && r.statement_type !== "projections"))
                 for (const it of (row.line_items as unknown as LineItem[]) ?? [])
                   if (!seen.has(it.label)) { raw.push(it); seen.add(it.label); }
-              for (const it of deriveFinancialItems(raw))
-                if (it.note === "auto-derived" && it.value !== null && Number.isFinite(Number(it.value)))
-                  derivedRows.push({ fy, label: it.label, value: Number(it.value) });
+              for (const it of deriveFinancialItems(raw)) {
+                if (it.note === "auto-derived" && it.value !== null && Number.isFinite(Number(it.value))) {
+                  if (!pivot[it.label]) { pivot[it.label] = {}; labelOrder.push(it.label); }
+                  pivot[it.label][fy] = Number(it.value);
+                }
+              }
             }
-            if (derivedRows.length === 0) return null;
+            if (labelOrder.length === 0) return null;
             return (
               <Panel title="AUTO-DERIVED FIELDS" ticker="CALC" status="warn">
                 <div className="text-[9px] text-warning/80 mb-2 tracking-wider">
                   ▸ Not in uploaded documents — auto-calculated from extracted data. Review before use.
                 </div>
                 <div className="overflow-x-auto">
-                <table className="w-full text-xs min-w-[360px]">
+                <table className="w-full text-xs">
                   <thead className="text-muted-foreground border-b border-border">
-                    <tr><th className="text-left py-0.5">LINE ITEM</th><th className="text-right">FY</th><th className="text-right">CALCULATED VALUE</th></tr>
+                    <tr>
+                      <th className="text-left py-0.5 pr-4">LINE ITEM</th>
+                      {histYears.map(fy => (
+                        <th key={fy} className="text-right py-0.5 px-2 tabular-nums">FY{fy}</th>
+                      ))}
+                    </tr>
                   </thead>
                   <tbody>
-                    {derivedRows.map((r, i) => (
-                      <tr key={i} className="border-b border-border/30">
-                        <td className="py-0.5 text-warning/90">{r.label}</td>
-                        <td className="text-right text-muted-foreground">FY{r.fy}</td>
-                        <td className="text-right tabular-nums text-warning">{r.value.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
+                    {labelOrder.map(label => (
+                      <tr key={label} className="border-b border-border/30">
+                        <td className="py-0.5 pr-4 text-warning/90">{label}</td>
+                        {histYears.map(fy => (
+                          <td key={fy} className="text-right px-2 tabular-nums text-warning">
+                            {pivot[label][fy] !== undefined
+                              ? pivot[label][fy].toLocaleString("en-IN", { maximumFractionDigits: 2 })
+                              : <span className="text-muted-foreground/40">—</span>}
+                          </td>
+                        ))}
                       </tr>
                     ))}
                   </tbody>
@@ -1829,6 +2898,142 @@ function CaseViewInner() {
                   </div>
                 </Panel>
               ))}
+              {/* ── AI Credit Analysis ─────────────────────────────────────── */}
+              <Panel title="AI CREDIT ANALYSIS" ticker="INSIGHTS" status={ratioAnalysisLoading ? "warn" : ratioAnalysis ? "live" : "idle"}>
+                {!ratioAnalysis && !ratioAnalysisLoading && (
+                  <div className="flex items-center justify-between gap-4">
+                    <p className="text-[10px] text-muted-foreground leading-relaxed">
+                      Generate an AI-powered analysis covering profitability, liquidity, solvency, efficiency,
+                      risk factors, data accuracy notes, and overall financial health.
+                    </p>
+                    <button
+                      onClick={generateRatioAnalysis}
+                      className="shrink-0 bg-primary text-primary-foreground px-4 py-2 text-xs tracking-widest font-bold hover:bg-primary/80"
+                    >
+                      [GENERATE AI ANALYSIS →]
+                    </button>
+                  </div>
+                )}
+                {ratioAnalysisLoading && (
+                  <div className="space-y-3 py-2">
+                    <div className="flex justify-between text-[11px] tracking-widest">
+                      <span className="text-primary">▸ {ratioAiLabel || "ANALYSING"}</span>
+                      <span className="text-primary font-bold tabular-nums">{ratioAiProgress}%</span>
+                    </div>
+                    <div className="h-2 bg-input border border-border overflow-hidden">
+                      <div
+                        className="h-full bg-primary transition-all duration-300 ease-out"
+                        style={{ width: `${ratioAiProgress}%`, boxShadow: "0 0 8px hsl(var(--primary))" }}
+                      />
+                    </div>
+                    <div className="grid grid-cols-5 gap-1 text-[8px] text-muted-foreground/50 tracking-widest">
+                      {["RATIO DATA","TRENDS","CATEGORIES","RISK FLAGS","DRAFTING"].map((s, i) => (
+                        <div key={s} className={`text-center py-1 border border-border/30 ${ratioAiProgress >= (i + 1) * 20 ? "text-primary border-primary/40 bg-primary/5" : ""}`}>{s}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {ratioAnalysis && (
+                  <div className="space-y-5">
+                    <div className="text-[9px] text-warning/80 tracking-wider border border-warning/30 bg-warning/5 px-2 py-1.5">
+                      ⚠ AI-ASSISTED ANALYSIS · VERIFY BEFORE RELYING ON · NOT A CREDIT RECOMMENDATION
+                    </div>
+
+                    {/* Overall observation */}
+                    <div>
+                      <div className="terminal-label mb-2">OVERALL FINANCIAL HEALTH</div>
+                      <p className="text-xs text-foreground/85 leading-relaxed">{ratioAnalysis.overall_observation}</p>
+                    </div>
+
+                    {/* Category insights */}
+                    <div className="grid grid-cols-1 gap-3">
+                      {[
+                        { key: "profitability_insight", label: "PROFITABILITY" },
+                        { key: "liquidity_insight",     label: "LIQUIDITY" },
+                        { key: "solvency_insight",      label: "SOLVENCY & COVERAGE" },
+                        { key: "efficiency_insight",    label: "EFFICIENCY & TURNOVER" },
+                        { key: "expense_insight",       label: "COST STRUCTURE" },
+                        { key: "r_score_insight",       label: "R\' SCORE (DISTRESS RISK)" },
+                      ].map(({ key, label }) => {
+                        const text = ratioAnalysis[key as keyof RatioAnalysisResult] as string;
+                        if (!text) return null;
+                        return (
+                          <div key={key} className="border-l-2 border-border/40 pl-3">
+                            <div className="terminal-label text-[9px] mb-1">{label}</div>
+                            <p className="text-[11px] text-foreground/80 leading-relaxed">{text}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Risk factors */}
+                    {ratioAnalysis.risk_factors?.length > 0 && (
+                      <div>
+                        <div className="terminal-label mb-2">RISK FACTORS</div>
+                        <div className="space-y-2">
+                          {ratioAnalysis.risk_factors.map((rf, i) => (
+                            <div key={i} className="flex gap-3 items-start border border-border/30 bg-surface px-3 py-2">
+                              <span className={`shrink-0 text-[9px] font-bold tracking-widest px-1.5 py-0.5 ${
+                                rf.severity === "HIGH"   ? "bg-destructive/15 text-destructive border border-destructive/30" :
+                                rf.severity === "MEDIUM" ? "bg-warning/15 text-warning border border-warning/30" :
+                                                           "bg-muted/30 text-muted-foreground border border-border"
+                              }`}>{rf.severity}</span>
+                              <div>
+                                <div className="text-[9px] text-muted-foreground tracking-widest mb-0.5">{rf.category.toUpperCase()}</div>
+                                <p className="text-[11px] text-foreground/80 leading-relaxed">{rf.description}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Positive factors */}
+                    {ratioAnalysis.positive_factors?.length > 0 && (
+                      <div>
+                        <div className="terminal-label mb-2">POSITIVE INDICATORS</div>
+                        <div className="space-y-1">
+                          {ratioAnalysis.positive_factors.map((pf, i) => (
+                            <div key={i} className="flex gap-2 text-[11px]">
+                              <span className="text-success shrink-0 mt-0.5">✓</span>
+                              <span className="text-foreground/80 leading-relaxed">{pf}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Data accuracy notes */}
+                    {ratioAnalysis.data_accuracy_notes?.length > 0 && (
+                      <div>
+                        <div className="terminal-label mb-2">DATA ACCURACY NOTES</div>
+                        <div className="space-y-1">
+                          {ratioAnalysis.data_accuracy_notes.map((note, i) => (
+                            <div key={i} className="flex gap-2 text-[11px]">
+                              <span className="text-accent shrink-0 mt-0.5">▲</span>
+                              <span className="text-foreground/70 leading-relaxed">{note}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={() => { setRatioAnalysis(null); generateRatioAnalysis(); }}
+                      disabled={ratioAnalysisLoading}
+                      className="text-[10px] text-muted-foreground hover:text-primary tracking-widest disabled:opacity-50"
+                    >
+                      [REGENERATE]
+                    </button>
+                  </div>
+                )}
+              </Panel>
+
+              <div className="border border-border/40 bg-surface/50 px-4 py-3 text-[10px] text-muted-foreground/70 space-y-1 leading-relaxed">
+                <div><span className="text-foreground/50 font-bold">*Receivables Days:</span> In the absence of details about credit sales, calculated using Total Revenue from Operations. (Debtors / Turnover) × 365.</div>
+                <div><span className="text-foreground/50 font-bold">*Payable Days:</span> In the absence of details about credit purchases, calculated using COGS. (Creditors / COGS) × 365.</div>
+                <div><span className="text-foreground/50 font-bold">*Cash Conversion Cycle:</span> In the absence of details about credit purchases &amp; credit sales, Payable Days and Receivable Days are calculated using COGS &amp; Total Revenue from Operations respectively.</div>
+              </div>
               <button onClick={() => setTab("projections")} className="bg-surface border border-border text-primary px-4 py-2 text-xs tracking-widest font-bold hover:bg-primary/10">
                 [VIEW PROJECTIONS &amp; ANALYTICS →]
               </button>
@@ -2048,15 +3253,123 @@ function CaseViewInner() {
           )}
         </div>
       )}
-      {tab === "emi" && (
-        <EmiTracker cc={cc} payments={emiPayments} user={user!} onReload={reload} />
-      )}
       {tab === "bank" && (
         <BankStatementTab cc={cc} data={bankData} docs={docs} user={user!} onReload={reload} />
       )}
       {tab === "gst" && (
-        <GstTab cc={cc} data={gstData} extracted={extracted} user={user!} onReload={reload} docs={docs} />
+        <GstTab cc={cc} data={gstData} extracted={extracted} user={user!} onReload={reload} docs={docs} accumnData={accumnData} />
       )}
+
+      {/* ── Text viewer popover ────────────────────────────────────────── */}
+      {textPopover && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 backdrop-blur-sm" onClick={()=>setTextPopover(null)}>
+          <div className="bg-card border border-border w-full max-w-sm mx-4" onClick={e=>e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface/60">
+              <span className="text-[9px] tracking-widest text-muted-foreground">{textPopover.label}</span>
+              <button onClick={()=>setTextPopover(null)} className="text-muted-foreground hover:text-primary text-sm leading-none">✕</button>
+            </div>
+            <div className="px-4 py-3 text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto">{textPopover.text}</div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Company Edit Modal ─────────────────────────────────────────── */}
+      {editCoOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-background/80 backdrop-blur-sm overflow-y-auto py-8" onClick={e => { if (e.target === e.currentTarget) setEditCoOpen(false); }}>
+          <div className="bg-card border border-border w-full max-w-2xl mx-4">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface/60">
+              <div className="text-[10px] tracking-widest text-muted-foreground">EDIT COMPANY DETAILS</div>
+              <button onClick={() => setEditCoOpen(false)} className="text-muted-foreground hover:text-primary text-sm leading-none">✕</button>
+            </div>
+            <div className="p-4 space-y-4 max-h-[75vh] overflow-y-auto">
+              <div>
+                <div className="text-[9px] tracking-widest text-muted-foreground mb-2 border-b border-border/30 pb-1">BASIC</div>
+                <div className="grid grid-cols-2 gap-3">
+                  {([["name","Company Name"],["website","Website"]] as const).map(([k,l]) => (
+                    <label key={k} className="flex flex-col gap-1">
+                      <span className="text-[9px] tracking-widest text-muted-foreground">{l}</span>
+                      <input value={editCoForm[k]??""} onChange={e=>setEditCoForm(f=>({...f,[k]:e.target.value}))} className="bg-surface border border-border px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary/60 w-full" />
+                    </label>
+                  ))}
+                  <label className="flex flex-col gap-1 col-span-2">
+                    <span className="text-[9px] tracking-widest text-muted-foreground">Registered Address</span>
+                    <input value={editCoForm.registered_address??""} onChange={e=>setEditCoForm(f=>({...f,registered_address:e.target.value}))} className="bg-surface border border-border px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary/60 w-full" />
+                  </label>
+                </div>
+              </div>
+              <div>
+                <div className="text-[9px] tracking-widest text-muted-foreground mb-2 border-b border-border/30 pb-1">MCA / CORPOSITORY</div>
+                <div className="grid grid-cols-2 gap-3">
+                  {([
+                    ["mca_cin","CIN"],["mca_pan","PAN"],["mca_lei","LEI"],
+                    ["mca_category","Category"],["mca_sub_category","Sub Category"],["mca_type","Company Type"],
+                    ["mca_authorized_capital","Auth. Capital"],["mca_paid_up_capital","Paid Up Capital"],["mca_status","Status"],
+                    ["mca_nse_sector","NSE Sector"],["mca_sector","Sector"],
+                    ["mca_email","Email"],["mca_telephone","Telephone"],
+                    ["mca_date_of_incorp","Incorporation Date"],["mca_date_last_bs","Last Balance Sheet"],["mca_date_last_agm","Last AGM"],
+                  ] as const).map(([k,l]) => (
+                    <label key={k} className="flex flex-col gap-1">
+                      <span className="text-[9px] tracking-widest text-muted-foreground">{l}</span>
+                      <input value={editCoForm[k]??""} onChange={e=>setEditCoForm(f=>({...f,[k]:e.target.value}))} className="bg-surface border border-border px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary/60 w-full" />
+                    </label>
+                  ))}
+                  <label className="flex flex-col gap-1 col-span-2">
+                    <span className="text-[9px] tracking-widest text-muted-foreground">Products / Services</span>
+                    <input value={editCoForm.mca_products_services??""} onChange={e=>setEditCoForm(f=>({...f,mca_products_services:e.target.value}))} className="bg-surface border border-border px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary/60 w-full" />
+                  </label>
+                  <label className="flex flex-col gap-1 col-span-2">
+                    <span className="text-[9px] tracking-widest text-muted-foreground">About the Company</span>
+                    <textarea rows={4} value={editCoForm.mca_about??""} onChange={e=>setEditCoForm(f=>({...f,mca_about:e.target.value}))} className="bg-surface border border-border px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary/60 resize-none w-full" />
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-4 py-3 border-t border-border">
+              <button onClick={() => setEditCoOpen(false)} className="text-[10px] tracking-widest text-muted-foreground border border-border px-3 py-1.5 hover:bg-surface">CANCEL</button>
+              <button onClick={saveEditCo} disabled={savingCo} className="text-[10px] tracking-widest bg-primary text-primary-foreground px-3 py-1.5 hover:bg-primary/90 disabled:opacity-50">{savingCo ? "SAVING…" : "SAVE"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Director Add / Edit Modal ───────────────────────────────────── */}
+      {editDirOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-background/80 backdrop-blur-sm overflow-y-auto py-8" onClick={e => { if (e.target === e.currentTarget) setEditDirOpen(false); }}>
+          <div className="bg-card border border-border w-full max-w-2xl mx-4">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface/60">
+              <div className="text-[10px] tracking-widest text-muted-foreground">{editDirId ? "EDIT DIRECTOR" : "ADD DIRECTOR"}</div>
+              <button onClick={() => setEditDirOpen(false)} className="text-muted-foreground hover:text-primary text-sm leading-none">✕</button>
+            </div>
+            <div className="p-4 max-h-[75vh] overflow-y-auto">
+              <div className="grid grid-cols-2 gap-3">
+                {([
+                  ["name","Name *"],["din","DIN"],["pan","PAN"],["dob","DOB"],["age","Age"],
+                  ["gender","Gender"],["nationality","Nationality"],
+                  ["din_status","DIN Status"],["dsc_status","DSC Status"],
+                  ["designation","Designation (CATEGORY)"],
+                  ["appointed_current","Appointed Current"],["originally_appointed","Originally Appointed"],
+                  ["cessation_date","Cessation Date"],["shareholding","% Shareholding"],
+                  ["email","Email"],["phone","Phone"],["remarks","Remarks"],
+                ] as const).map(([k,l]) => (
+                  <label key={k} className="flex flex-col gap-1">
+                    <span className="text-[9px] tracking-widest text-muted-foreground">{l}</span>
+                    <input value={editDirForm[k]??""} onChange={e=>setEditDirForm(f=>({...f,[k]:e.target.value}))} className="bg-surface border border-border px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary/60 w-full" />
+                  </label>
+                ))}
+                <label className="flex flex-col gap-1 col-span-2">
+                  <span className="text-[9px] tracking-widest text-muted-foreground">Address</span>
+                  <textarea rows={3} value={editDirForm.address??""} onChange={e=>setEditDirForm(f=>({...f,address:e.target.value}))} className="bg-surface border border-border px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary/60 resize-none w-full" />
+                </label>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-4 py-3 border-t border-border">
+              <button onClick={() => setEditDirOpen(false)} className="text-[10px] tracking-widest text-muted-foreground border border-border px-3 py-1.5 hover:bg-surface">CANCEL</button>
+              <button onClick={saveEditDir} disabled={savingDir} className="text-[10px] tracking-widest bg-primary text-primary-foreground px-3 py-1.5 hover:bg-primary/90 disabled:opacity-50">{savingDir ? "SAVING…" : "SAVE"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </TerminalLayout>
   );
 }
@@ -2306,7 +3619,10 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
                     <span className="truncate flex-1 text-primary">{item.name}</span>
                     <span className="text-foreground/40 shrink-0">{item.size}</span>
                     {item.status === "duplicate" && (
-                      <span className="text-warning text-[9px] tracking-widest shrink-0">ALREADY EXISTS</span>
+                      <button
+                        onClick={() => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "pending" as QueueStatus } : qi))}
+                        className="text-warning text-[9px] tracking-widest shrink-0 border border-warning/40 px-1.5 py-0.5 hover:text-foreground hover:border-foreground/40 transition-colors"
+                      >RE-EXTRACT</button>
                     )}
                     {item.status === "pending" && (
                       <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
@@ -2437,8 +3753,453 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
   );
 }
 
+// ─── Accumn GST Analytical Dashboard ─────────────────────────────────────────
+function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () => void }) {
+  const [concTab, setConcTab] = useState<"customer" | "supplier">("customer");
+  const [concPeriod, setConcPeriod] = useState<string>("");
+
+  const fmt = (v: number | null | undefined) =>
+    v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  const pct = (v: number | null | undefined) => v == null ? "—" : `${Number(v).toFixed(1)}%`;
+  const avgMon = (revenue: number | null | undefined, period: string): string => {
+    if (revenue == null) return "—";
+    let months = 12;
+    if (!/^TTM/i.test(period)) {
+      const m = period.match(/Till\s+([A-Za-z]{3})-\d{2}/i);
+      if (m) {
+        const names: Record<string, number> = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+        const mn = names[m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase()];
+        if (mn) months = mn >= 4 ? mn - 3 : mn + 9;
+      }
+    }
+    return (revenue / months).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  };
+  const sevCls = (s: string) =>
+    s === "HIGH" ? "text-destructive border-destructive/30 bg-destructive/5"
+    : s === "MEDIUM" ? "text-warning border-warning/30 bg-warning/5"
+    : "text-success border-success/30 bg-success/5";
+
+  const concPeriods = Array.from(new Set([
+    ...(data.customer_concentration?.map(r => r.period) ?? []),
+    ...(data.supplier_concentration?.map(r => r.period) ?? []),
+  ])).sort();
+  const activePeriod = concPeriod || concPeriods[concPeriods.length - 1] || "";
+  const topCustomers = (data.customer_concentration ?? []).filter(r => r.period === activePeriod).sort((a,b) => a.rank - b.rank);
+  const topSuppliers = (data.supplier_concentration ?? []).filter(r => r.period === activePeriod).sort((a,b) => a.rank - b.rank);
+
+  const hasFlags       = (data.flags?.length ?? 0) > 0;
+  const hasConc        = (data.customer_concentration?.length ?? 0) > 0 || (data.supplier_concentration?.length ?? 0) > 0;
+  const highFlags      = data.flags?.filter(f => f.severity === "HIGH").length ?? 0;
+  const mediumFlags    = data.flags?.filter(f => f.severity === "MEDIUM").length ?? 0;
+
+  return (
+    <div className="space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between px-0.5">
+        <div className="flex items-center gap-3">
+          <span className="text-[9px] font-bold tracking-[0.2em] text-accent border border-accent/40 px-1.5 py-0.5">ACCUMN</span>
+          <span className="terminal-label text-xs">GST ANALYTICAL REPORT</span>
+          {data.company_profile?.gstin && (
+            <span className="text-[10px] text-muted-foreground font-mono">{data.company_profile.gstin}</span>
+          )}
+          {hasFlags && (
+            <span className={`text-[9px] font-bold tracking-widest ${highFlags > 0 ? "text-destructive" : "text-warning"}`}>
+              {highFlags > 0 ? `▲ ${highFlags} HIGH` : `△ ${mediumFlags} MEDIUM`}
+            </span>
+          )}
+        </div>
+        {onClear && (
+          <button onClick={onClear} className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground hover:border-foreground/40 transition-colors">
+            [RE-EXTRACT]
+          </button>
+        )}
+      </div>
+
+      {/* Flags */}
+      {hasFlags && (
+        <Panel title={`FLAGS · ${data.flags!.length} ALERTS`} ticker="RISK INDICATORS"
+          status={highFlags > 0 ? "idle" : mediumFlags > 0 ? "warn" : "live"}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {data.flags!.map((flag, i) => (
+              <div key={i} className={`border p-2.5 space-y-1 ${sevCls(flag.severity)}`}>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[8px] font-bold tracking-[0.15em] px-1.5 py-0.5 border ${sevCls(flag.severity)}`}>{flag.severity}</span>
+                  <span className="text-xs font-bold leading-tight">{flag.flag_name}</span>
+                </div>
+                <div className="text-[10px] text-muted-foreground leading-relaxed">{flag.description}</div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      {/* Company Profile */}
+      {data.company_profile && Object.values(data.company_profile).some(Boolean) && (
+        <Panel title="COMPANY PROFILE" ticker="GSTIN DETAILS">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-xs">
+            {data.company_profile.name && (<div><div className="terminal-label">COMPANY</div><div className="font-medium mt-0.5">{data.company_profile.name}</div></div>)}
+            {data.company_profile.gstin && (<div><div className="terminal-label">GSTIN</div><div className="font-mono font-medium mt-0.5 text-accent">{data.company_profile.gstin}</div></div>)}
+            {data.company_profile.pan && (<div><div className="terminal-label">PAN</div><div className="font-mono font-medium mt-0.5">{data.company_profile.pan}</div></div>)}
+            {data.company_profile.state && (<div><div className="terminal-label">STATE</div><div className="font-medium mt-0.5">{data.company_profile.state}</div></div>)}
+            {data.company_profile.constitution && (<div><div className="terminal-label">CONSTITUTION</div><div className="font-medium mt-0.5">{data.company_profile.constitution}</div></div>)}
+            {data.company_profile.business_type && (<div><div className="terminal-label">BUSINESS TYPE</div><div className="font-medium mt-0.5">{data.company_profile.business_type}</div></div>)}
+            {data.company_profile.registration_date && (<div><div className="terminal-label">REG. DATE</div><div className="font-medium mt-0.5">{data.company_profile.registration_date}</div></div>)}
+            {data.company_profile.report_date && (<div><div className="terminal-label">REPORT DATE</div><div className="font-medium mt-0.5">{data.company_profile.report_date}</div></div>)}
+          </div>
+        </Panel>
+      )}
+
+      {/* Sales Summary */}
+      {(data.sales_summary?.length ?? 0) > 0 && (
+        <Panel title="SALES SUMMARY" ticker="ADJUSTED REVENUE + MARGINS">
+          <div className="space-y-3">
+            {/* Transposed table — periods as columns, metrics as rows */}
+            <div className="overflow-x-auto">
+              <div className="text-[9px] text-muted-foreground/50 tracking-wide text-right mb-1">in ₹ Lakhs</div>
+              <table className="w-full text-xs">
+                <thead className="text-muted-foreground border-b border-border">
+                  <tr>
+                    <th className="text-left py-1 pr-4 font-normal">PARTICULARS</th>
+                    {data.sales_summary!.map((row, i) => (
+                      <th key={i} className="text-right pr-3 font-normal whitespace-nowrap">{row.period}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {([
+                    { label: "Adjusted Revenue (Total)", getValue: (r: AccumnSalesSummary) => fmt(r.adjusted_revenue), bold: true },
+                    { label: "Adjusted Revenue Per Month", getValue: (r: AccumnSalesSummary) => avgMon(r.adjusted_revenue, r.period), bold: true },
+                    { label: "Net Revenue", getValue: (r: AccumnSalesSummary) => fmt(r.net_revenue) },
+                    { label: "Sales Return %", getValue: (r: AccumnSalesSummary) => pct(r.sales_return_pct), muted: true },
+                    { label: "Gross Margin %", getValue: (r: AccumnSalesSummary) => pct(r.gross_margin_pct) },
+                    { label: "EBITDA %", getValue: (r: AccumnSalesSummary) => pct(r.ebitda_pct), muted: true },
+                    { label: "PAT %", getValue: (r: AccumnSalesSummary) => pct(r.pat_pct), muted: true },
+                  ] as { label: string; getValue: (r: AccumnSalesSummary) => string; bold?: boolean; muted?: boolean }[]).map(({ label, getValue, bold, muted }) => (
+                    <tr key={label} className="border-b border-border/30">
+                      <td className={`py-1.5 pr-4 ${bold ? "font-bold text-foreground" : "text-muted-foreground"}`}>{label}</td>
+                      {data.sales_summary!.map((row, i) => (
+                        <td key={i} className={`text-right pr-3 tabular-nums ${bold ? "text-primary font-bold" : muted ? "text-muted-foreground" : ""}`}>
+                          {getValue(row)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {(data.sales_summary!.length >= 2) && (
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={data.sales_summary} margin={{ top: 24, right: 44, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                    <XAxis dataKey="period" tick={{ fill: "#6b7280", fontSize: 9 }} />
+                    <YAxis yAxisId="rev" tick={{ fill: "#6b7280", fontSize: 9 }} width={58}
+                      tickFormatter={v => Math.abs(v) >= 100 ? `${(v/100).toFixed(0)}Cr` : `${v}L`} />
+                    <YAxis yAxisId="pct" orientation="right" tick={{ fill: "#6b7280", fontSize: 9 }} width={44}
+                      tickFormatter={v => `${v}%`} />
+                    <RTooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937", fontSize: 11 }} />
+                    <Legend wrapperStyle={{ fontSize: 10, color: "#9ca3af" }} />
+                    <Bar yAxisId="rev" dataKey="adjusted_revenue" name="Adj. Revenue" fill="#14b8a6" opacity={0.85} radius={[2,2,0,0]}>
+                      <LabelList dataKey="adjusted_revenue" position="top" style={{ fontSize: 9, fill: "#9ca3af" }}
+                        formatter={(v: number) => v != null ? (Math.abs(v) >= 100 ? `${(v/100).toFixed(2)}Cr` : `${Number(v).toFixed(2)}L`) : ""} />
+                    </Bar>
+                    <Line yAxisId="pct" type="monotone" dataKey="gross_margin_pct" name="Gross Mgn%" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3, fill: "#0f172a", strokeWidth: 2 }}>
+                      <LabelList dataKey="gross_margin_pct" position="top" style={{ fontSize: 9, fill: "#f59e0b" }}
+                        formatter={(v: number) => v != null ? `${Number(v).toFixed(1)}%` : ""} />
+                    </Line>
+                    <Line yAxisId="pct" type="monotone" dataKey="ebitda_pct" name="EBITDA%" stroke="#60a5fa" strokeWidth={2} dot={{ r: 2.5 }} />
+                    <Line yAxisId="pct" type="monotone" dataKey="pat_pct" name="PAT%" stroke="#a78bfa" strokeWidth={2} dot={{ r: 2.5 }} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </Panel>
+      )}
+
+      {/* Customer Category Breakup */}
+      {(data.customer_categories?.length ?? 0) > 0 && (
+        <Panel title="CUSTOMER CATEGORY BREAKUP" ticker="B2B / B2C / EXPORT">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-muted-foreground border-b border-border">
+                <tr>
+                  <th className="text-left py-1 pr-3">PERIOD</th>
+                  <th className="text-right pr-3">B2B</th>
+                  <th className="text-right pr-3">B2C SMALL</th>
+                  <th className="text-right pr-3">B2C LARGE</th>
+                  <th className="text-right pr-3">EXPORT</th>
+                  <th className="text-right pr-3">NIL RATED</th>
+                  <th className="text-right font-bold text-primary">TOTAL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.customer_categories!.map((row, i) => (
+                  <tr key={i} className="border-b border-border/30">
+                    <td className="py-1 pr-3 font-bold text-accent">{row.period}</td>
+                    <td className="text-right pr-3 tabular-nums text-primary">{fmt(row.b2b)}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmt(row.b2c_small)}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmt(row.b2c_large)}</td>
+                    <td className="text-right pr-3 tabular-nums text-accent">{fmt(row.export)}</td>
+                    <td className="text-right pr-3 tabular-nums text-muted-foreground">{fmt(row.nil_rated)}</td>
+                    <td className="text-right tabular-nums font-bold">{fmt(row.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+
+      {/* Customer / Supplier Concentration */}
+      {hasConc && (
+        <Panel title="CONCENTRATION ANALYSIS" ticker="TOP CUSTOMERS / SUPPLIERS">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex gap-0">
+                <button onClick={() => setConcTab("customer")}
+                  className={`text-[10px] px-3 py-0.5 border tracking-widest font-bold transition-colors ${concTab === "customer" ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:text-foreground"}`}>
+                  CUSTOMERS
+                </button>
+                <button onClick={() => setConcTab("supplier")}
+                  className={`text-[10px] px-3 py-0.5 border tracking-widest font-bold transition-colors ${concTab === "supplier" ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:text-foreground"}`}>
+                  SUPPLIERS
+                </button>
+              </div>
+              {concPeriods.length > 1 && (
+                <div className="flex gap-1">
+                  {concPeriods.map(p => (
+                    <button key={p} onClick={() => setConcPeriod(p)}
+                      className={`text-[9px] px-2 py-0.5 border tracking-widest transition-colors ${p === activePeriod ? "border-accent text-accent" : "border-border text-muted-foreground hover:text-foreground"}`}>
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-muted-foreground border-b border-border">
+                  <tr>
+                    <th className="text-center py-1 pr-2 w-8">#</th>
+                    <th className="text-left pr-3">NAME</th>
+                    <th className="text-left pr-3">GSTIN</th>
+                    <th className="text-right pr-3">AMOUNT</th>
+                    <th className="text-right">SHARE</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(concTab === "customer" ? topCustomers : topSuppliers).map((row, i) => (
+                    <tr key={i} className="border-b border-border/30">
+                      <td className="text-center py-1 pr-2 text-muted-foreground/60 text-[10px]">{row.rank}</td>
+                      <td className="pr-3 font-medium max-w-[160px] truncate">{row.name}</td>
+                      <td className="pr-3 font-mono text-[10px] text-muted-foreground">{row.gstin ?? "—"}</td>
+                      <td className="text-right pr-3 tabular-nums text-primary font-medium">{fmt(row.amount)}</td>
+                      <td className="text-right tabular-nums">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <div className="w-10 h-1.5 bg-border/40 rounded-sm overflow-hidden hidden sm:block">
+                            <div className="h-full rounded-sm bg-primary/60" style={{ width: `${Math.min(100, row.pct)}%` }} />
+                          </div>
+                          <span className={`font-bold text-[11px] ${row.pct >= 30 ? "text-destructive" : row.pct >= 15 ? "text-warning" : "text-foreground/70"}`}>
+                            {pct(row.pct)}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {(concTab === "customer" ? topCustomers : topSuppliers).length === 0 && (
+                    <tr><td colSpan={5} className="py-3 text-center text-muted-foreground text-[10px]">No data for selected period</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </Panel>
+      )}
+
+      {/* Geography */}
+      {(data.geography?.length ?? 0) > 0 && (() => {
+        const geoPeriods = Array.from(new Set(data.geography!.map(r => r.period))).sort();
+        const latPeriod = geoPeriods[geoPeriods.length - 1];
+        const geoRows = data.geography!.filter(r => r.period === latPeriod).sort((a,b) => b.amount - a.amount);
+        return (
+          <Panel title="GEOGRAPHY BREAKUP" ticker={`STATE-WISE SALES · ${latPeriod}`}>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-muted-foreground border-b border-border">
+                  <tr>
+                    <th className="text-left py-1 pr-3">STATE</th>
+                    <th className="text-right pr-3">AMOUNT</th>
+                    <th className="text-right">SHARE%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {geoRows.map((row, i) => (
+                    <tr key={i} className="border-b border-border/30">
+                      <td className="py-1 pr-3 font-medium">{row.state}</td>
+                      <td className="text-right pr-3 tabular-nums text-primary">{fmt(row.amount)}</td>
+                      <td className="text-right tabular-nums">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <div className="w-14 h-1.5 bg-border/40 rounded-sm overflow-hidden hidden sm:block">
+                            <div className="h-full rounded-sm bg-accent/60" style={{ width: `${Math.min(100, row.pct)}%` }} />
+                          </div>
+                          <span>{pct(row.pct)}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+        );
+      })()}
+
+      {/* Product Concentration */}
+      {(data.product_concentration?.length ?? 0) > 0 && (() => {
+        const prodPeriods = Array.from(new Set(data.product_concentration!.map(r => r.period))).sort();
+        const latPeriod = prodPeriods[prodPeriods.length - 1];
+        const prodRows = data.product_concentration!.filter(r => r.period === latPeriod).sort((a,b) => b.amount - a.amount);
+        return (
+          <Panel title="PRODUCT CONCENTRATION" ticker={`HSN / CHAPTER WISE · ${latPeriod}`}>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-muted-foreground border-b border-border">
+                  <tr>
+                    <th className="text-left py-1 pr-3">PRODUCT / DESCRIPTION</th>
+                    <th className="text-left pr-3">HSN</th>
+                    <th className="text-left pr-3">CHAPTER</th>
+                    <th className="text-right pr-3">AMOUNT</th>
+                    <th className="text-right font-bold">SHARE%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {prodRows.slice(0, 20).map((row, i) => (
+                    <tr key={i} className="border-b border-border/30">
+                      <td className="py-1 pr-3 font-medium">{row.description}</td>
+                      <td className="pr-3 font-mono text-[10px] text-muted-foreground">{row.hsn ?? "—"}</td>
+                      <td className="pr-3 text-muted-foreground">{row.chapter ?? "—"}</td>
+                      <td className="text-right pr-3 tabular-nums text-primary">{fmt(row.amount)}</td>
+                      <td className="text-right tabular-nums font-bold">{pct(row.pct)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+        );
+      })()}
+
+      {/* Tax Details */}
+      {(data.tax_details?.length ?? 0) > 0 && (
+        <Panel title="TAX DETAILS" ticker="OUTPUT TAX · ITC ANALYSIS">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-muted-foreground border-b border-border">
+                <tr>
+                  <th className="text-left py-1 pr-3">PERIOD</th>
+                  <th className="text-right pr-3">WC INVEST.</th>
+                  <th className="text-right pr-3">OUTPUT TAX</th>
+                  <th className="text-right pr-3">IGST</th>
+                  <th className="text-right pr-3">CGST</th>
+                  <th className="text-right pr-3">SGST</th>
+                  <th className="text-right pr-3">ITC AVAILED</th>
+                  <th className="text-right font-bold">NET TAX</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.tax_details!.map((row, i) => (
+                  <tr key={i} className="border-b border-border/30">
+                    <td className="py-1 pr-3 font-bold text-accent">{row.period}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmt(row.wc_investment)}</td>
+                    <td className="text-right pr-3 tabular-nums text-warning">{fmt(row.output_tax)}</td>
+                    <td className="text-right pr-3 tabular-nums text-muted-foreground">{fmt(row.igst)}</td>
+                    <td className="text-right pr-3 tabular-nums text-muted-foreground">{fmt(row.cgst)}</td>
+                    <td className="text-right pr-3 tabular-nums text-muted-foreground">{fmt(row.sgst)}</td>
+                    <td className="text-right pr-3 tabular-nums text-accent">{fmt(row.itc_availed)}</td>
+                    <td className="text-right tabular-nums font-bold text-primary">{fmt(row.net_tax)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+
+      {/* GSTR Comparison */}
+      {(data.gstr_comparison?.length ?? 0) > 0 && (
+        <Panel title="GSTR-1 vs GSTR-3B vs GSTR-9" ticker="RETURN RECONCILIATION">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-muted-foreground border-b border-border">
+                <tr>
+                  <th className="text-left py-1 pr-3">PERIOD</th>
+                  <th className="text-right pr-3">GSTR-1 T/O</th>
+                  <th className="text-right pr-3">GSTR-3B T/O</th>
+                  <th className="text-right pr-3">GSTR-9 T/O</th>
+                  <th className="text-right pr-3">GSTR-1 TAX</th>
+                  <th className="text-right pr-3">GSTR-3B TAX</th>
+                  <th className="text-right">DIFF</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.gstr_comparison!.map((row, i) => {
+                  const hasDiff = row.difference != null && row.difference !== 0;
+                  return (
+                    <tr key={i} className="border-b border-border/30">
+                      <td className="py-1 pr-3 font-bold text-accent">{row.period}</td>
+                      <td className="text-right pr-3 tabular-nums">{fmt(row.gstr1_turnover)}</td>
+                      <td className="text-right pr-3 tabular-nums">{fmt(row.gstr3b_turnover)}</td>
+                      <td className="text-right pr-3 tabular-nums text-muted-foreground">{fmt(row.gstr9_turnover)}</td>
+                      <td className="text-right pr-3 tabular-nums">{fmt(row.gstr1_tax)}</td>
+                      <td className="text-right pr-3 tabular-nums">{fmt(row.gstr3b_tax)}</td>
+                      <td className={`text-right tabular-nums font-bold ${hasDiff ? "text-warning" : "text-success"}`}>
+                        {row.difference == null ? "—" : `${row.difference >= 0 ? "+" : ""}${fmt(row.difference)}`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+
+      {/* Circular Transactions */}
+      {(data.circular_transactions?.length ?? 0) > 0 && (
+        <Panel title={`CIRCULAR TRANSACTIONS · ${data.circular_transactions!.length} FLAGGED`} ticker="POTENTIAL RISK" status="idle">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-muted-foreground border-b border-border">
+                <tr>
+                  <th className="text-left py-1 pr-3">ENTITY</th>
+                  <th className="text-left pr-3">GSTIN</th>
+                  <th className="text-right pr-3">SALES TO</th>
+                  <th className="text-right pr-3">PURCHASES FROM</th>
+                  <th className="text-left">NOTE</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.circular_transactions!.map((row, i) => (
+                  <tr key={i} className="border-b border-border/30 text-warning/90">
+                    <td className="py-1 pr-3 font-medium">{row.entity}</td>
+                    <td className="pr-3 font-mono text-[10px] text-muted-foreground">{row.gstin ?? "—"}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmt(row.sale_amount)}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmt(row.purchase_amount)}</td>
+                    <td className="text-[10px] text-muted-foreground">{row.note ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
 // ─── GST Tab ─────────────────────────────────────────────────────────────────
-function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; data: Tables<"gst_return_data">[]; extracted: ExtractedRow[]; user: { id: string }; onReload: () => Promise<void>; docs: DocRow[] }) {
+function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc: CaseRow; data: Tables<"gst_return_data">[]; extracted: ExtractedRow[]; user: { id: string }; onReload: () => Promise<void>; docs: DocRow[]; accumnData: AccumnReport | null }) {
   const [busy, setBusy]           = useState(false);
   const [progress, setProgress]   = useState(0);
   const [label, setLabel]         = useState("");
@@ -2447,6 +4208,13 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
   const [dragOver, setDragOver]   = useState(false);
   const [editCell, setEditCell]   = useState<{ id: string; field: string; value: string } | null>(null);
   const fileRef                   = useRef<HTMLInputElement>(null);
+
+  // ── Accumn-specific import state ──────────────────────────────────────────
+  const [accumnBusy, setAccumnBusy]       = useState(false);
+  const [accumnProgress, setAccumnProgress] = useState(0);
+  const [accumnLabel, setAccumnLabel]     = useState("");
+
+  const accumnFileRef                     = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
@@ -2457,7 +4225,20 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
     const raw = snap.value.trim().replace(/,/g, "");
     const num = raw === "" ? null : parseFloat(raw);
     if (raw !== "" && (isNaN(num!) || !isFinite(num!))) return;
-    await supabase.from("gst_return_data").update({ [snap.field]: num } as any).eq("id", snap.id);
+
+    const row = data.find(r => r.id === snap.id);
+    const patch: Record<string, number | null> = { [snap.field]: num };
+
+    if (snap.field === "taxable_turnover")
+      patch.total_turnover = (num ?? 0) + (row?.exempt_turnover ?? 0);
+    else if (snap.field === "exempt_turnover")
+      patch.total_turnover = (row?.taxable_turnover ?? 0) + (num ?? 0);
+    else if (snap.field === "output_tax")
+      patch.net_tax_paid = (num ?? 0) - (row?.itc_claimed ?? 0);
+    else if (snap.field === "itc_claimed")
+      patch.net_tax_paid = (row?.output_tax ?? 0) - (num ?? 0);
+
+    await supabase.from("gst_return_data").update(patch as any).eq("id", snap.id);
     await onReload();
   };
 
@@ -2467,6 +4248,19 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
     setEditCell(null);
     const val = snap.value.trim() || null;
     await supabase.from("gst_return_data").update({ [snap.field]: val } as any).eq("id", snap.id);
+    await onReload();
+  };
+
+  const addGstRow = async () => {
+    await supabase.from("gst_return_data").insert({
+      case_id: cc.id, user_id: user.id,
+      period: "", filing_status: "filed",
+    } as any);
+    await onReload();
+  };
+
+  const deleteGstRow = async (id: string) => {
+    await supabase.from("gst_return_data").delete().eq("id", id);
     await onReload();
   };
 
@@ -2482,9 +4276,10 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
       />
     );
     return (
-      <span className="cursor-pointer hover:text-primary transition-colors"
+      <span className="cursor-pointer group inline-flex items-center gap-0.5 justify-end w-full"
         onClick={() => setEditCell({ id, field, value: val == null ? "" : String(val) })}>
-        {fmt(val)}
+        <span className="border-b border-dotted border-transparent group-hover:border-primary/50 group-hover:text-primary transition-colors">{fmt(val)}</span>
+        <span className="opacity-0 group-hover:opacity-30 text-[8px] text-primary">✎</span>
       </span>
     );
   };
@@ -2501,9 +4296,10 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
       />
     );
     return (
-      <span className={`cursor-pointer hover:text-primary transition-colors ${cls}`}
+      <span className={`cursor-pointer group inline-flex items-center gap-0.5 ${cls}`}
         onClick={() => setEditCell({ id, field, value: val ?? "" })}>
-        {val ?? "—"}
+        <span className="border-b border-dotted border-transparent group-hover:border-primary/50 group-hover:text-primary transition-colors">{val ?? "—"}</span>
+        <span className="opacity-0 group-hover:opacity-30 text-[8px] text-primary">✎</span>
       </span>
     );
   };
@@ -2527,9 +4323,10 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
       </select>
     );
     return (
-      <span className={`cursor-pointer hover:underline decoration-dotted underline-offset-2 text-[9px] font-bold tracking-widest ${statusCls(val)}`}
+      <span className={`cursor-pointer group inline-flex items-center gap-0.5 text-[9px] font-bold tracking-widest ${statusCls(val)}`}
         onClick={() => setEditCell({ id, field: "filing_status", value: val })}>
-        {val.toUpperCase().replace("_", " ")}
+        <span className="border-b border-dotted border-transparent group-hover:border-current">{val.toUpperCase().replace("_", " ")}</span>
+        <span className="opacity-0 group-hover:opacity-30 text-[8px]">✎</span>
       </span>
     );
   };
@@ -2581,11 +4378,15 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
       const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
       const isExcel = ["xlsx","xls","csv"].includes(ext);
       let excelText: string | undefined;
+      let pdfText: string | undefined;
       if (isExcel) {
         const XLSX = await import("xlsx");
         const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type: "array" });
         excelText = wb.SheetNames.map(n => `=== SHEET: ${n} ===\n${XLSX.utils.sheet_to_csv(wb.Sheets[n], { FS: "\t" })}`).join("\n\n");
+      } else if (ext === "pdf") {
+        setLabel("Reading PDF text…");
+        pdfText = await extractPdfText(file);
       }
       setProgress(20); setLabel("Uploading…");
       const path = `${user.id}/${cc.id}/gst-${Date.now()}-${file.name}`;
@@ -2610,19 +4411,43 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
         file_type: fileType as never, doc_class: "gst_return" as never, extraction_status: "pending",
       }).select().single();
       if (dErr || !doc) throw new Error(dErr?.message ?? "Register failed");
+
       setProgress(70); setLabel("Extracting with AI…");
       const tick = setInterval(() => setProgress(p => p < 94 ? p + 1 : p), 700);
       const { data: { session: s2 } } = await supabase.auth.getSession();
-      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-gst`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${s2?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY },
-        body: JSON.stringify({ case_id: cc.id, document_id: doc.id, excel_text: excelText }),
-      });
+      const authH = { "Content-Type": "application/json", "Authorization": `Bearer ${s2?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
+      const base = import.meta.env.VITE_SUPABASE_URL;
+
+      // Run basic GST + Accumn extraction in parallel (Accumn only for PDFs)
+      const [gstRes, accumnRes] = await Promise.all([
+        fetch(`${base}/functions/v1/extract-gst`, {
+          method: "POST", headers: authH,
+          body: JSON.stringify({ case_id: cc.id, document_id: doc.id, excel_text: excelText }),
+        }),
+        fileType === "pdf"
+          ? fetch(`${base}/functions/v1/extract-gst-accumn`, {
+              method: "POST", headers: authH,
+              body: JSON.stringify({ case_id: cc.id, document_id: doc.id, pdf_text: pdfText }),
+            }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
       clearInterval(tick);
-      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error ?? `HTTP ${res.status}`); }
-      const result = await res.json();
+
+      const gstResult  = await gstRes.json().catch(() => ({})) as Record<string,unknown>;
+      const accumnResult = accumnRes ? await accumnRes.json().catch(() => ({})) as Record<string,unknown> : null;
+      const isAccumn = Boolean(accumnResult?.is_accumn);
+
       setProgress(100); setLabel("Done");
-      toast.success(`GST data extracted — ${result.periods_extracted} periods${result.gstin ? ` · GSTIN: ${result.gstin}` : ""}`);
+
+      if (!gstRes.ok && !isAccumn) {
+        throw new Error((gstResult.error as string) ?? `HTTP ${gstRes.status}`);
+      }
+      if (gstRes.ok && (gstResult.periods_extracted as number) > 0) {
+        toast.success(`GST data extracted — ${gstResult.periods_extracted} periods${gstResult.gstin ? ` · GSTIN: ${gstResult.gstin}` : ""}`);
+      }
+      if (isAccumn) {
+        toast.success("Accumn GST analytical report extracted");
+      }
       await onReload();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Upload failed");
@@ -2638,12 +4463,80 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
     toast.success("GST data deleted");
   };
 
+  const clearAccumn = async () => {
+    if (!window.confirm("Delete the Accumn analytical report for this case?")) return;
+    const dbRaw = supabase as unknown as { from: (t: string) => { delete: () => { eq: (c: string, v: string) => Promise<unknown> } } };
+    await dbRaw.from("gst_accumn_reports").delete().eq("case_id", cc.id);
+    await onReload();
+    toast.success("Accumn report cleared");
+  };
+
+  const handleAccumnImport = async (file: File) => {
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    if (ext !== "pdf") { toast.error("Accumn import only accepts PDF files"); return; }
+    setAccumnBusy(true); setAccumnProgress(5); setAccumnLabel("Reading PDF text…");
+    try {
+      const pdfText = await extractPdfText(file);
+      setAccumnProgress(20); setAccumnLabel("Uploading…");
+
+      const path = `${user.id}/${cc.id}/accumn-${Date.now()}-${file.name}`;
+      const { data: { session } } = await supabase.auth.getSession();
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/case-files/${path.split("/").map(encodeURIComponent).join("/")}`;
+      await new Promise<void>((res, rej) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url);
+        xhr.setRequestHeader("Authorization", `Bearer ${session?.access_token}`);
+        xhr.setRequestHeader("apikey", import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY);
+        xhr.setRequestHeader("x-upsert", "true");
+        xhr.setRequestHeader("Content-Type", "application/pdf");
+        xhr.upload.onprogress = e => { if (e.lengthComputable) setAccumnProgress(20 + Math.round((e.loaded / e.total) * 30)); };
+        xhr.onload = () => xhr.status < 300 ? res() : rej(new Error(`Upload ${xhr.status}`));
+        xhr.onerror = () => rej(new Error("Network error"));
+        xhr.send(file);
+      });
+
+      setAccumnProgress(55); setAccumnLabel("Registering…");
+      const { data: doc, error: dErr } = await supabase.from("financial_documents").insert({
+        case_id: cc.id, user_id: user.id, file_path: path, file_name: file.name,
+        file_type: "pdf" as never, doc_class: "gst_return" as never, extraction_status: "pending",
+      }).select().single();
+      if (dErr || !doc) throw new Error(dErr?.message ?? "Register failed");
+
+      setAccumnProgress(60); setAccumnLabel("Extracting with AI…");
+      const tick = setInterval(() => setAccumnProgress(p => p < 94 ? p + 1 : p), 800);
+      const { data: { session: s2 } } = await supabase.auth.getSession();
+      const authH = { "Content-Type": "application/json", "Authorization": `Bearer ${s2?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
+      const base = import.meta.env.VITE_SUPABASE_URL;
+
+      const res = await fetch(`${base}/functions/v1/extract-gst-accumn`, {
+        method: "POST", headers: authH,
+        body: JSON.stringify({ case_id: cc.id, document_id: doc.id, pdf_text: pdfText }),
+      });
+      clearInterval(tick);
+
+      const result = await res.json().catch(() => ({})) as Record<string, unknown>;
+      setAccumnProgress(100); setAccumnLabel("Done");
+
+      if (!res.ok) throw new Error((result.error as string) ?? `HTTP ${res.status}`);
+      if (!result.is_accumn) {
+        toast.warning("This PDF was not recognised as an Accumn GST analytical report");
+      } else {
+        toast.success("Accumn GST report extracted successfully");
+      }
+      await onReload();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Import failed");
+    } finally {
+      setTimeout(() => { setAccumnBusy(false); setAccumnProgress(0); setAccumnLabel(""); }, 600);
+    }
+  };
+
   const statusCls = (s: string) => s === "filed" ? "text-success" : s === "late" ? "text-warning" : "text-destructive";
 
   return (
     <div className="space-y-3">
       {/* Upload */}
-      <Panel title="GST RETURN UPLOAD" ticker="GSTR-1 / GSTR-3B / GSTR-9" status={data.length > 0 ? "live" : "idle"}
+      <Panel title="GST RETURNS" ticker="GSTR-1 / GSTR-3B / GSTR-9 · UPLOAD & ANALYSIS" status={data.length > 0 ? "live" : "idle"}
         actions={data.length > 0 ? <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button> : undefined}
       >
         <div className="space-y-3">
@@ -2658,7 +4551,7 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
             onClick={() => !(busy || queueRunning) && fileRef.current?.click()}
             className={`border-2 border-dashed cursor-pointer px-4 py-3 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
           >
-            <span className="text-primary font-bold">⬆ DROP GST RETURNS OR CLICK</span>
+            <span className="text-primary font-bold">⬆ DROP GST FILE OR CLICK</span>
             <span className="text-muted-foreground ml-1">· GSTR-1 / GSTR-3B / GSTR-9 · Multiple OK</span>
           </div>
           {gstin && <div className="text-[10px] text-accent tracking-wider">GSTIN: {gstin}</div>}
@@ -2690,7 +4583,10 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
                     <span className="truncate flex-1 text-primary">{item.name}</span>
                     <span className="text-foreground/40 shrink-0">{item.size}</span>
                     {item.status === "duplicate" && (
-                      <span className="text-warning text-[9px] tracking-widest shrink-0">ALREADY EXISTS</span>
+                      <button
+                        onClick={() => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "pending" as QueueStatus } : qi))}
+                        className="text-warning text-[9px] tracking-widest shrink-0 border border-warning/40 px-1.5 py-0.5 hover:text-foreground hover:border-foreground/40 transition-colors"
+                      >RE-EXTRACT</button>
                     )}
                     {item.status === "pending" && (
                       <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
@@ -2709,6 +4605,43 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
             </div>
           )}
         </div>
+      </Panel>
+
+      {/* ── Accumn PDF Import ─────────────────────────────────────────────── */}
+      <Panel
+        title="ACCUMN ANALYTICAL REPORT"
+        ticker="GST ADVISORY PDF · AI EXTRACTION"
+        status={accumnData?.is_accumn ? "live" : "idle"}
+        actions={accumnData?.is_accumn ? (
+          <button onClick={clearAccumn} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[CLEAR]</button>
+        ) : undefined}
+      >
+        <div className="flex items-center gap-2">
+          <input ref={accumnFileRef} type="file" className="hidden" accept=".pdf"
+            onChange={e => { const f = e.target.files?.[0]; if (f) handleAccumnImport(f); e.target.value = ""; }} />
+          <button
+            onClick={() => accumnFileRef.current?.click()}
+            disabled={accumnBusy}
+            className="text-[10px] tracking-widest border border-primary/40 text-primary/70 hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5"
+          >{accumnBusy ? "IMPORTING…" : "⬆ IMPORT ACCUMN PDF"}</button>
+          <span className="text-[9px] text-muted-foreground/50 tracking-wide">Accumn GST Advisory Report · PDF only</span>
+          {accumnData?.is_accumn && !accumnBusy && (
+            <span className="flex items-center gap-1.5 ml-2">
+              <span className="text-success text-xs">●</span>
+              <span className="text-foreground font-medium text-[10px]">{accumnData.company_profile?.name ?? "Accumn Report"} loaded</span>
+              {accumnData.company_profile?.gstin && (
+                <span className="text-muted-foreground font-mono text-[10px]">{accumnData.company_profile.gstin}</span>
+              )}
+            </span>
+          )}
+        </div>
+
+        {accumnBusy && (
+          <div className="space-y-1 mt-2">
+            <div className="flex justify-between text-[10px] text-muted-foreground"><span>{accumnLabel}</span><span>{accumnProgress}%</span></div>
+            <div className="h-1.5 bg-border"><div className="h-full bg-accent transition-all" style={{ width: `${accumnProgress}%` }} /></div>
+          </div>
+        )}
       </Panel>
 
       {data.length > 0 && (
@@ -2766,13 +4699,21 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
           )}
 
           {/* Period table */}
-          <Panel title="GST PERIOD-WISE DETAILS" ticker="ALL RETURNS">
+          <Panel title="GST PERIOD-WISE DETAILS" ticker="ALL RETURNS"
+            actions={
+              <button onClick={addGstRow}
+                className="text-[10px] tracking-widest border border-primary/40 text-primary/70 hover:bg-primary/10 px-2 py-0.5">
+                + ADD ROW
+              </button>
+            }
+          >
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-muted-foreground border-b border-border">
                   <tr>
                     <th className="text-left py-1 pr-2">PERIOD</th>
                     <th className="text-left pr-2">TYPE</th>
+                    <th className="text-left pr-2">GSTIN</th>
                     <th className="text-right pr-2">TAXABLE</th>
                     <th className="text-right pr-2">EXEMPT</th>
                     <th className="text-right pr-2">TOTAL TURNOVER</th>
@@ -2780,14 +4721,16 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
                     <th className="text-right pr-2">ITC</th>
                     <th className="text-right pr-2">NET TAX</th>
                     <th className="text-center pr-2">STATUS</th>
-                    <th className="text-left">FILED ON</th>
+                    <th className="text-left pr-2">FILED ON</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.map(row => (
-                    <tr key={row.id} className="border-b border-border/30">
+                    <tr key={row.id} className="border-b border-border/30 group/row">
                       <td className="py-1 pr-2 font-medium">{gstTxtCell(row.id, "period", row.period)}</td>
                       <td className="pr-2 text-accent text-[10px]">{gstTxtCell(row.id, "return_type", row.return_type)}</td>
+                      <td className="pr-2 font-mono text-[10px] text-muted-foreground">{gstTxtCell(row.id, "gstin", row.gstin)}</td>
                       <td className="text-right pr-2 tabular-nums">{gstNumCell(row.id, "taxable_turnover", row.taxable_turnover)}</td>
                       <td className="text-right pr-2 tabular-nums text-muted-foreground">{gstNumCell(row.id, "exempt_turnover", row.exempt_turnover)}</td>
                       <td className="text-right pr-2 tabular-nums font-medium">{gstNumCell(row.id, "total_turnover", row.total_turnover)}</td>
@@ -2795,7 +4738,14 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
                       <td className="text-right pr-2 tabular-nums text-accent">{gstNumCell(row.id, "itc_claimed", row.itc_claimed)}</td>
                       <td className="text-right pr-2 tabular-nums font-bold">{gstNumCell(row.id, "net_tax_paid", row.net_tax_paid)}</td>
                       <td className="text-center pr-2">{gstStatusCell(row.id, row.filing_status)}</td>
-                      <td className="text-muted-foreground text-[10px]">{gstTxtCell(row.id, "filing_date", row.filing_date ?? null)}</td>
+                      <td className="text-muted-foreground text-[10px] pr-2">{gstTxtCell(row.id, "filing_date", row.filing_date ?? null)}</td>
+                      <td className="w-4">
+                        <button
+                          onClick={() => deleteGstRow(row.id)}
+                          className="opacity-0 group-hover/row:opacity-60 hover:!opacity-100 text-destructive text-[10px] transition-opacity"
+                          title="Delete row"
+                        >✕</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -2823,274 +4773,10 @@ function GstTab({ cc, data, extracted, user, onReload, docs }: { cc: CaseRow; da
           )}
         </>
       )}
-    </div>
-  );
-}
 
-// ─── EMI Tracker ─────────────────────────────────────────────────────────────
-type EmiRow = Tables<"emi_payments">;
-
-function calcEmiSchedule(principal: number, annualRatePct: number, tenureMonths: number, startDate: Date): Omit<EmiRow, "id"|"case_id"|"user_id"|"created_at"|"updated_at"|"status"|"paid_amount"|"paid_date"|"remarks">[] {
-  const r = annualRatePct / 12 / 100;
-  const emi = r === 0
-    ? principal / tenureMonths
-    : (principal * r * Math.pow(1 + r, tenureMonths)) / (Math.pow(1 + r, tenureMonths) - 1);
-  const rows = [];
-  let balance = principal;
-  for (let i = 1; i <= tenureMonths; i++) {
-    const interest = r === 0 ? 0 : balance * r;
-    const principalComp = emi - interest;
-    balance = Math.max(0, balance - principalComp);
-    const due = new Date(startDate);
-    due.setMonth(due.getMonth() + i);
-    rows.push({
-      emi_number: i,
-      due_date: due.toISOString().split("T")[0],
-      emi_amount: +emi.toFixed(2),
-      principal_component: +principalComp.toFixed(2),
-      interest_component: +interest.toFixed(2),
-      outstanding_balance: +balance.toFixed(2),
-    });
-  }
-  return rows;
-}
-
-function EmiTracker({ cc, payments, user, onReload }: { cc: CaseRow; payments: EmiRow[]; user: { id: string }; onReload: () => Promise<void> }) {
-  const [principal, setPrincipal]   = useState(String(cc.deal_amount ?? ""));
-  const [rate, setRate]             = useState(String(cc.expected_irr ?? ""));
-  const [tenure, setTenure]         = useState(String(cc.tenure_months ?? ""));
-  const [startDate, setStartDate]   = useState(() => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + 1); return d.toISOString().split("T")[0]; });
-  const [generating, setGenerating] = useState(false);
-  const [deleting, setDeleting]     = useState(false);
-  const [markingId, setMarkingId]   = useState<string | null>(null);
-  const [editRemarks, setEditRemarks] = useState<{ id: string; val: string } | null>(null);
-
-  const today = new Date().toISOString().split("T")[0];
-
-  const hasSchedule = payments.length > 0;
-
-  const paidCount    = payments.filter(p => p.status === "paid").length;
-  const overdueCount = payments.filter(p => p.status !== "paid" && p.due_date < today).length;
-  const pendingCount = payments.filter(p => p.status === "pending" && p.due_date >= today).length;
-  const totalPaid    = payments.filter(p => p.status === "paid").reduce((s, p) => s + Number(p.paid_amount ?? p.emi_amount), 0);
-  const totalEmi     = payments.reduce((s, p) => s + Number(p.emi_amount), 0);
-  const nextDue      = payments.find(p => p.status !== "paid" && p.due_date >= today);
-  const progressPct  = hasSchedule ? Math.round((paidCount / payments.length) * 100) : 0;
-
-  const fmt = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
-
-  const generateSchedule = async () => {
-    const P = Number(principal), r = Number(rate), n = Number(tenure);
-    if (!P || !r || !n || !startDate) { toast.error("Fill principal, rate, tenure and start date"); return; }
-    setGenerating(true);
-    try {
-      // Delete existing schedule first
-      if (payments.length > 0) {
-        await supabase.from("emi_payments").delete().eq("case_id", cc.id);
-      }
-      const schedule = calcEmiSchedule(P, r, n, new Date(startDate));
-      const rows = schedule.map(s => ({ ...s, case_id: cc.id, user_id: user.id, status: "pending" }));
-      // Insert in batches of 50
-      for (let i = 0; i < rows.length; i += 50) {
-        const { error } = await supabase.from("emi_payments").insert(rows.slice(i, i + 50) as never);
-        if (error) throw error;
-      }
-      toast.success(`EMI schedule generated — ${n} instalments of ₹${fmt(rows[0]?.emi_amount ?? 0)} Cr`);
-      await onReload();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to generate schedule");
-    } finally { setGenerating(false); }
-  };
-
-  const markPaid = async (row: EmiRow, paidAmt?: number) => {
-    setMarkingId(row.id);
-    await supabase.from("emi_payments").update({
-      status: "paid",
-      paid_amount: paidAmt ?? row.emi_amount,
-      paid_date: today,
-    }).eq("id", row.id);
-    await onReload();
-    setMarkingId(null);
-  };
-
-  const markPending = async (id: string) => {
-    setMarkingId(id);
-    await supabase.from("emi_payments").update({ status: "pending", paid_amount: null, paid_date: null }).eq("id", id);
-    await onReload();
-    setMarkingId(null);
-  };
-
-  const saveRemarks = async (id: string, val: string) => {
-    await supabase.from("emi_payments").update({ remarks: val || null }).eq("id", id);
-    setEditRemarks(null);
-    await onReload();
-  };
-
-  const statusCls = (row: EmiRow) => {
-    if (row.status === "paid") return "text-success";
-    if (row.due_date < today) return "text-destructive";
-    return "text-warning";
-  };
-  const statusLabel = (row: EmiRow) => {
-    if (row.status === "paid") return "PAID";
-    if (row.due_date < today) return "OVERDUE";
-    return "PENDING";
-  };
-
-  const inputCls = "bg-input border border-border px-2 py-1.5 text-sm text-primary focus:outline-none focus:border-primary";
-
-  return (
-    <div className="space-y-3">
-      {/* Setup panel */}
-      <Panel title="EMI SCHEDULE SETUP" ticker="AMORTISATION" status={hasSchedule ? "live" : "idle"}>
-        <div className="flex gap-3 items-end flex-wrap">
-          <div>
-            <label className="terminal-label block mb-1">Principal (₹ Cr)</label>
-            <input type="number" step="0.01" value={principal} onChange={e => setPrincipal(e.target.value)}
-              placeholder={String(cc.deal_amount ?? "e.g. 5")} className={`${inputCls} w-28`} />
-          </div>
-          <div>
-            <label className="terminal-label block mb-1">Annual Rate (%)</label>
-            <input type="number" step="0.01" value={rate} onChange={e => setRate(e.target.value)}
-              placeholder={String(cc.expected_irr ?? "e.g. 15")} className={`${inputCls} w-24`} />
-          </div>
-          <div>
-            <label className="terminal-label block mb-1">Tenure (months)</label>
-            <input type="number" value={tenure} onChange={e => setTenure(e.target.value)}
-              placeholder={String(cc.tenure_months ?? "e.g. 36")} className={`${inputCls} w-24`} />
-          </div>
-          <div>
-            <label className="terminal-label block mb-1">First EMI Due</label>
-            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className={`${inputCls} w-36`} />
-          </div>
-          <button
-            onClick={generateSchedule}
-            disabled={generating}
-            className="bg-primary text-primary-foreground px-4 py-1.5 text-xs tracking-widest font-bold hover:opacity-90 disabled:opacity-40"
-          >{generating ? "GENERATING…" : hasSchedule ? "[REGENERATE SCHEDULE]" : "[GENERATE SCHEDULE]"}</button>
-          {hasSchedule && (
-            <button
-              onClick={async () => {
-                if (!window.confirm(`Delete all ${payments.length} EMI records for this case? This cannot be undone.`)) return;
-                setDeleting(true);
-                await supabase.from("emi_payments").delete().eq("case_id", cc.id);
-                toast.success("EMI schedule deleted");
-                await onReload();
-                setDeleting(false);
-              }}
-              disabled={deleting}
-              className="border border-destructive/50 text-destructive/80 px-4 py-1.5 text-xs tracking-widest font-bold hover:bg-destructive/10 hover:border-destructive disabled:opacity-40"
-            >{deleting ? "DELETING…" : "[DELETE SCHEDULE]"}</button>
-          )}
-        </div>
-        {Number(principal) > 0 && Number(rate) > 0 && Number(tenure) > 0 && (() => {
-          const r = Number(rate) / 12 / 100;
-          const n = Number(tenure);
-          const P = Number(principal);
-          const emi = r === 0 ? P / n : (P * r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
-          const total = emi * n;
-          return (
-            <div className="mt-3 flex gap-6 text-xs border-t border-border/40 pt-3">
-              <div><div className="terminal-label">MONTHLY EMI</div><div className="text-primary font-bold text-sm mt-0.5">₹{fmt(emi)} Cr</div></div>
-              <div><div className="terminal-label">TOTAL OUTFLOW</div><div className="text-primary font-bold text-sm mt-0.5">₹{fmt(total)} Cr</div></div>
-              <div><div className="terminal-label">TOTAL INTEREST</div><div className="text-warning font-bold text-sm mt-0.5">₹{fmt(total - P)} Cr</div></div>
-            </div>
-          );
-        })()}
-      </Panel>
-
-      {/* Summary cards */}
-      {hasSchedule && (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Panel title="PROGRESS" ticker={`${progressPct}%`} status="live">
-            <div className="text-2xl font-bold text-primary">{paidCount}<span className="text-sm text-muted-foreground">/{payments.length}</span></div>
-            <div className="terminal-label mt-1">EMIs PAID</div>
-            <div className="mt-2 h-1.5 bg-border overflow-hidden">
-              <div className="h-full bg-primary transition-all" style={{ width: `${progressPct}%` }} />
-            </div>
-          </Panel>
-          <Panel title="OVERDUE" ticker="ACTION NEEDED" status={overdueCount > 0 ? "idle" : "live"}>
-            <div className={`text-2xl font-bold ${overdueCount > 0 ? "text-destructive" : "text-success"}`}>{overdueCount}</div>
-            <div className="terminal-label mt-1">EMIs OVERDUE</div>
-          </Panel>
-          <Panel title="TOTAL COLLECTED" ticker="RECEIVED">
-            <div className="text-2xl font-bold text-success">₹{fmt(totalPaid)}</div>
-            <div className="terminal-label mt-1">of ₹{fmt(totalEmi)} Cr</div>
-          </Panel>
-          <Panel title="NEXT DUE" ticker={nextDue ? nextDue.due_date : "—"} status={nextDue && nextDue.due_date < today ? "idle" : "warn"}>
-            <div className="text-lg font-bold text-primary">{nextDue ? `EMI #${nextDue.emi_number}` : "ALL PAID"}</div>
-            <div className="terminal-label mt-1">{nextDue ? `₹${fmt(nextDue.emi_amount)} Cr` : "Schedule complete"}</div>
-          </Panel>
-        </div>
-      )}
-
-      {/* Schedule table */}
-      {hasSchedule && (
-        <Panel title="REPAYMENT SCHEDULE" ticker={`${payments.length} INSTALMENTS`}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead className="text-muted-foreground border-b border-border">
-                <tr>
-                  <th className="text-left py-1 pr-2">#</th>
-                  <th className="text-left pr-2">DUE DATE</th>
-                  <th className="text-right pr-2">EMI AMT</th>
-                  <th className="text-right pr-2">PRINCIPAL</th>
-                  <th className="text-right pr-2">INTEREST</th>
-                  <th className="text-right pr-2">BALANCE</th>
-                  <th className="text-center pr-2">STATUS</th>
-                  <th className="text-left pr-2">PAID ON</th>
-                  <th className="text-left">REMARKS</th>
-                  <th className="w-20"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {payments.map(row => {
-                  const isOverdue = row.status !== "paid" && row.due_date < today;
-                  return (
-                    <tr key={row.id} className={`border-b border-border/30 group ${isOverdue ? "bg-destructive/5" : row.status === "paid" ? "opacity-60" : ""}`}>
-                      <td className="py-1 pr-2 text-muted-foreground">{row.emi_number}</td>
-                      <td className="pr-2">{row.due_date}</td>
-                      <td className="text-right pr-2 tabular-nums font-medium">₹{fmt(row.emi_amount)}</td>
-                      <td className="text-right pr-2 tabular-nums text-success">₹{fmt(row.principal_component)}</td>
-                      <td className="text-right pr-2 tabular-nums text-warning">₹{fmt(row.interest_component)}</td>
-                      <td className="text-right pr-2 tabular-nums">₹{fmt(row.outstanding_balance)}</td>
-                      <td className="text-center pr-2">
-                        <span className={`text-[9px] font-bold tracking-widest ${statusCls(row)}`}>{statusLabel(row)}</span>
-                      </td>
-                      <td className="pr-2 text-muted-foreground">{row.paid_date ?? "—"}</td>
-                      <td className="pr-2">
-                        {editRemarks?.id === row.id ? (
-                          <input
-                            autoFocus
-                            value={editRemarks.val}
-                            onChange={e => setEditRemarks({ id: row.id, val: e.target.value })}
-                            onBlur={() => saveRemarks(row.id, editRemarks.val)}
-                            onKeyDown={e => { if (e.key === "Enter") saveRemarks(row.id, editRemarks.val); if (e.key === "Escape") setEditRemarks(null); }}
-                            className="bg-input border border-primary px-1 text-primary text-xs w-28 outline-none"
-                          />
-                        ) : (
-                          <span
-                            className="text-muted-foreground cursor-pointer hover:text-primary"
-                            onClick={() => setEditRemarks({ id: row.id, val: row.remarks ?? "" })}
-                          >{row.remarks || <span className="text-border/60 text-[10px]">add note…</span>}</span>
-                        )}
-                      </td>
-                      <td className="text-right">
-                        {markingId === row.id ? (
-                          <span className="text-[9px] text-muted-foreground">…</span>
-                        ) : row.status === "paid" ? (
-                          <button onClick={() => markPending(row.id)} className="text-[9px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground opacity-0 group-hover:opacity-100">UNDO</button>
-                        ) : (
-                          <button onClick={() => markPaid(row)} className="text-[9px] bg-success/10 border border-success/40 text-success px-2 py-0.5 hover:bg-success/20 tracking-widest">MARK PAID</button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
+      {/* Accumn Analytical Report Dashboard */}
+      {accumnData?.is_accumn && (
+        <AccumnDashboard data={accumnData} onClear={clearAccumn} />
       )}
     </div>
   );
