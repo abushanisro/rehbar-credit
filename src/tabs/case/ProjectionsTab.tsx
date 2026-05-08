@@ -9,7 +9,7 @@
  * variance, CAGR comparison, risk flags, and an overall credibility verdict.
  */
 
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Panel } from "@/components/terminal/Panel";
 import {
   ComposedChart, Bar, Line, LineChart, AreaChart, Area,
@@ -389,6 +389,8 @@ export function ProjectionsTab({
   progress,
   progressLabel,
   onGenerateNote,
+  projComment = "",
+  onSaveComment,
 }: {
   extracted: ExtractedRow[];
   cc: CaseRow;
@@ -396,6 +398,8 @@ export function ProjectionsTab({
   progress: number;
   progressLabel: string;
   onGenerateNote: () => void;
+  projComment?: string;
+  onSaveComment?: (text: string) => Promise<void>;
 }) {
   const projRows = extracted.filter(r => r.statement_type === "projections");
   const histPL   = extracted.filter(r => r.statement_type === "profit_loss");
@@ -416,22 +420,70 @@ export function ProjectionsTab({
 
   const model = useMemo(() => buildModel(histPL, histBS, nForward), [histPL, histBS, nForward]);
 
+  const [comment, setComment]   = useState(projComment);
+  const [saving,  setSaving]    = useState(false);
+  const [saved,   setSaved]     = useState(false);
+  useEffect(() => { setComment(projComment); }, [projComment]);
+
+  const handleSave = async () => {
+    if (!onSaveComment) return;
+    setSaving(true);
+    await onSaveComment(comment);
+    setSaving(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const commentPanel = (
+    <Panel title="ANALYST COMMENTARY" ticker="PROJECTIONS NOTE">
+      <div className="space-y-2">
+        <textarea
+          value={comment}
+          onChange={e => { setComment(e.target.value); setSaved(false); }}
+          rows={4}
+          placeholder="Add your observations on the projections — assumptions, risks, management guidance, comparables..."
+          className="w-full bg-input border border-border text-foreground text-xs p-2 resize-y placeholder:text-muted-foreground/40 font-mono leading-relaxed focus:outline-none focus:border-primary"
+        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleSave}
+            disabled={saving || !onSaveComment}
+            className="bg-primary text-primary-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
+          >
+            {saving ? "SAVING..." : saved ? "✓ SAVED" : "[SAVE COMMENT →]"}
+          </button>
+          {!onSaveComment && (
+            <span className="text-[9px] text-muted-foreground tracking-wider">Save not wired — contact dev</span>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+
   // ── No data at all ────────────────────────────────────────────────────────
   if (projRows.length === 0 && !model) {
     return (
-      <Panel title="NO PROJECTION DATA" ticker="UPLOAD REQUIRED">
-        <div className="text-muted-foreground text-xs leading-relaxed space-y-1">
-          <p>No projection document uploaded and no historical P&amp;L data to model from.</p>
-          <p>Upload financial statements in the <strong>UPLOAD</strong> tab, extract them, then return here.</p>
-        </div>
-      </Panel>
+      <div className="space-y-3">
+        <Panel title="NO PROJECTION DATA" ticker="UPLOAD REQUIRED">
+          <div className="text-muted-foreground text-xs leading-relaxed space-y-1">
+            <p>No projection document uploaded and no historical P&amp;L data to model from.</p>
+            <p>Upload financial statements in the <strong>UPLOAD</strong> tab, extract them, then return here.</p>
+          </div>
+        </Panel>
+        {commentPanel}
+      </div>
     );
   }
 
   // ── No projections uploaded — show AI model output ────────────────────────
   if (projRows.length === 0 && model) {
-    return <EstimatedView model={model} histPL={histPL} unit={unit} abbr={abbr} unitTicker={unitTicker}
-              busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />;
+    return (
+      <div className="space-y-3">
+        <EstimatedView model={model} histPL={histPL} unit={unit} abbr={abbr} unitTicker={unitTicker}
+          busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
+        {commentPanel}
+      </div>
+    );
   }
 
   // ── Projections uploaded — full view + sanity check ───────────────────────
@@ -815,6 +867,7 @@ export function ProjectionsTab({
         </Panel>
       )}
 
+      {commentPanel}
       <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
     </div>
   );

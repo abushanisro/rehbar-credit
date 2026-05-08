@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { RoomProvider } from "@/liveblocks.config";
 import { CollabAvatarStack, TabPresenceDots, LiveCursors } from "@/components/collab/CollabPresence";
@@ -24,10 +24,14 @@ import {
   ComposedChart, Bar, Line, LineChart, XAxis, YAxis,
   CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine, Legend, LabelList,
 } from "recharts";
-import type { Tables } from "@/integrations/supabase/types";
+import type { Tables, Json } from "@/integrations/supabase/types";
 import { toast } from "sonner";
 import { extractPdfText } from "@/lib/pdf-text-extractor";
 import { ProjectionsTab } from "@/tabs/case/ProjectionsTab";
+import { PartnerAnalysisTab } from "@/tabs/case/PartnerAnalysisTab";
+import type { PartnerEntry } from "@/tabs/case/PartnerAnalysisTab";
+import { ProvisionalTab } from "@/tabs/case/ProvisionalTab";
+import type { ProvPeriod } from "@/tabs/case/ProvisionalTab";
 
 type CaseRow = Tables<"credit_cases">;
 type DocRow = Tables<"financial_documents">;
@@ -346,7 +350,7 @@ function CaseViewInner() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [tab, setTabRaw] = useState<"upload" | "review" | "ratios" | "projections" | "ic_note" | "bank" | "gst">("upload");
+  const [tab, setTabRaw] = useState<"upload" | "review" | "provisional" | "ratios" | "projections" | "partner" | "ic_note" | "bank" | "gst">("upload");
   const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
   const setTab = (t: typeof tab) => { setTabRaw(t); };
   const [cc, setCc] = useState<CaseRow | null>(null);
@@ -1287,6 +1291,18 @@ function CaseViewInner() {
     await reload();
   };
 
+  const isProvisional = (row: ExtractedRow) =>
+    (row.line_items as unknown as LineItem[]).some(i => i.label === "__provisional");
+
+  const toggleProvisional = async (row: ExtractedRow) => {
+    const items = row.line_items as unknown as LineItem[];
+    const next  = isProvisional(row)
+      ? items.filter(i => i.label !== "__provisional")
+      : [...items, { label: "__provisional", value: 1, confidence: 100, reviewed: true } as LineItem];
+    await supabase.from("extracted_financials").update({ line_items: next as never }).eq("id", row.id);
+    await reload();
+  };
+
   const createEmptyStatement = async (type: StatementType, fy: number, unit: string) => {
     if (!user) return;
     const exists = extracted.some(r => r.statement_type === type && r.fiscal_year === fy);
@@ -1524,6 +1540,7 @@ function CaseViewInner() {
         const y = yearMap.get(row.fiscal_year) ?? { pl: {}, bs: {}, cf: {} };
         const dict: Record<string, number|null> = {};
         for (const it of (row.line_items as unknown as LineItem[])) {
+          if (it.label.startsWith("__")) continue;  // skip meta markers
           const v = it.override_value != null ? it.override_value : it.value;
           dict[it.label] = v;
         }
@@ -1670,6 +1687,11 @@ function CaseViewInner() {
   };
 
   const runNarrative = async () => {
+    // Capture user-entered data before edge function overwrites ic_note
+    const preservedPartners       = (cc.ic_note as Record<string, unknown> | null)?.["partners"] as PartnerEntry[] | undefined;
+    const preservedProjComment    = (cc.ic_note as Record<string, unknown> | null)?.["projections_comment"] as string | undefined;
+    const preservedProvisional    = (cc.ic_note as Record<string, unknown> | null)?.["provisional"] as ProvPeriod[] | undefined;
+
     setBusy(true);
     setProgress(0);
     setProgressLabel("Preparing case data");
@@ -1708,6 +1730,20 @@ function CaseViewInner() {
         }));
       }
       toast.success("IC Note draft generated");
+      // Re-merge user-entered data that the edge function may have overwritten
+      if (preservedPartners?.length || preservedProjComment || preservedProvisional?.length) {
+        const { data: fresh } = await supabase.from("credit_cases").select("ic_note").eq("id", cc.id).single();
+        if (fresh?.ic_note) {
+          await supabase.from("credit_cases").update({
+            ic_note: {
+              ...(fresh.ic_note as Record<string, unknown>),
+              ...(preservedPartners?.length     ? { partners:            preservedPartners   } : {}),
+              ...(preservedProjComment          ? { projections_comment: preservedProjComment } : {}),
+              ...(preservedProvisional?.length  ? { provisional:         preservedProvisional } : {}),
+            } as Json,
+          }).eq("id", cc.id);
+        }
+      }
       await reload();
       setTab("ic_note");
     } catch (e) {
@@ -1736,11 +1772,40 @@ function CaseViewInner() {
   const sHd = (k: keyof typeof hd) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setHd(p => ({ ...p, [k]: e.target.value }));
 
-  const ic = (cc.ic_note ?? null) as null | {
+  const ic = (cc.ic_note as unknown) as null | {
     sections: Record<string, { markdown: string }>;
     risks: Array<{ category: string; risk: string; mitigant: string; severity: string }>;
     conditions_precedent: string[];
     swot?: { strengths: string[]; weaknesses: string[]; opportunities: string[]; threats: string[] };
+    projections_comment?: string;
+    partners?: PartnerEntry[];
+    provisional?: ProvPeriod[];
+  };
+
+  const icBase = () => (cc.ic_note as Record<string, unknown> | null) ?? {};
+
+  const savePartners = async (partners: PartnerEntry[]) => {
+    await supabase.from("credit_cases").update({ ic_note: { ...icBase(), partners } as Json }).eq("id", cc.id);
+    await reload();
+  };
+
+  const saveProvisional = async (provisional: ProvPeriod[]) => {
+    await supabase.from("credit_cases").update({ ic_note: { ...icBase(), provisional } as Json }).eq("id", cc.id);
+    await reload();
+  };
+
+  const saveProjectionsComment = async (text: string) => {
+    const base = icBase();
+    if (base["sections"]) {
+      await supabase.from("credit_cases").update({ ic_note: { ...base, projections_comment: text || null } as Json }).eq("id", cc.id);
+    } else {
+      // ic_note not yet generated — store comment in analyst_notes with a prefix so it's not lost
+      const existing = cc.analyst_notes ?? "";
+      const tag = "[PROJECTIONS COMMENT]\n";
+      const stripped = existing.startsWith(tag) ? existing.slice(tag.length) : existing;
+      await supabase.from("credit_cases").update({ analyst_notes: text ? `${tag}${text}` : stripped || null }).eq("id", cc.id);
+    }
+    await reload();
   };
 
   const topBar = (
@@ -2283,11 +2348,13 @@ function CaseViewInner() {
           {([
             ["upload",      "1 · UPLOAD"],
             ["review",      "2 · REVIEW"],
-            ["ratios",      "3 · RATIOS"],
-            ["projections", "4 · PROJ"],
-            ["bank",        "5 · BANK"],
-            ["gst",         "6 · GST"],
-            ["ic_note",     "7 · IC NOTE"],
+            ["provisional", "3 · PROVISIONAL"],
+            ["ratios",      "4 · RATIOS"],
+            ["projections", "5 · PROJ"],
+            ["bank",        "6 · BANK"],
+            ["gst",         "7 · GST"],
+            ["partner",     "8 · PARTNER"],
+            ["ic_note",     "9 · IC NOTE"],
           ] as const).map(([k, l]) => (
             <button
               key={k}
@@ -2364,26 +2431,24 @@ function CaseViewInner() {
               const unit = typeRows.find(r => r.unit)?.unit;
               const abbr = unitAbbr(unit);
               const allConfirmed = typeRows.every(r => r.confirmed);
-              const anyLow = typeRows.some(r => (r.line_items as unknown as LineItem[]).some(i => i.confidence < 80));
+              const anyLow = typeRows.some(r => (r.line_items as unknown as LineItem[]).some(i => i.confidence < 80 && !i.label.startsWith("__")));
               // Build ordered union of labels, respecting sort_order if present
-              const allItems = typeRows[0] ? (typeRows[0].line_items as unknown as LineItem[]) : [];
+              const allItems = typeRows[0] ? (typeRows[0].line_items as unknown as LineItem[]).filter(i => !i.label.startsWith("__")) : [];
               const hasOrder = allItems.some(i => i.sort_order !== undefined);
               let labels: string[];
               if (hasOrder) {
-                // Use sort_order from first year's line_items
                 const sorted = [...allItems].sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
                 const seen = new Set<string>();
                 labels = sorted.map(i => i.label).filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
-                // Add any labels from other years not in first year
                 for (const row of typeRows)
                   for (const it of (row.line_items as unknown as LineItem[]))
-                    if (!seen.has(it.label)) { seen.add(it.label); labels.push(it.label); }
+                    if (!it.label.startsWith("__") && !seen.has(it.label)) { seen.add(it.label); labels.push(it.label); }
               } else {
                 const std = STD_ORDER[type] ?? [];
                 const seen = new Set<string>(std.filter(l => typeRows.some(r => (r.line_items as unknown as LineItem[]).some(i => i.label === l))));
                 for (const row of typeRows)
                   for (const it of (row.line_items as unknown as LineItem[]))
-                    if (!seen.has(it.label)) { seen.add(it.label); }
+                    if (!it.label.startsWith("__") && !seen.has(it.label)) { seen.add(it.label); }
                 labels = [...seen];
               }
 
@@ -2415,14 +2480,21 @@ function CaseViewInner() {
                           <th className="text-left py-1 pr-3 min-w-[160px]">LINE ITEM</th>
                           {years.map(fy => {
                             const fyRow = typeRows.find(r => r.fiscal_year === fy)!;
+                            const prov  = isProvisional(fyRow);
                             return (
                               <th key={fy} className="text-right pr-2 min-w-[100px]">
                                 <div className="flex items-center justify-end gap-1">
                                   <span>FY{fy}</span>
+                                  {prov && <span className="text-[7px] font-bold text-warning tracking-widest">(P)</span>}
                                   {!fyRow.confirmed
                                     ? <button onClick={() => confirmExtraction(fyRow.id)} className="text-[8px] text-primary/60 hover:text-primary px-0.5" title="Confirm this year">✓</button>
                                     : <span className="text-[8px] text-success">✓</span>
                                   }
+                                  <button
+                                    onClick={() => toggleProvisional(fyRow)}
+                                    className={`text-[7px] px-0.5 tracking-widest ${prov ? "text-warning hover:text-warning/60" : "text-muted-foreground/30 hover:text-warning"}`}
+                                    title={prov ? "Unmark as provisional" : "Mark as provisional (unaudited)"}
+                                  >P</button>
                                   <button
                                     onClick={() => { if (window.confirm(`Delete FY${fy}?`)) deleteExtractedRow(fyRow.id); }}
                                     className="text-[8px] text-destructive/40 hover:text-destructive px-0.5"
@@ -2870,6 +2942,19 @@ function CaseViewInner() {
               </Panel>
             );
           })()}
+          {/* Provisional data teaser */}
+          {ic?.provisional && ic.provisional.length > 0 && (
+            <div className="border border-accent/30 bg-accent/5 px-3 py-2 flex items-center gap-3">
+              <span className="text-[9px] font-bold text-accent tracking-widest">◈ PROVISIONAL DATA</span>
+              <span className="text-[10px] text-muted-foreground flex-1">
+                {ic.provisional.length} period{ic.provisional.length !== 1 ? "s" : ""} loaded: {ic.provisional.map(p => p.label).join(" · ")}
+              </span>
+              <button onClick={() => setTab("provisional")} className="text-[9px] border border-accent/40 text-accent px-2 py-0.5 hover:bg-accent/10 tracking-widest">
+                VIEW PROVISIONAL →
+              </button>
+            </div>
+          )}
+
           {extracted.length > 0 && (
             <DownloadBar onExcel={async () => {
               const stmtTypes = Array.from(new Set(extracted.map(r => r.statement_type)));
@@ -2901,9 +2986,15 @@ function CaseViewInner() {
                     <thead className="text-muted-foreground border-b border-border">
                       <tr>
                         <th className="text-left py-1">RATIO</th>
-                        {years.map((y) => (
-                          <th key={y} className="text-right pr-1">FY{y}</th>
-                        ))}
+                        {years.map((y) => {
+                          const provRow = extracted.find(r => r.fiscal_year === y && (r.statement_type === "profit_loss" || r.statement_type === "balance_sheet"));
+                          const prov = provRow ? isProvisional(provRow) : false;
+                          return (
+                            <th key={y} className="text-right pr-1">
+                              FY{y}{prov && <span className="text-[7px] text-warning ml-0.5">(P)</span>}
+                            </th>
+                          );
+                        })}
                         <th className="text-right">BENCHMARK</th>
                       </tr>
                     </thead>
@@ -3124,6 +3215,13 @@ function CaseViewInner() {
             progress={progress}
             progressLabel={progressLabel}
             onGenerateNote={runNarrative}
+            projComment={
+              ic?.projections_comment ??
+              (cc.analyst_notes?.startsWith("[PROJECTIONS COMMENT]\n")
+                ? cc.analyst_notes.slice("[PROJECTIONS COMMENT]\n".length)
+                : "")
+            }
+            onSaveComment={saveProjectionsComment}
           />
           {extracted.some(r => r.statement_type === "projections") && (
             <DownloadBar onExcel={async () => {
@@ -3143,9 +3241,26 @@ function CaseViewInner() {
         </div>
       )}
 
+      {tab === "provisional" && (
+        <ProvisionalTab
+          cc={cc}
+          periods={ic?.provisional ?? []}
+          extracted={extracted}
+          onSave={saveProvisional}
+        />
+      )}
+
+      {tab === "partner" && (
+        <PartnerAnalysisTab
+          cc={cc}
+          partners={ic?.partners ?? []}
+          onSave={savePartners}
+        />
+      )}
+
       {tab === "ic_note" && (
         <div className="space-y-3">
-          {!ic ? (
+          {(!ic || !ic.sections) ? (
             <Panel title="NO IC NOTE"><div className="text-muted-foreground text-xs">Compute ratios first, then generate the IC narrative.</div></Panel>
           ) : (
             <>
@@ -3153,7 +3268,7 @@ function CaseViewInner() {
                 ⚠ {AI_DRAFT_BANNER}
               </div>
               {IC_SECTIONS.map((s) => {
-                const aiMd = ic.sections[s.id]?.markdown || "";
+                const aiMd = ic.sections?.[s.id]?.markdown || "";
                 if (s.id === "executive_summary") return (
                   <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
                     <ICSummaryPanel cc={cc} ratios={ratios} />
