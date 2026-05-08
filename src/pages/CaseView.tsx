@@ -2346,6 +2346,13 @@ function CaseViewInner() {
             </div>
           </div>
 
+          {ratiosOutdated && (
+            <div className="border-l-2 border-warning bg-warning/10 px-3 py-2 flex items-center gap-3 text-[10px] text-warning tracking-widest font-bold">
+              ↻ FIGURES CHANGED — RATIOS ARE STALE
+              <span className="font-normal text-warning/70 text-[9px] tracking-wide">Ratios do not update automatically — scroll down and click RE-RUN RATIOS.</span>
+            </div>
+          )}
+
           {extracted.length === 0 ? (
             <Panel title="NO EXTRACTION YET"><div className="text-muted-foreground text-xs">Upload documents in the UPLOAD tab or import a financial Excel above.</div></Panel>
           ) : (() => {
@@ -2562,7 +2569,7 @@ function CaseViewInner() {
                                         {isEditingVal ? (
                                           <input autoFocus type="number" defaultValue={val ?? ""} step={unitStep(unit)}
                                             onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
-                                            onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
+                                            onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); const inp = e.target as HTMLInputElement; const cur = parseFloat(inp.value) || 0; const s = unitStep(unit); inp.value = String(parseFloat((cur + (e.key === "ArrowUp" ? s : -s)).toFixed(6))); } }}
                                             className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
                                           />
                                         ) : (
@@ -2609,7 +2616,7 @@ function CaseViewInner() {
                                         {isEditingVal ? (
                                           <input autoFocus type="number" defaultValue={val ?? ""} step={unitStep(unit)}
                                             onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
-                                            onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
+                                            onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); const inp = e.target as HTMLInputElement; const cur = parseFloat(inp.value) || 0; const s = unitStep(unit); inp.value = String(parseFloat((cur + (e.key === "ArrowUp" ? s : -s)).toFixed(6))); } }}
                                             className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
                                           />
                                         ) : (
@@ -2659,7 +2666,7 @@ function CaseViewInner() {
                                       {isEditingVal ? (
                                         <input autoFocus type="number" defaultValue={val ?? ""} step={unitStep(unit)}
                                           onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
-                                          onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); }}
+                                          onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditingCell(null); if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); const inp = e.target as HTMLInputElement; const cur = parseFloat(inp.value) || 0; const s = unitStep(unit); inp.value = String(parseFloat((cur + (e.key === "ArrowUp" ? s : -s)).toFixed(6))); } }}
                                           className="w-24 bg-input border border-primary px-1 text-right text-primary text-xs"
                                         />
                                       ) : (
@@ -2713,9 +2720,9 @@ function CaseViewInner() {
                       const fyRow = typeRows.find(r => r.fiscal_year === fy);
                       if (!fyRow) return [];
                       const items = fyRow.line_items as unknown as LineItem[];
-                      const get = (lbl: string) => { const it = items.find(i => i.label === lbl); return it ? (it.override_value ?? it.value) : null; };
-                      const assets = get("Total Assets") ?? get("TOTAL ASSETS");
-                      const liab   = get("Total Equity & Liabilities") ?? get("Total Liabilities") ?? get("TOTAL LIABILITIES");
+                      const get = (lbl: string) => { const lo = lbl.toLowerCase(); const it = items.find(i => i.label.toLowerCase() === lo); return it ? (it.override_value ?? it.value) : null; };
+                      const assets = get("Total Assets") ?? get("Assets Total") ?? get("Total (Assets)") ?? get("Grand Total Assets");
+                      const liab   = get("Total Equity & Liabilities") ?? get("Total Liabilities & Equity") ?? get("Total Liabilities") ?? get("Liabilities Total");
                       if (assets == null || liab == null) return [];
                       const diff = assets - liab;
                       if (Math.abs(diff) < 0.01) return [];
