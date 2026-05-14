@@ -5,7 +5,7 @@
  * Stateless: caller sends full message history each turn.
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
 
 
@@ -17,6 +17,42 @@ const corsHeaders = {
 
 interface ChatMessage { role: "user" | "assistant"; content: string }
 type LineItem = { label: string; value: number | null; override_value?: number | null };
+interface CaseOverview {
+  client_name?: string;
+  product_type?: string;
+  product_type_custom?: string;
+  industry?: string;
+  legal_constitution?: string;
+  year_established?: number;
+  principal_borrower?: string;
+  deal_amount?: number;
+  tenure_months?: number;
+  expected_irr?: number;
+  end_use?: string;
+  collateral_summary?: string;
+  analyst_notes?: string;
+  status?: string;
+}
+interface CaseRecord {
+  id: string;
+  case_code: string;
+  client_name: string;
+  product_type: string;
+  product_type_custom: string | null;
+  industry: string | null;
+  status: string;
+  deal_amount: number | null;
+  tenure_months: number | null;
+  expected_irr: number | null;
+  created_at: string;
+}
+interface CompanyRecord {
+  id: string;
+  name: string;
+  industry: string | null;
+  website: string | null;
+  created_at: string;
+}
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 
@@ -130,7 +166,7 @@ RULES:
 - You know what page the analyst is currently viewing — use that context.`;
 
 async function buildCaseSystemPrompt(
-  sb: any,
+  sb: SupabaseClient,
   caseId: string,
   pageName: string,
 ): Promise<string> {
@@ -143,7 +179,7 @@ async function buildCaseSystemPrompt(
     sb.from("emi_payments").select("emi_number,due_date,emi_amount,status,paid_amount,outstanding_balance").eq("case_id", caseId).order("emi_number"),
   ]);
 
-  const cc         = ccRes.data as any;
+  const cc         = ccRes.data as CaseOverview | null;
   const financials = (finRes.data ?? []) as { fiscal_year: number; statement_type: string; line_items: unknown; unit?: string | null }[];
   const ratios     = (ratRes.data ?? []) as { fiscal_year: number; ratio_name: string; ratio_value: number | null; threshold_status: string; benchmark: number | null }[];
   const bank       = (bkRes.data ?? []) as { month: string; bank_name?: string | null; total_credits?: number | null; total_debits?: number | null; avg_balance?: number | null; bounce_inward?: number | null; bounce_outward?: number | null; emi_outflows?: number | null }[];
@@ -188,7 +224,7 @@ ${buildEmiContext(emi)}`;
 }
 
 async function buildGlobalSystemPrompt(
-  sb: any,
+  sb: SupabaseClient,
   pageName: string,
   currentPath: string,
 ): Promise<string> {
@@ -197,8 +233,8 @@ async function buildGlobalSystemPrompt(
     sb.from("companies").select("id,name,industry,website,created_at").order("created_at", { ascending: false }).limit(100),
   ]);
 
-  const cases     = (casesRes.data as any[])     ?? [];
-  const companies = (companiesRes.data as any[]) ?? [];
+  const cases     = (casesRes.data as CaseRecord[])    ?? [];
+  const companies = (companiesRes.data as CompanyRecord[]) ?? [];
 
   // Aggregate pipeline stats
   const statusCounts: Record<string, number> = {};
@@ -241,7 +277,6 @@ ${companyList || "  No companies yet."}`;
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 
-// @ts-ignore: Deno.serve is available in the edge function environment
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 

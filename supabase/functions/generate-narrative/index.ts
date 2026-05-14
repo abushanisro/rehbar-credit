@@ -256,8 +256,8 @@ Deno.serve(async (req) => {
     };
 
     const tables   = buildTables((financials ?? []) as FinRow[], (ratios ?? []) as RatioRow[]);
-    const bankTable = buildBankSection((bankStatements ?? []) as BankRow[]);
-    const gstTable  = buildGstSection((gstReturns ?? []) as GstRow[]);
+    const bankTable = buildBankSection((bankStatements ?? []) as BankRow[]).slice(0, 8_000);
+    const gstTable  = buildGstSection((gstReturns ?? []) as GstRow[]).slice(0, 6_000);
 
     const args = await callAI({
       systemPrompt: `You are a senior credit analyst at Rehbar Financial Services writing a concise IC appraisal note.
@@ -295,11 +295,7 @@ ${bankTable || "No bank statement data available."}
 ━━━ GST RETURN DATA (for Section IX due_diligence — cross-check turnover, flag compliance) ━━━
 ${gstTable || "No GST return data available."}
 
-━━━ COMPUTED RATIOS (full detail — for bullet observations) ━━━
-${JSON.stringify(ratios, null, 2)}
-
-━━━ FULL FINANCIAL DATA (for cash flow section VIII and context) ━━━
-${JSON.stringify(financials, null, 2)}`,
+Use the pre-built tables above for all numeric references. Do not invent figures not present in the tables.`,
       toolName: "submit_ic_note",
       toolDescription: "Submit the IC note. Sections V/VI/VII must start with the pre-built table copied verbatim. Zero prose sentences.",
       toolSchema: {
@@ -360,8 +356,8 @@ ${JSON.stringify(financials, null, 2)}`,
         },
       },
       toolRequired: ["sections","risks","conditions_precedent","swot"],
-      maxTokens: 16000,
-      retries: 2,
+      maxTokens: 8000,
+      retries: 1,
     });
 
     // Safety net: if Claude didn't copy the pre-built tables, inject them

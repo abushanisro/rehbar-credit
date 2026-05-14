@@ -51,6 +51,26 @@ Deno.serve(async (req) => {
         : [{ type: "image", base64: btoa(b64), mime }];
     }
 
+    interface BankExtractionResult {
+      bank_name?: string;
+      account_number?: string;
+      months: Array<{
+        month: string;
+        opening_balance?: number | null;
+        closing_balance?: number | null;
+        total_credits?: number | null;
+        total_debits?: number | null;
+        credit_count?: number | null;
+        debit_count?: number | null;
+        avg_balance?: number | null;
+        min_balance?: number | null;
+        max_balance?: number | null;
+        bounce_inward?: number | null;
+        bounce_outward?: number | null;
+        emi_outflows?: number | null;
+      }>;
+    }
+
     const args = await callAI({
       systemPrompt: `You are a senior credit analyst extracting bank statement data for credit underwriting.
 Extract monthly metrics for EVERY month visible in the statement.
@@ -98,7 +118,7 @@ Rules:
       // Bank statement output is small — monthly summaries don't need 8192 tokens
       maxTokens: 4096,
       retries: 2,
-    }) as any;
+    }) as unknown as BankExtractionResult;
 
     let inserted = 0;
     for (const m of args.months ?? []) {

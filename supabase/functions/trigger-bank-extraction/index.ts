@@ -5,7 +5,7 @@
  * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, MISTRAL_API_KEY
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { callAI, type FileContent } from "../_shared/ai-caller.ts";
 
 const corsHeaders = {
@@ -54,7 +54,7 @@ const BANK_TOOL_SCHEMA = {
 async function extractSingleDoc(
   doc: DocRecord,
   excelText: string | undefined,
-  supabase: any,
+  supabase: SupabaseClient,
   case_id: string,
   user_id: string,
 ): Promise<number> {
@@ -64,7 +64,7 @@ async function extractSingleDoc(
     if (!excelText) throw new Error("No excel_text provided for Excel doc");
     files = [{ type: "text", text: `BANK STATEMENT (TSV):\n\n${excelText.slice(0, 150_000)}` }];
   } else {
-    const { data: blob, error } = await (supabase.storage as any).from("case-files").download(doc.file_path);
+    const { data: blob, error } = await supabase.storage.from("case-files").download(doc.file_path);
     if (error || !blob) throw new Error(`Download failed: ${error?.message}`);
     const bytes = new Uint8Array(await (blob as Blob).arrayBuffer());
     let b64 = "";
@@ -80,6 +80,26 @@ async function extractSingleDoc(
     } else {
       files = [{ type: "pdf", base64 }];
     }
+  }
+
+  interface BankExtractionResult {
+    bank_name?: string;
+    account_number?: string;
+    months: Array<{
+      month: string;
+      opening_balance?: number | null;
+      closing_balance?: number | null;
+      total_credits?: number | null;
+      total_debits?: number | null;
+      credit_count?: number | null;
+      debit_count?: number | null;
+      avg_balance?: number | null;
+      min_balance?: number | null;
+      max_balance?: number | null;
+      bounce_inward?: number | null;
+      bounce_outward?: number | null;
+      emi_outflows?: number | null;
+    }>;
   }
 
   const args = await callAI({
@@ -102,12 +122,12 @@ Rules:
     toolRequired: ["months"],
     maxTokens: 4096,
     retries: 2,
-  }) as Record<string, unknown>;
+  }) as unknown as BankExtractionResult;
 
   let inserted = 0;
-  for (const m of (args.months as Record<string, unknown>[] ?? [])) {
+  for (const m of (args.months ?? [])) {
     if (!m.month) continue;
-    await (supabase as any).from("bank_statement_data").upsert({
+    await supabase.from("bank_statement_data").upsert({
       case_id, user_id, document_id: doc.id,
       month:           m.month,
       bank_name:       args.bank_name       ?? null,
@@ -124,7 +144,7 @@ Rules:
       bounce_inward:   m.bounce_inward   ?? 0,
       bounce_outward:  m.bounce_outward  ?? 0,
       emi_outflows:    m.emi_outflows    ?? null,
-    }, { onConflict: "case_id,month,bank_name" } as any);
+    }, { onConflict: "case_id,month,bank_name" });
     inserted++;
   }
 
@@ -137,15 +157,15 @@ async function runBatchExtraction(
   user_id: string,
   document_ids: string[],
   excel_texts: Record<string, string>,
-  supabase: any,
+  supabase: SupabaseClient,
 ): Promise<void> {
-  const { data: docs } = await (supabase as any)
+  const { data: docs } = await supabase
     .from("financial_documents")
     .select("id,file_path,file_type,file_name")
     .in("id", document_ids);
 
   if (!docs?.length) {
-    await (supabase as any).from("financial_documents")
+    await supabase.from("financial_documents")
       .update({ extraction_status: "failed", extraction_error: "Documents not found in database" })
       .in("id", document_ids);
     return;
@@ -161,13 +181,13 @@ async function runBatchExtraction(
     const doc = (docs as DocRecord[])[i];
     const result = results[i];
     if (result.status === "fulfilled") {
-      await (supabase as any).from("financial_documents")
+      await supabase.from("financial_documents")
         .update({ extraction_status: "extracted", extraction_error: null })
         .eq("id", doc.id);
       console.log("Extracted bank doc", { doc: doc.file_name, months: result.value });
     } else {
       const err = String(result.reason);
-      await (supabase as any).from("financial_documents")
+      await supabase.from("financial_documents")
         .update({ extraction_status: "failed", extraction_error: err.slice(0, 500) })
         .eq("id", doc.id);
       console.error("Bank extraction failed", { doc: doc.file_name, error: err });
@@ -203,7 +223,7 @@ Deno.serve(async (req) => {
     );
 
     // Mark all as running synchronously so UI updates immediately
-    await (supabase as any).from("financial_documents")
+    await supabase.from("financial_documents")
       .update({ extraction_status: "running", extraction_error: null })
       .in("id", body.document_ids);
 

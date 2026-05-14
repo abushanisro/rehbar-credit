@@ -20,6 +20,7 @@ export type Database = {
           case_code: string
           client_name: string
           collateral_summary: string | null
+          company_id: string | null
           conditions_precedent: string | null
           created_at: string
           deal_amount: number | null
@@ -56,6 +57,7 @@ export type Database = {
           case_code: string
           client_name: string
           collateral_summary?: string | null
+          company_id?: string | null
           conditions_precedent?: string | null
           created_at?: string
           deal_amount?: number | null
@@ -92,6 +94,7 @@ export type Database = {
           case_code?: string
           client_name?: string
           collateral_summary?: string | null
+          company_id?: string | null
           conditions_precedent?: string | null
           created_at?: string
           deal_amount?: number | null
@@ -124,6 +127,199 @@ export type Database = {
           year_established?: number | null
         }
         Relationships: []
+      }
+      companies: {
+        Row: {
+          id: string
+          created_at: string
+          updated_at: string
+          name: string
+          legal_constitution: string | null
+          industry: string | null
+          year_established: number | null
+          gstin: string | null
+          website: string | null
+          promoter_details: string | null
+          registered_address: string | null
+          notes: string | null
+          is_active: boolean
+          created_by: string | null
+          mca_cin: string | null
+          mca_pan: string | null
+          mca_lei: string | null
+          mca_category: string | null
+          mca_sub_category: string | null
+          mca_type: string | null
+          mca_authorized_capital: string | null
+          mca_paid_up_capital: string | null
+          mca_status: string | null
+          mca_nse_sector: string | null
+          mca_sector: string | null
+          mca_products_services: string | null
+          mca_email: string | null
+          mca_telephone: string | null
+          mca_date_of_incorp: string | null
+          mca_date_last_bs: string | null
+          mca_date_last_agm: string | null
+          mca_about: string | null
+        }
+        Insert: {
+          id?: string
+          created_at?: string
+          updated_at?: string
+          name: string
+          legal_constitution?: string | null
+          industry?: string | null
+          year_established?: number | null
+          gstin?: string | null
+          website?: string | null
+          promoter_details?: string | null
+          registered_address?: string | null
+          notes?: string | null
+          is_active?: boolean
+          created_by?: string | null
+          mca_cin?: string | null
+          mca_pan?: string | null
+          mca_lei?: string | null
+          mca_category?: string | null
+          mca_sub_category?: string | null
+          mca_type?: string | null
+          mca_authorized_capital?: string | null
+          mca_paid_up_capital?: string | null
+          mca_status?: string | null
+          mca_nse_sector?: string | null
+          mca_sector?: string | null
+          mca_products_services?: string | null
+          mca_email?: string | null
+          mca_telephone?: string | null
+          mca_date_of_incorp?: string | null
+          mca_date_last_bs?: string | null
+          mca_date_last_agm?: string | null
+          mca_about?: string | null
+        }
+        Update: {
+          id?: string
+          created_at?: string
+          updated_at?: string
+          name?: string
+          legal_constitution?: string | null
+          industry?: string | null
+          year_established?: number | null
+          gstin?: string | null
+          website?: string | null
+          promoter_details?: string | null
+          registered_address?: string | null
+          notes?: string | null
+          is_active?: boolean
+          created_by?: string | null
+          mca_cin?: string | null
+          mca_pan?: string | null
+          mca_lei?: string | null
+          mca_category?: string | null
+          mca_sub_category?: string | null
+          mca_type?: string | null
+          mca_authorized_capital?: string | null
+          mca_paid_up_capital?: string | null
+          mca_status?: string | null
+          mca_nse_sector?: string | null
+          mca_sector?: string | null
+          mca_products_services?: string | null
+          mca_email?: string | null
+          mca_telephone?: string | null
+          mca_date_of_incorp?: string | null
+          mca_date_last_bs?: string | null
+          mca_date_last_agm?: string | null
+          mca_about?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "companies_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      company_directors: {
+        Row: {
+          id: string
+          company_id: string
+          name: string
+          din: string | null
+          pan: string | null
+          dob: string | null
+          age: string | null
+          gender: string | null
+          nationality: string | null
+          address: string | null
+          designation: string | null
+          din_status: string | null
+          dsc_status: string | null
+          appointed_current: string | null
+          originally_appointed: string | null
+          cessation_date: string | null
+          shareholding: string | null
+          email: string | null
+          phone: string | null
+          remarks: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          company_id: string
+          name: string
+          din?: string | null
+          pan?: string | null
+          dob?: string | null
+          age?: string | null
+          gender?: string | null
+          nationality?: string | null
+          address?: string | null
+          designation?: string | null
+          din_status?: string | null
+          dsc_status?: string | null
+          appointed_current?: string | null
+          originally_appointed?: string | null
+          cessation_date?: string | null
+          shareholding?: string | null
+          email?: string | null
+          phone?: string | null
+          remarks?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          company_id?: string
+          name?: string
+          din?: string | null
+          pan?: string | null
+          dob?: string | null
+          age?: string | null
+          gender?: string | null
+          nationality?: string | null
+          address?: string | null
+          designation?: string | null
+          din_status?: string | null
+          dsc_status?: string | null
+          appointed_current?: string | null
+          originally_appointed?: string | null
+          cessation_date?: string | null
+          shareholding?: string | null
+          email?: string | null
+          phone?: string | null
+          remarks?: string | null
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "company_directors_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       extracted_financials: {
         Row: {

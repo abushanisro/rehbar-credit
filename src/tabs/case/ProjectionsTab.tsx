@@ -9,7 +9,9 @@
  * variance, CAGR comparison, risk flags, and an overall credibility verdict.
  */
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 import { Panel } from "@/components/terminal/Panel";
 import {
   ComposedChart, Bar, Line, LineChart, AreaChart, Area,
@@ -384,13 +386,14 @@ const SEV_CLS: Record<Severity, string> = {
 
 export function ProjectionsTab({
   extracted,
-  cc: _cc,
+  cc,
   busy,
   progress,
   progressLabel,
   onGenerateNote,
   projComment = "",
   onSaveComment,
+  onUpload,
 }: {
   extracted: ExtractedRow[];
   cc: CaseRow;
@@ -400,6 +403,7 @@ export function ProjectionsTab({
   onGenerateNote: () => void;
   projComment?: string;
   onSaveComment?: (text: string) => Promise<void>;
+  onUpload?: (file: File, fiscalYear: number | null) => Promise<void>;
 }) {
   const projRows = extracted.filter(r => r.statement_type === "projections");
   const histPL   = extracted.filter(r => r.statement_type === "profit_loss");
@@ -423,6 +427,8 @@ export function ProjectionsTab({
   const [comment, setComment]   = useState(projComment);
   const [saving,  setSaving]    = useState(false);
   const [saved,   setSaved]     = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const importFileRef = useRef<HTMLInputElement>(null);
   useEffect(() => { setComment(projComment); }, [projComment]);
 
   const handleSave = async () => {
@@ -433,6 +439,53 @@ export function ProjectionsTab({
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !onUpload) return;
+    setImportBusy(true);
+    try {
+      await onUpload(file, null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const importPanel = onUpload ? (
+    <Panel title="IMPORT PROJECTION DOCUMENT" ticker="PDF · EXCEL · IMAGE">
+      <input
+        ref={importFileRef}
+        type="file"
+        className="hidden"
+        accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp"
+        onChange={handleImportFile}
+      />
+      <div className="space-y-3">
+        <div className="text-[9px] text-muted-foreground/70 leading-relaxed">
+          Upload management projection documents. Supports PDF, Excel, or image.
+          The AI automatically detects fiscal years and extracts Projected Turnover, EBITDA, PAT, Net Worth, and Total Debt.
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            onClick={() => importFileRef.current?.click()}
+            disabled={importBusy || busy}
+            className="bg-primary text-primary-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
+          >
+            {importBusy ? "UPLOADING…" : "[ CHOOSE FILE → ]"}
+          </button>
+          {importBusy && (
+            <span className="text-[9px] text-primary tracking-widest animate-pulse">▸ Extracting with AI…</span>
+          )}
+          {busy && !importBusy && (
+            <span className="text-[9px] text-muted-foreground/50">▸ Another operation in progress…</span>
+          )}
+        </div>
+      </div>
+    </Panel>
+  ) : null;
 
   const commentPanel = (
     <Panel title="ANALYST COMMENTARY" ticker="PROJECTIONS NOTE">
@@ -464,6 +517,7 @@ export function ProjectionsTab({
   if (projRows.length === 0 && !model) {
     return (
       <div className="space-y-3">
+        {importPanel}
         <Panel title="NO PROJECTION DATA" ticker="UPLOAD REQUIRED">
           <div className="text-muted-foreground text-xs leading-relaxed space-y-1">
             <p>No projection document uploaded and no historical P&amp;L data to model from.</p>
@@ -479,7 +533,8 @@ export function ProjectionsTab({
   if (projRows.length === 0 && model) {
     return (
       <div className="space-y-3">
-        <EstimatedView model={model} histPL={histPL} unit={unit} abbr={abbr} unitTicker={unitTicker}
+        {importPanel}
+        <EstimatedView caseId={cc.id} model={model} histPL={histPL} unit={unit} abbr={abbr} unitTicker={unitTicker}
           busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
         {commentPanel}
       </div>
@@ -591,6 +646,8 @@ export function ProjectionsTab({
 
   return (
     <div className="space-y-3">
+
+      {importPanel}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -747,6 +804,114 @@ export function ProjectionsTab({
         </table>
       </Panel>
 
+      {/* ── COMBINED AI MODEL vs MANAGEMENT PROJECTIONS ─────────────────────── */}
+      {model && (() => {
+        // Build one data point per FY combining both sources
+        const combined = uploadedYears.map(fy => {
+          const up = projData.find(d => d.fy === fy);
+          const md = model.points.find(p => p.fy === fy);
+          const mEM = md?.turnover && md.ebitda != null ? +((md.ebitda / md.turnover) * 100).toFixed(1) : null;
+          const mPM = md?.turnover && md.pat    != null ? +((md.pat    / md.turnover) * 100).toFixed(1) : null;
+          const uEM = up?.turnover && up.ebitda != null ? +((up.ebitda / up.turnover) * 100).toFixed(1) : null;
+          const uPM = up?.turnover && up.pat    != null ? +((up.pat    / up.turnover) * 100).toFixed(1) : null;
+          return {
+            fy:               `FY${fy}`,
+            modelTurnover:    md?.turnover    ?? null,
+            uploadTurnover:   up?.turnover    ?? null,
+            modelEbitdaMargin: mEM,
+            uploadEbitdaMargin: uEM,
+            modelPatMargin:    mPM,
+            uploadPatMargin:   uPM,
+          };
+        });
+
+        // Auto-signal detection
+        type InsightType = "OPPORTUNITY" | "RISK" | "GAP" | "IN LINE";
+        const insights: Array<{ type: InsightType; metric: string; detail: string }> = [];
+        const avgDev = (getU: (d: typeof combined[0]) => number | null, getM: (d: typeof combined[0]) => number | null) => {
+          const vals = combined.map(d => {
+            const u = getU(d), m = getM(d);
+            return u != null && m != null && m !== 0 ? (u - m) / Math.abs(m) * 100 : null;
+          }).filter((v): v is number => v != null);
+          return vals.length ? vals.reduce((a, b) => a + b) / vals.length : null;
+        };
+        const classify = (dev: number | null, label: string) => {
+          if (dev == null) return;
+          const a = Math.abs(dev), s = dev > 0 ? "+" : "";
+          if      (dev < -35) insights.push({ type: "OPPORTUNITY", metric: label, detail: `Management ${a.toFixed(1)}% below model — potential upside if model trend holds.` });
+          else if (dev < -15) insights.push({ type: "GAP",         metric: label, detail: `${a.toFixed(1)}% below model. Conservative — confirm constraints with management.` });
+          else if (dev >  35) insights.push({ type: "RISK",        metric: label, detail: `${s}${a.toFixed(1)}% above model. Highly optimistic — stress-test assumptions.` });
+          else if (dev >  15) insights.push({ type: "RISK",        metric: label, detail: `${s}${a.toFixed(1)}% above model trend. Review growth drivers.` });
+          else                insights.push({ type: "IN LINE",     metric: label, detail: `Within ±15% of model. Credible against historical trend.` });
+        };
+        classify(avgDev(d => d.uploadTurnover,    d => d.modelTurnover),    "Revenue");
+        classify(avgDev(d => d.uploadEbitdaMargin, d => d.modelEbitdaMargin), "EBITDA Margin");
+        classify(avgDev(d => d.uploadPatMargin,    d => d.modelPatMargin),    "PAT Margin");
+
+        const INS_CLS: Record<InsightType, string> = {
+          OPPORTUNITY: "text-success", RISK: "text-destructive",
+          GAP: "text-warning", "IN LINE": "text-muted-foreground",
+        };
+        const INS_COL: Record<InsightType, string> = {
+          OPPORTUNITY: "hsl(var(--success))", RISK: "hsl(var(--destructive))",
+          GAP: "hsl(var(--warning))", "IN LINE": "hsl(var(--muted-foreground))",
+        };
+
+        return (
+          <Panel title="AI MODEL vs MANAGEMENT PROJECTIONS" ticker="COMBINED VIEW · REVENUE + MARGINS">
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={combined} margin={{ top: 4, right: 52, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                  <XAxis dataKey="fy" tick={{ fill: "#6b7280", fontSize: 10 }} />
+                  {/* Left axis — revenue */}
+                  <YAxis yAxisId="rev" tick={{ fill: "#6b7280", fontSize: 10 }} width={58}
+                    tickFormatter={v => v >= 1e7 ? `${(v/1e7).toFixed(0)}Cr` : v >= 1e5 ? `${(v/1e5).toFixed(0)}L` : String(v)} />
+                  {/* Right axis — margin % */}
+                  <YAxis yAxisId="pct" orientation="right" tick={{ fill: "#6b7280", fontSize: 10 }} unit="%" width={40} />
+                  <RTooltip contentStyle={TT}
+                    formatter={(v: number, name: string) =>
+                      name.includes("Margin") || name.includes("margin")
+                        ? [`${v.toFixed(1)}%`, name]
+                        : [v.toLocaleString("en-IN", { maximumFractionDigits: 0 }), name]
+                    }
+                  />
+                  <Legend wrapperStyle={{ fontSize: 10, color: "#9ca3af" }} />
+                  {/* Revenue bars — grouped */}
+                  <Bar yAxisId="rev" dataKey="modelTurnover"  name="Revenue · AI Model"  fill="#818cf8" opacity={0.65} radius={[2,2,0,0]} />
+                  <Bar yAxisId="rev" dataKey="uploadTurnover" name="Revenue · Mgmt Upload" fill="#22c55e" opacity={0.80} radius={[2,2,0,0]} />
+                  {/* EBITDA margin lines */}
+                  <Line yAxisId="pct" type="monotone" dataKey="modelEbitdaMargin"  name="EBITDA% · AI Model"  stroke="#f59e0b" strokeWidth={2} strokeDasharray="5 3" dot={{ fill: "#f59e0b", r: 3 }} connectNulls />
+                  <Line yAxisId="pct" type="monotone" dataKey="uploadEbitdaMargin" name="EBITDA% · Upload"     stroke="#f59e0b" strokeWidth={2} dot={{ fill: "#f59e0b", r: 4, strokeWidth: 2, stroke: "#0d1117" }} connectNulls />
+                  {/* PAT margin lines */}
+                  <Line yAxisId="pct" type="monotone" dataKey="modelPatMargin"  name="PAT% · AI Model"  stroke="#60a5fa" strokeWidth={2} strokeDasharray="5 3" dot={{ fill: "#60a5fa", r: 3 }} connectNulls />
+                  <Line yAxisId="pct" type="monotone" dataKey="uploadPatMargin" name="PAT% · Upload"     stroke="#60a5fa" strokeWidth={2} dot={{ fill: "#60a5fa", r: 4, strokeWidth: 2, stroke: "#0d1117" }} connectNulls />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="text-[9px] text-muted-foreground/50 mt-1 mb-3 flex flex-wrap gap-x-4">
+              <span>▸ Bars = revenue (left axis) — purple AI model · green management upload</span>
+              <span>▸ Lines = margin % (right axis) — dashed AI model · solid upload · amber EBITDA · blue PAT</span>
+            </div>
+
+            {/* Auto-detected signals inline below chart */}
+            {insights.length > 0 && (
+              <div className="border-t border-border/30 pt-2 space-y-1.5">
+                <div className="text-[9px] text-muted-foreground tracking-widest font-bold mb-1.5">DETECTED SIGNALS</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {insights.map((ins, i) => (
+                    <div key={i} className="border-l-2 pl-2 py-0.5" style={{ borderColor: INS_COL[ins.type] }}>
+                      <div className={`text-[9px] font-bold tracking-wider ${INS_CLS[ins.type]}`}>{ins.type} · {ins.metric}</div>
+                      <div className="text-[9px] text-muted-foreground/60 leading-relaxed mt-0.5">{ins.detail}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Panel>
+        );
+      })()}
+
       {/* ── PROJECTION SANITY CHECK ──────────────────────────────────────────── */}
       {model && (
         <Panel title="PROJECTION SANITY CHECK" ticker={`${METHOD_LABEL[model.method]} · ${model.histYears}yr history`}>
@@ -867,6 +1032,15 @@ export function ProjectionsTab({
         </Panel>
       )}
 
+      <ProjectionChatPanel
+        caseId={cc.id}
+        model={model}
+        projData={projData}
+        riskFlags={riskFlags}
+        verdict={verdict}
+        abbr={abbr}
+      />
+
       {commentPanel}
       <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
     </div>
@@ -877,7 +1051,8 @@ export function ProjectionsTab({
 // ESTIMATED VIEW (no projections uploaded)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function EstimatedView({ model, histPL, unit, abbr, unitTicker, busy, progress, progressLabel, onGenerateNote }: {
+function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, progress, progressLabel, onGenerateNote }: {
+  caseId: string;
   model: ModelOutput;
   histPL: ExtractedRow[];
   unit: string | null;
@@ -1038,8 +1213,168 @@ function EstimatedView({ model, histPL, unit, abbr, unitTicker, busy, progress, 
         </div>
       </Panel>
 
+      <ProjectionChatPanel caseId={caseId} model={model} abbr={abbr} />
+
       <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
     </div>
+  );
+}
+
+// ─── Projection Chat Panel ────────────────────────────────────────────────────
+function ProjectionChatPanel({
+  caseId,
+  model,
+  projData,
+  riskFlags,
+  verdict,
+  abbr,
+}: {
+  caseId: string;
+  model: ModelOutput | null;
+  projData?: Array<{ fy: number; turnover: number | null; ebitda: number | null; pat: number | null; networth: number | null; totalDebt: number | null }>;
+  riskFlags?: RiskFlag[];
+  verdict?: { text: string; cls: string; note: string };
+  abbr: string;
+}) {
+  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const buildContext = () => {
+    const lines: string[] = ["=== PROJECTION ANALYSIS CONTEXT ==="];
+    if (model) {
+      lines.push(`\nAI/ML MODEL: ${METHOD_LABEL[model.method]}`);
+      lines.push(`Confidence: ${model.confidence} | Base FY: ${model.baseFY} | History: ${model.histYears} year(s)`);
+      if (model.r2 != null) lines.push(`R²: ${model.r2.toFixed(3)}${model.rmse != null ? ` | RMSE: ${model.rmse.toFixed(2)}${abbr ? ` ${abbr}` : ""}` : ""}`);
+      lines.push(`Revenue growth: ${model.avgGrowthPct.toFixed(1)}% p.a.`);
+      if (model.avgEbitdaMarginPct != null) lines.push(`EBITDA margin: ${model.avgEbitdaMarginPct.toFixed(1)}% (${model.ebitdaTrend ?? "stable"})`);
+      if (model.avgPatMarginPct != null) lines.push(`PAT margin: ${model.avgPatMarginPct.toFixed(1)}% (${model.patTrend ?? "stable"})`);
+      lines.push("\nAI Model Points:");
+      for (const p of model.points) {
+        const parts = [`FY${p.fy}:`];
+        if (p.turnover != null) parts.push(`Turnover=${p.turnover.toFixed(2)}${abbr}`);
+        if (p.ebitda != null) parts.push(`EBITDA=${p.ebitda.toFixed(2)}${abbr}`);
+        if (p.pat != null) parts.push(`PAT=${p.pat.toFixed(2)}${abbr}`);
+        if (p.upper != null && p.lower != null) parts.push(`90%CI=[${p.lower.toFixed(1)},${p.upper.toFixed(1)}]`);
+        lines.push("  " + parts.join(" | "));
+      }
+    }
+    if (projData && projData.length > 0) {
+      lines.push("\nUPLOADED MANAGEMENT PROJECTIONS:");
+      for (const d of projData) {
+        const parts = [`FY${d.fy}:`];
+        if (d.turnover != null) parts.push(`Turnover=${d.turnover.toFixed(2)}${abbr}`);
+        if (d.ebitda != null) parts.push(`EBITDA=${d.ebitda.toFixed(2)}${abbr}`);
+        if (d.pat != null) parts.push(`PAT=${d.pat.toFixed(2)}${abbr}`);
+        if (d.networth != null) parts.push(`NetWorth=${d.networth.toFixed(2)}${abbr}`);
+        if (d.totalDebt != null) parts.push(`Debt=${d.totalDebt.toFixed(2)}${abbr}`);
+        lines.push("  " + parts.join(" | "));
+      }
+      if (verdict) {
+        lines.push(`\nSanity Check: ${verdict.text}`);
+        lines.push(verdict.note);
+      }
+      if (riskFlags && riskFlags.length > 0) {
+        lines.push("\nRisk Flags:");
+        for (const f of riskFlags) lines.push(`  [${f.severity}] ${f.title}: ${f.detail}`);
+      }
+    }
+    lines.push("=== END CONTEXT ===");
+    return lines.join("\n");
+  };
+
+  const handleSend = async () => {
+    if (!input.trim() || loading) return;
+    const userMsg = { role: "user" as const, content: input.trim() };
+    const newMessages = [...messages, userMsg];
+    setMessages(newMessages);
+    setInput("");
+    setLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not authenticated");
+      const base = (import.meta as unknown as { env: { VITE_SUPABASE_URL: string } }).env.VITE_SUPABASE_URL;
+      const ctxMsg  = { role: "user" as const, content: buildContext() };
+      const ctxAck  = { role: "assistant" as const, content: "Understood. I have the full projection context. Please ask your questions." };
+      const apiMsgs = messages.length === 0
+        ? [ctxMsg, ctxAck, userMsg]
+        : [ctxMsg, ctxAck, ...newMessages];
+      const res = await fetch(`${base}/functions/v1/analyst-chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${session.access_token}` },
+        body: JSON.stringify({ case_id: caseId, page_name: "Projections", messages: apiMsgs }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { reply?: string; error?: string };
+      if (data.error) throw new Error(data.error);
+      setMessages(prev => [...prev, { role: "assistant", content: data.reply ?? "" }]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessages(prev => [...prev, { role: "assistant", content: `Error: ${msg}` }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Panel title="PROJECTION ANALYST CHAT" ticker="AI MODEL + UPLOAD COMPARISON">
+      <div className="space-y-2">
+        <div className="text-[9px] text-muted-foreground/60 pb-1 border-b border-border/30">
+          Ask questions about the AI model, uploaded projections, sanity check, or assumptions. The AI has full context of both.
+        </div>
+        <div className="h-64 overflow-y-auto space-y-2 pr-1">
+          {messages.length === 0 && (
+            <div className="text-[10px] text-muted-foreground/40 text-center pt-10">
+              Ask about growth assumptions, feasibility, risks, or compare AI model vs management projections…
+            </div>
+          )}
+          {messages.map((m, i) => (
+            <div key={i} className={`flex gap-2 ${m.role === "user" ? "flex-row-reverse" : ""}`}>
+              <div className={`text-[9px] font-bold tracking-wider min-w-[28px] pt-0.5 shrink-0 ${m.role === "user" ? "text-right text-primary" : "text-accent"}`}>
+                {m.role === "user" ? "YOU" : "AI"}
+              </div>
+              <div className={`text-[10px] leading-relaxed whitespace-pre-wrap max-w-[85%] px-2 py-1.5 border ${
+                m.role === "user"
+                  ? "border-primary/30 bg-primary/5 text-foreground"
+                  : "border-accent/20 bg-accent/5 text-foreground/90"
+              }`}>
+                {m.content}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div className="flex gap-2">
+              <div className="text-[9px] font-bold tracking-wider min-w-[28px] pt-0.5 text-accent">AI</div>
+              <div className="text-[10px] text-muted-foreground/50 border border-accent/20 bg-accent/5 px-2 py-1.5 italic">Analysing…</div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+        <div className="flex gap-2 pt-1 border-t border-border/30">
+          <input
+            type="text"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); } }}
+            placeholder="Ask about projections, assumptions, model vs uploaded…"
+            disabled={loading}
+            className="flex-1 bg-input border border-border text-foreground text-[10px] px-2 py-1.5 placeholder:text-muted-foreground/40 font-mono focus:outline-none focus:border-primary"
+          />
+          <button
+            onClick={() => void handleSend()}
+            disabled={loading || !input.trim()}
+            className="bg-primary text-primary-foreground px-3 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
+          >
+            {loading ? "…" : "SEND →"}
+          </button>
+        </div>
+      </div>
+    </Panel>
   );
 }
 

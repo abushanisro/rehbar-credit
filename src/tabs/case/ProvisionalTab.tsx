@@ -32,6 +32,7 @@ export interface ProvPeriod {
   unit: string;
   pl: LineItem[];
   bs: LineItem[];
+  cf: LineItem[];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -44,10 +45,19 @@ const PL_LABELS = [
   "Interest Expense", "Profit Before Tax", "Tax", "PAT",
 ];
 const BS_LABELS = [
-  "Net Worth", "Long Term Borrowings", "Short Term Borrowings", "Total Debt",
-  "Current Liabilities", "Total Liabilities",
+  "Share Capital", "Reserves & Surplus", "Net Worth",
+  "Long Term Borrowings", "Short Term Borrowings", "Total Debt",
+  "Trade Payables", "Other Current Liabilities", "Current Liabilities", "Total Liabilities",
   "Fixed Assets (Net)", "Inventory", "Trade Receivables",
-  "Cash & Bank", "Current Assets", "Total Assets",
+  "Cash & Bank", "Other Current Assets", "Current Assets", "Total Assets",
+];
+const CF_LABELS = [
+  "Cash from Operations",
+  "Cash from Investing",
+  "Cash from Financing",
+  "Net Change in Cash",
+  "Opening Cash",
+  "Closing Cash",
 ];
 
 const PERIOD_TYPE_META: Record<PeriodType, { label: string; defaultMonths: number }> = {
@@ -124,7 +134,7 @@ async function exportProvisionalExcel(periods: ProvPeriod[], caseCode: string) {
   const wb = XLSX.utils.book_new();
   const labels = periods.map(p => p.label);
 
-  for (const [section, sectionLabels] of [["P&L", PL_LABELS], ["Balance Sheet", BS_LABELS]] as const) {
+  for (const [section, sectionLabels] of [["P&L", PL_LABELS], ["Balance Sheet", BS_LABELS], ["Cash Flow", CF_LABELS]] as const) {
     const rows: (string | number | null)[][] = [];
     // Header row
     rows.push(["PARTICULARS", ...labels]);
@@ -137,8 +147,8 @@ async function exportProvisionalExcel(periods: ProvPeriod[], caseCode: string) {
     rows.push(["---"]);
 
     for (const label of sectionLabels) {
-      const key = section === "P&L" ? "pl" : "bs";
-      rows.push([label, ...periods.map(p => getv(p[key as "pl" | "bs"], label) ?? "")]);
+      const key: "pl" | "bs" | "cf" = section === "P&L" ? "pl" : section === "Balance Sheet" ? "bs" : "cf";
+      rows.push([label, ...periods.map(p => getv(p[key], label) ?? "")]);
     }
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -186,7 +196,7 @@ const MONTH_ABBR_MAP: Record<string, string> = {
   december: "Dec", january: "Jan", february: "Feb", march: "Mar",
 };
 
-// ── Label normalizer for monthly-tracking rows ──────────────────────────────
+// ── Label normalizers ───────────────────────────────────────────────────────
 const PL_LABEL_MAP: Array<[RegExp, string]> = [
   [/^total\s*revenue$/i,          "Turnover"],
   [/^net\s*profit$/i,             "PAT"],
@@ -209,6 +219,24 @@ function normalizePLLabel(raw: string): string | null {
     if (re.test(s)) return mapped;
   }
   if (PL_LABELS.includes(s)) return s;
+  return null;
+}
+
+const CF_LABEL_MAP: Array<[RegExp, string]> = [
+  [/net\s*cash.*(from|used).*operat/i,  "Cash from Operations"],
+  [/net\s*cash.*(from|used).*invest/i,  "Cash from Investing"],
+  [/net\s*cash.*(from|used).*financ/i,  "Cash from Financing"],
+  [/net\s*(increase|decrease|change).*cash/i, "Net Change in Cash"],
+  [/cash.*end.*previous|opening.*cash|cash.*beginning.*period/i, "Opening Cash"],
+  [/cash.*end.*year|closing.*cash/i,    "Closing Cash"],
+];
+
+function normalizeCFLabel(raw: string): string | null {
+  const s = raw.trim();
+  for (const [re, mapped] of CF_LABEL_MAP) {
+    if (re.test(s)) return mapped;
+  }
+  if (CF_LABELS.includes(s)) return s;
   return null;
 }
 
@@ -269,11 +297,12 @@ async function parseMonthlyTrackingFormat(
           unit: defaultUnit,
           pl: blank(PL_LABELS),
           bs: blank(BS_LABELS),
+          cf: blank(CF_LABELS),
         });
       }
     }
 
-    let section: "pl" | "bs" | "skip" = "skip";
+    let section: "pl" | "bs" | "cf" | "skip" = "skip";
     for (let i = headerIdx + 1; i < rows.length; i++) {
       const row      = rows[i];
       const rawLabel = String(row[0] ?? "").trim();
@@ -282,10 +311,12 @@ async function parseMonthlyTrackingFormat(
       const ll = rawLabel.toLowerCase();
       if ((ll.includes("profit") && ll.includes("loss")) || ll.includes("p&l")) { section = "pl"; continue; }
       if (ll.includes("balance sheet"))                                           { section = "bs"; continue; }
-      if (ll.includes("cashflow") || ll.includes("cash flow"))                   { section = "skip"; continue; }
+      if (ll.includes("cashflow") || ll.includes("cash flow"))                   { section = "cf"; continue; }
       if (section === "skip") continue;
 
-      const mapped = section === "pl" ? normalizePLLabel(rawLabel) : null;
+      let mapped: string | null = null;
+      if (section === "pl") mapped = normalizePLLabel(rawLabel);
+      else if (section === "cf") mapped = normalizeCFLabel(rawLabel);
       if (!mapped) continue;
 
       for (const col of cols) {
@@ -295,6 +326,238 @@ async function parseMonthlyTrackingFormat(
         if (val !== null) p[section] = setv(p[section], mapped, val);
       }
     }
+  }
+
+  return Array.from(periods.values());
+}
+
+// ── Schedule III / period-end two-column format (BS + P&L + CF in separate sheets) ─
+function parsePeriodHeader(header: string): { fiscal_year: number; months_covered: number; label: string; period_type: PeriodType } | null {
+  const MONTHS: Record<string, number> = {
+    january:1,february:2,march:3,april:4,may:5,june:6,
+    july:7,august:8,september:9,october:10,november:11,december:12,
+    jan:1,feb:2,mar:3,apr:4,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12,
+  };
+  const m = String(header).match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)[,.]?\s*(\d{4})/i);
+  if (!m) return null;
+  const monthNum = MONTHS[m[2].toLowerCase()];
+  const year = parseInt(m[3]);
+  if (!monthNum || !year) return null;
+
+  // Indian FY: Apr = month-1, Mar = month-12; FY label = year when Mar ends
+  let fiscal_year: number, months_covered: number;
+  if (monthNum >= 4) { fiscal_year = year + 1; months_covered = monthNum - 3; }
+  else               { fiscal_year = year;     months_covered = monthNum + 9; }
+
+  const fyShort = String(fiscal_year).slice(2);
+  const ABBR = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const label = months_covered >= 12 ? `FY${fiscal_year}` : `${ABBR[monthNum]} FY${fyShort}`;
+  const period_type: PeriodType =
+    months_covered >= 12 ? "annual" : months_covered === 9 ? "nine_month" :
+    months_covered === 6 ? "half_yearly" : months_covered === 3 ? "quarterly" :
+    months_covered === 1 ? "monthly" : "ytd";
+
+  return { fiscal_year, months_covered, label, period_type };
+}
+
+async function parseSchIIIFormat(buf: ArrayBuffer, existingPeriods: ProvPeriod[]): Promise<ProvPeriod[]> {
+  const XLSX = await import("xlsx");
+  const wb   = XLSX.read(buf, { type: "array", raw: false, cellText: false });
+
+  const findSheet = (...patterns: RegExp[]) =>
+    wb.SheetNames.find(n => patterns.some(p => p.test(n.trim())));
+
+  const bsSheetName = findSheet(/^bs$/i, /balance\s*sheet/i);
+  const plSheetName = findSheet(/^p\s*[&]\s*l$/i, /profit.*loss/i, /income.*statement/i);
+  const cfSheetName = findSheet(/cash\s*flow/i, /cashflow/i);
+
+  // Detect unit from any sheet header
+  let unit = "INR";
+  for (const sn of wb.SheetNames) {
+    const ws = wb.Sheets[sn]; if (!ws) continue;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" }) as string[][];
+    const found = rows.slice(0, 8).flatMap(r => r).find(c => /amount\s*in\s*(rs|lakh|crore)/i.test(String(c)));
+    if (found) {
+      const s = String(found).toLowerCase();
+      if (/lakh/i.test(s)) unit = "Lakhs";
+      else if (/crore/i.test(s)) unit = "Crores";
+      break;
+    }
+  }
+  const defaultUnit = existingPeriods[0]?.unit ?? unit;
+
+  // Shared helper: find header row (has date strings) and return { labelCol, dateCols }
+  type DateCol = { col: number; info: ReturnType<typeof parsePeriodHeader> };
+  function findDateCols(rows: string[][]): { labelCol: number; dateCols: DateCol[] } | null {
+    for (const row of rows.slice(0, 12)) {
+      const dateCols: DateCol[] = [];
+      for (let i = 0; i < row.length; i++) {
+        const cell = String(row[i]).trim();
+        // Skip cells longer than 35 chars — real date headers are ~18 chars;
+        // title sentences ("Balance Sheet as at 31st January, 2026") are 40+ chars
+        if (cell.length > 35) continue;
+        const info = parsePeriodHeader(cell);
+        if (info) dateCols.push({ col: i, info });
+      }
+      if (dateCols.length >= 1) {
+        let labelCol = 0;
+        for (let i = 0; i < (dateCols[0]?.col ?? 1); i++) {
+          if (/particulars|description|items?/i.test(String(row[i]))) { labelCol = i; break; }
+        }
+        return { labelCol, dateCols };
+      }
+    }
+    return null;
+  }
+
+  const periods: Map<string, ProvPeriod> = new Map();
+  for (const p of existingPeriods) periods.set(p.label, { ...p });
+
+  const ensurePeriod = (info: NonNullable<ReturnType<typeof parsePeriodHeader>>) => {
+    if (!periods.has(info.label)) {
+      periods.set(info.label, {
+        id: crypto.randomUUID(), label: info.label,
+        period_type: info.period_type, fiscal_year: info.fiscal_year,
+        months_covered: info.months_covered, unit: defaultUnit,
+        pl: blank(PL_LABELS), bs: blank(BS_LABELS), cf: blank(CF_LABELS),
+      });
+    }
+  };
+
+  // P&L mapping (accumulate multi-row items like Employee + Admin = Operating Expenses)
+  const SCH3_PL: Array<[RegExp, string]> = [
+    [/revenue\s*from\s*operations?/i,          "Turnover"],
+    [/cost\s*of\s*material\s*consumed/i,       "Cost of Goods Sold"],
+    [/cost\s*of\s*goods\s*sold/i,              "Cost of Goods Sold"],
+    [/purchases?\s*of\s*stock/i,               "Cost of Goods Sold"],
+    [/employee\s*benefits?/i,                  "Operating Expenses"],
+    [/staff\s*(cost|expense)/i,                "Operating Expenses"],
+    [/administrative\s*expenses?/i,            "Operating Expenses"],
+    [/other\s*expenses?/i,                     "Operating Expenses"],
+    [/selling\s*(and|&)\s*distribution/i,      "Operating Expenses"],
+    [/financial\s*cost|finance\s*cost/i,       "Interest Expense"],
+    [/depreciation\s*(and|&)\s*amortis/i,      "Depreciation"],
+    [/depreciation/i,                          "Depreciation"],
+    [/profit.*before\s*tax/i,                  "Profit Before Tax"],
+    [/\bcurrent\s*tax\b/i,                     "Tax"],
+    [/profit.*(?:for|after).*(?:tax|year)/i,   "PAT"],
+  ];
+
+  // BS mapping
+  const SCH3_BS: Array<[RegExp, string]> = [
+    [/share\s*capital/i,                       "Share Capital"],
+    [/reserves?\s*(?:and|&)\s*surplus/i,       "Reserves & Surplus"],
+    [/long.?term\s*borrowings?/i,              "Long Term Borrowings"],
+    [/other\s*long.?term\s*liabilit/i,         "Long Term Borrowings"],
+    [/short.?term\s*borrowings?/i,             "Short Term Borrowings"],
+    [/trade\s*payables?/i,                     "Trade Payables"],
+    [/short.?term\s*provisions?/i,             "Other Current Liabilities"],
+    [/other\s*current\s*liabilit/i,            "Other Current Liabilities"],
+    [/property.*plant|tangible\s*assets?/i,   "Fixed Assets (Net)"],
+    [/intangible\s*assets?/i,                  "Fixed Assets (Net)"],
+    [/capital\s*work.*progress/i,              "Fixed Assets (Net)"],
+    [/inventori|stock.in.trade/i,              "Inventory"],
+    [/trade\s*receivables?/i,                  "Trade Receivables"],
+    [/cash\s*(and|&)\s*cash\s*equiv/i,         "Cash & Bank"],
+    [/other\s*current\s*assets?/i,             "Other Current Assets"],
+    [/long.?term\s*loans?\s*(and|&)\s*advances?/i, "Other Current Assets"],
+  ];
+
+  // CF mapping
+  const SCH3_CF: Array<[RegExp, string]> = [
+    [/net\s*cash.*(from|used\s*in).*operat/i, "Cash from Operations"],
+    [/net\s*cash.*(from|used\s*in).*invest/i, "Cash from Investing"],
+    [/net\s*cash.*(from|used\s*in).*financ/i, "Cash from Financing"],
+    [/net\s*(increase|decrease|change).*cash/i, "Net Change in Cash"],
+    [/cash.*end.*previous|opening.*cash|cash.*begin/i, "Opening Cash"],
+    [/cash.*end.*year|closing.*cash/i,        "Closing Cash"],
+  ];
+
+  const mapLabel = (map: Array<[RegExp, string]>, raw: string): string | null => {
+    const s = raw.replace(/^\s*\([a-z0-9ivx]+\)\s*/i, "").trim(); // strip "(a)", "(i)", etc.
+    for (const [re, std] of map) if (re.test(s)) return std;
+    return null;
+  };
+
+  const accumulate = (p: ProvPeriod, section: "pl" | "bs" | "cf", std: string, val: number) => {
+    const cur = getv(p[section], std) ?? 0;
+    p[section] = setv(p[section], std, cur + val);
+  };
+
+  // Parse each financial sheet
+  const sheetDefs: Array<{ name: string | undefined; map: Array<[RegExp, string]>; section: "pl" | "bs" | "cf"; labelColOffset?: number }> = [
+    { name: plSheetName, map: SCH3_PL, section: "pl" },
+    { name: bsSheetName, map: SCH3_BS, section: "bs" },
+    { name: cfSheetName, map: SCH3_CF, section: "cf" },
+  ];
+
+  for (const { name, map, section } of sheetDefs) {
+    if (!name) continue;
+    const ws = wb.Sheets[name]; if (!ws) continue;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "", raw: false }) as string[][];
+
+    const found = findDateCols(rows);
+    if (!found || found.dateCols.length === 0) continue;
+    const { labelCol, dateCols } = found;
+
+    for (const { info } of dateCols) if (info) ensurePeriod(info);
+
+    // Skip non-data rows (header rows, subtotal rows that say "Total" alone, zero rows)
+    const skipPattern = /^(total|sub.?total|less|add|particulars|note|items?)$/i;
+
+    for (const row of rows) {
+      // label is at labelCol; for CF, col 0 may hold a section letter (A–F) — use col 1 instead
+      const lbl0 = String(row[labelCol] ?? "").trim();
+      const rawLabel = (!lbl0 || (section === "cf" && /^[A-F]$/.test(lbl0)))
+        ? (section === "cf" ? String(row[1] ?? "").trim() : "")
+        : lbl0;
+      if (!rawLabel || skipPattern.test(rawLabel)) continue;
+
+      const std = mapLabel(map, rawLabel);
+      if (!std) continue;
+
+      for (const { col, info } of dateCols) {
+        if (!info) continue;
+        const p = periods.get(info.label);
+        if (!p) continue;
+        const val = parseIndianNumber(row[col]);
+        if (val !== null && val !== 0) accumulate(p, section, std, val);
+      }
+    }
+  }
+
+  // Post-process: derive computed fields for each period
+  for (const p of periods.values()) {
+    const gv = (sec: "pl" | "bs", lbl: string) => getv(p[sec], lbl) ?? 0;
+
+    // P&L derived
+    const gp    = gv("pl", "Turnover") - gv("pl", "Cost of Goods Sold");
+    const ebitda = gp - gv("pl", "Operating Expenses");
+    const ebit   = ebitda - gv("pl", "Depreciation");
+    if (gv("pl", "Gross Profit") === 0 && gp !== 0)    p.pl = setv(p.pl, "Gross Profit",    gp);
+    if (gv("pl", "EBITDA")       === 0 && ebitda !== 0) p.pl = setv(p.pl, "EBITDA",          ebitda);
+    if (gv("pl", "EBIT")         === 0 && ebit !== 0)   p.pl = setv(p.pl, "EBIT",            ebit);
+
+    // BS derived
+    const nw    = gv("bs", "Share Capital") + gv("bs", "Reserves & Surplus");
+    const td    = gv("bs", "Long Term Borrowings") + gv("bs", "Short Term Borrowings");
+    const cl    = gv("bs", "Trade Payables") + gv("bs", "Other Current Liabilities") + gv("bs", "Short Term Borrowings");
+    const ca    = gv("bs", "Inventory") + gv("bs", "Trade Receivables") + gv("bs", "Cash & Bank") + gv("bs", "Other Current Assets");
+    const fa    = gv("bs", "Fixed Assets (Net)");
+    const ta    = fa + ca;
+    if (gv("bs", "Net Worth")          === 0 && nw  !== 0) p.bs = setv(p.bs, "Net Worth",          nw);
+    if (gv("bs", "Total Debt")         === 0 && td  !== 0) p.bs = setv(p.bs, "Total Debt",         td);
+    if (gv("bs", "Current Liabilities") === 0 && cl !== 0) p.bs = setv(p.bs, "Current Liabilities", cl);
+    if (gv("bs", "Current Assets")     === 0 && ca  !== 0) p.bs = setv(p.bs, "Current Assets",     ca);
+    if (gv("bs", "Total Assets")       === 0 && ta  !== 0) p.bs = setv(p.bs, "Total Assets",       ta);
+    if (gv("bs", "Total Liabilities")  === 0 && ta  !== 0) p.bs = setv(p.bs, "Total Liabilities",  ta);
+
+    // CF: Net Change, Opening → Closing
+    const cfOps  = gv("cf", "Cash from Operations");
+    const cfInv  = gv("cf", "Cash from Investing");
+    const cfFin  = gv("cf", "Cash from Financing");
+    const netChg = cfOps + cfInv + cfFin;
+    if (gv("cf", "Net Change in Cash") === 0 && netChg !== 0) p.cf = setv(p.cf, "Net Change in Cash", netChg);
   }
 
   return Array.from(periods.values());
@@ -316,6 +579,18 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
     }
   }
 
+  // Detect Sch III format: has separate BS / P&L / Cashflow sheets with date-header columns
+  const hasSchIIISheets = wb.SheetNames.some(n => /^bs$/i.test(n.trim()) || /balance\s*sheet/i.test(n)) &&
+    (wb.SheetNames.some(n => /p\s*[&]\s*l|profit.*loss/i.test(n)) || wb.SheetNames.some(n => /cash\s*flow/i.test(n)));
+  const hasDateHeader = !hasSchIIISheets && wb.SheetNames.some(sn => {
+    const ws = wb.Sheets[sn]; if (!ws) return false;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" }) as string[][];
+    return rows.slice(0, 12).some(r => r.some(c => /\d+\s*(?:st|nd|rd|th)?\s+[a-z]+\s+\d{4}/i.test(String(c))));
+  });
+  if (hasSchIIISheets || hasDateHeader) {
+    return parseSchIIIFormat(buf, existingPeriods);
+  }
+
   // ── PARTICULARS / round-trip template format ────────────────────────────
   const periods: Map<string, ProvPeriod> = new Map();
   for (const p of existingPeriods) periods.set(p.label, { ...p });
@@ -328,8 +603,9 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
 
     const isBS  = sheetName.toLowerCase().includes("balance") || sheetName.toLowerCase().includes("bs");
     const isPL  = sheetName.toLowerCase().includes("p&l") || sheetName.toLowerCase().includes("profit") || sheetName.toLowerCase().includes("pl");
-    if (!isBS && !isPL) continue;
-    const section: "pl" | "bs" = isBS ? "bs" : "pl";
+    const isCF  = sheetName.toLowerCase().includes("cash");
+    if (!isBS && !isPL && !isCF) continue;
+    const section: "pl" | "bs" | "cf" = isBS ? "bs" : isCF ? "cf" : "pl";
 
     let headerIdx = rows.findIndex(r => String(r[0] ?? "").toUpperCase().includes("PARTICULARS"));
     if (headerIdx === -1) headerIdx = 0;
@@ -360,7 +636,7 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
           fiscal_year: metaFY[c] ?? fy,
           months_covered: metaMonths[c] ?? 3,
           unit: metaUnit[c] ?? "Lakhs",
-          pl: blank(PL_LABELS), bs: blank(BS_LABELS),
+          pl: blank(PL_LABELS), bs: blank(BS_LABELS), cf: blank(CF_LABELS),
         });
       }
     }
@@ -412,7 +688,7 @@ function AddPeriodForm({ onAdd, onCancel, existingPeriods }: {
     onAdd({
       id: crypto.randomUUID(), label,
       period_type: type, fiscal_year: fy, months_covered: mc, unit,
-      pl: blank(PL_LABELS), bs: blank(BS_LABELS),
+      pl: blank(PL_LABELS), bs: blank(BS_LABELS), cf: blank(CF_LABELS),
     });
   };
 
@@ -620,7 +896,9 @@ export function ProvisionalTab({
   extracted: ExtractedRow[];
   onSave: (periods: ProvPeriod[]) => Promise<void>;
 }) {
-  const [periods,    setPeriods]  = useState<ProvPeriod[]>(initialPeriods);
+  const [periods,    setPeriods]  = useState<ProvPeriod[]>(
+    initialPeriods.map(p => ({ ...p, cf: p.cf ?? blank(CF_LABELS) }))
+  );
   const [adding,     setAdding]   = useState(false);
   const [saving,     setSaving]   = useState(false);
   const [saved,      setSaved]    = useState(false);
@@ -694,7 +972,7 @@ export function ProvisionalTab({
     }
   };
 
-  const handleExport = () => exportProvisionalExcel(sorted, cc.case_code);
+  const handleExport = () => exportProvisionalExcel(viewPeriods, `${cc.case_code}_FY${activeFY ?? ""}`);
 
   // ── KPI source: prefer the annual summary period; fall back to latest partial ─
   const annualPeriod  = viewPeriods.find(p => p.months_covered >= 12);
@@ -718,7 +996,7 @@ export function ProvisionalTab({
     <div className="space-y-3">
 
       {/* ── Toolbar ─────────────────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 sticky top-[168px] z-20 bg-background -mx-3 px-3 pt-1 pb-2 border-b border-border/30">
         <input ref={fileRef} type="file" accept=".xlsx,.xls" className="hidden"
           onChange={e => { const f = e.target.files?.[0]; if (f) handleImport(f); e.target.value = ""; }} />
 
@@ -813,10 +1091,11 @@ export function ProvisionalTab({
       {/* ── Year-over-year comparison (only when multiple FYs loaded) ──────────── */}
       {fyList.length >= 2 && (
         <Panel title="YEAR-OVER-YEAR COMPARISON" ticker="ANNUAL TOTALS">
-          <table className="text-xs w-full">
+          <div className="overflow-x-auto">
+          <table className="text-xs w-full min-w-max">
             <thead className="text-muted-foreground border-b border-border">
               <tr>
-                <th className="text-left py-1 min-w-[140px]">METRIC</th>
+                <th className="text-left py-1 min-w-[180px]">METRIC</th>
                 {fyList.map(fy => (
                   <th key={fy} className="text-right pr-3 min-w-[110px]">FY{fy}</th>
                 ))}
@@ -824,31 +1103,39 @@ export function ProvisionalTab({
               </tr>
             </thead>
             <tbody>
+              {/* P&L metrics */}
+              <tr className="border-t border-border/60 bg-surface">
+                <td colSpan={fyList.length + 2} className="py-1 pl-1 text-[9px] font-bold tracking-widest text-primary/60">PROFIT & LOSS</td>
+              </tr>
               {(["Turnover", "EBITDA", "PAT"] as const).map(label => {
                 const vals = fyList.map(fy => {
                   const ann = fyGroups[fy]?.find(p => p.months_covered >= 12);
-                  return ann ? getv(ann.pl, label) : null;
+                  // For partial year, annualize
+                  const latest = fyGroups[fy]?.slice().reverse().find(p => p.months_covered < 12);
+                  const src = ann ?? latest;
+                  if (!src) return null;
+                  const v = getv(src.pl, label);
+                  return src.months_covered >= 12 ? v : (v != null ? (v / src.months_covered) * 12 : null);
                 });
                 const prevVal = vals[vals.length - 2];
                 const curVal  = vals[vals.length - 1];
-                const gl      = growthLabel(curVal, prevVal);
                 return (
                   <tr key={label} className="border-b border-border/20">
                     <td className="py-1.5 font-medium">{label}</td>
                     {vals.map((v, i) => (
                       <td key={i} className="text-right pr-3 tabular-nums">{fmtN(v)}</td>
                     ))}
-                    <td className={`text-right pr-2 tabular-nums font-bold ${growthCls(curVal != null && prevVal != null ? curVal - prevVal : null)}`}>{gl}</td>
+                    <td className={`text-right pr-2 tabular-nums font-bold ${growthCls(curVal != null && prevVal != null ? curVal - prevVal : null)}`}>{growthLabel(curVal, prevVal)}</td>
                   </tr>
                 );
               })}
               {(["EBITDA", "PAT"] as const).map(label => {
-                // Margin %
                 const margins = fyList.map(fy => {
                   const ann = fyGroups[fy]?.find(p => p.months_covered >= 12);
-                  if (!ann) return null;
-                  const v  = getv(ann.pl, label);
-                  const t  = getv(ann.pl, "Turnover");
+                  const latest = fyGroups[fy]?.slice().reverse().find(p => p.months_covered < 12);
+                  const src = ann ?? latest;
+                  if (!src) return null;
+                  const v = getv(src.pl, label); const t = getv(src.pl, "Turnover");
                   return v != null && t ? (v / t) * 100 : null;
                 });
                 return (
@@ -861,8 +1148,30 @@ export function ProvisionalTab({
                   </tr>
                 );
               })}
+              {/* Cash flow metrics */}
+              {fyList.some(fy => fyGroups[fy]?.some(p => (getv(p.cf ?? [], "Cash from Operations") ?? 0) !== 0)) && (<>
+                <tr className="border-t border-border/60 bg-surface">
+                  <td colSpan={fyList.length + 2} className="py-1 pl-1 text-[9px] font-bold tracking-widest text-accent/60">CASH FLOW</td>
+                </tr>
+                {(["Cash from Operations", "Cash from Investing", "Cash from Financing"] as const).map(label => {
+                  const vals = fyList.map(fy => {
+                    const ann = fyGroups[fy]?.find(p => p.months_covered >= 12);
+                    const latest = fyGroups[fy]?.slice().reverse()[0];
+                    return getv((ann ?? latest)?.cf ?? [], label);
+                  });
+                  const prevVal = vals[vals.length - 2]; const curVal = vals[vals.length - 1];
+                  return (
+                    <tr key={label} className="border-b border-border/20">
+                      <td className="py-1.5 font-medium">{label}</td>
+                      {vals.map((v, i) => <td key={i} className="text-right pr-3 tabular-nums">{fmtN(v)}</td>)}
+                      <td className={`text-right pr-2 tabular-nums font-bold ${growthCls(curVal != null && prevVal != null ? curVal - prevVal : null)}`}>{growthLabel(curVal, prevVal)}</td>
+                    </tr>
+                  );
+                })}
+              </>)}
             </tbody>
           </table>
+          </div>
         </Panel>
       )}
 
@@ -881,11 +1190,11 @@ export function ProvisionalTab({
           )}
         </Panel>
       ) : (
-        <Panel title="NO PROVISIONAL DATA" ticker="MONTHLY / QUARTERLY">
+        <Panel title="NO PROVISIONAL DATA" ticker="MONTHLY / QUARTERLY / SCH III">
           <div className="text-muted-foreground text-xs space-y-1 leading-relaxed">
-            <p>Add provisional periods (monthly, quarterly, half-year, YTD) to track in-period performance.</p>
-            <p>Import from Excel — filename must include "FY24-25" or similar so the fiscal year is auto-detected.</p>
-            <p>Import multiple years to compare them side by side using the year tabs above.</p>
+            <p>Add provisional periods or import Excel.</p>
+            <p>Supports: Monthly MIS tracking · Sch III (BS + P&L + Cashflow sheets) · Round-trip template</p>
+            <p>Sch III: workbook must have sheets named BS/Balance Sheet, P &amp; L/Profit Loss, and Cashflow — dates auto-detected from column headers like "31st January 2026".</p>
           </div>
         </Panel>
       )}
@@ -911,14 +1220,27 @@ export function ProvisionalTab({
         </Panel>
       )}
 
+      {/* ── Cash Flow Table ───────────────────────────────────────────────────── */}
+      {viewPeriods.length > 0 && viewPeriods.some(p => (p.cf ?? []).some(i => i.value != null)) && (
+        <Panel
+          title={`PROVISIONAL CASH FLOW${activeFY ? ` · FY${activeFY}` : ""}`}
+          ticker="CLICK CELL TO EDIT"
+        >
+          <FinTable
+            section="cf" periods={viewPeriods} labels={CF_LABELS}
+            showAnnualized={false} auditedItems={null}
+            onEdit={handleEdit}
+          />
+        </Panel>
+      )}
+
       {/* ── Period-over-period growth ─────────────────────────────────────────── */}
-      {sorted.length >= 2 && (() => {
-        // Only compare like-for-like periods (monthly vs monthly, etc.)
-        // Exclude the annual summary from the sequential MoM chain
-        const growthPeriods = sorted.filter(p => p.months_covered < 12);
+      {viewPeriods.length >= 2 && (() => {
+        // Only compare monthly periods — exclude the annual summary column
+        const growthPeriods = viewPeriods.filter(p => p.months_covered < 12);
         if (growthPeriods.length < 2) return null;
         return (
-          <Panel title="MONTH-OVER-MONTH GROWTH" ticker="MoM TREND">
+          <Panel title={`MONTH-OVER-MONTH GROWTH${activeFY ? ` · FY${activeFY}` : ""}`} ticker="MoM TREND">
             <div className="overflow-x-auto">
               <table className="w-full text-xs min-w-max">
                 <thead className="text-muted-foreground border-b border-border">

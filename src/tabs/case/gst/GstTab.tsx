@@ -294,10 +294,9 @@ export function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }
   const handleAccumnImport = async (file: File) => {
     const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
     if (ext !== "pdf") { toast.error("Accumn import only accepts PDF files"); return; }
-    setAccumnBusy(true); setAccumnProgress(5); setAccumnLabel("Reading PDF text…");
+    setAccumnBusy(true); setAccumnProgress(5); setAccumnLabel("Uploading…");
     try {
-      const pdfText = await extractPdfText(file);
-      setAccumnProgress(20); setAccumnLabel("Uploading…");
+      setAccumnProgress(10); setAccumnLabel("Uploading…");
 
       const path = `${user.id}/${cc.id}/accumn-${Date.now()}-${file.name}`;
       const { data: { session } } = await supabase.auth.getSession();
@@ -323,22 +322,44 @@ export function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }
       if (dErr || !doc) throw new Error(dErr?.message ?? "Register failed");
 
       setAccumnProgress(60); setAccumnLabel("Extracting with AI…");
-      const tick = setInterval(() => setAccumnProgress(p => p < 94 ? p + 1 : p), 800);
       const { data: { session: s2 } } = await supabase.auth.getSession();
       const authH = { "Content-Type": "application/json", "Authorization": `Bearer ${s2?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
       const base = import.meta.env.VITE_SUPABASE_URL;
 
+      // Edge function returns 200 immediately; background job does the OCR + AI work
       const res = await fetch(`${base}/functions/v1/extract-gst-accumn`, {
         method: "POST", headers: authH,
-        body: JSON.stringify({ case_id: cc.id, document_id: doc.id, pdf_text: pdfText }),
+        body: JSON.stringify({ case_id: cc.id, document_id: doc.id }),
       });
-      clearInterval(tick);
-
       const result = await res.json().catch(() => ({})) as Record<string, unknown>;
+      if (!res.ok) throw new Error((result.error as string) ?? `HTTP ${res.status}`);
+
+      // Poll extraction_status until background job completes
+      setAccumnLabel("Processing with AI…");
+      const startedAt = Date.now();
+      const MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes
+      let finalStatus = "running";
+      let finalError: string | null = null;
+      while (Date.now() - startedAt < MAX_WAIT_MS) {
+        await new Promise(r => setTimeout(r, 3000));
+        const { data: statusRow } = await supabase
+          .from("financial_documents")
+          .select("extraction_status, extraction_error")
+          .eq("id", doc.id)
+          .single();
+        finalStatus = (statusRow as { extraction_status?: string } | null)?.extraction_status ?? "running";
+        finalError  = (statusRow as { extraction_error?: string | null } | null)?.extraction_error ?? null;
+        // Advance progress bar while waiting (60 → 94)
+        setAccumnProgress(p => p < 94 ? p + 2 : p);
+        if (finalStatus === "extracted" || finalStatus === "failed") break;
+      }
+
       setAccumnProgress(100); setAccumnLabel("Done");
 
-      if (!res.ok) throw new Error((result.error as string) ?? `HTTP ${res.status}`);
-      if (!result.is_accumn) {
+      if (finalStatus === "failed") {
+        throw new Error(finalError ?? "Extraction failed");
+      }
+      if (finalError === "NOT_ACCUMN") {
         toast.warning("This PDF was not recognised as an Accumn GST analytical report");
       } else {
         toast.success("Accumn GST report extracted successfully");

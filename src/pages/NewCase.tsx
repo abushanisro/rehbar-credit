@@ -47,6 +47,8 @@ type FormState = {
   collateral_summary: string;
   promoter_details: string;
   website: string;
+  has_partner: boolean;
+  partner_company_name: string;
 };
 
 type FileQueueItem = {
@@ -133,6 +135,8 @@ export default function NewCase() {
     collateral_summary: "",
     promoter_details: "",
     website: "",
+    has_partner: false,
+    partner_company_name: "",
   });
 
   const [scanning, setScanning] = useState(false);
@@ -154,8 +158,7 @@ export default function NewCase() {
   // ── Company search ────────────────────────────────────────────────────────
   const searchCompanies = useCallback(async (q: string) => {
     if (q.length < 2) { setCompanySuggestions([]); setShowSuggestions(false); return; }
-    const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
-    const { data } = await db.from("companies")
+    const { data } = await supabase.from("companies")
       .select("id,name,legal_constitution,industry,year_established,gstin,website,promoter_details")
       .ilike("name", `%${q}%`)
       .limit(6);
@@ -429,8 +432,7 @@ export default function NewCase() {
   // ── helpers to save MCA data to a company record ─────────────────────────
   const saveMcaToCompany = async (companyId: string) => {
     if (!mcaProfile) return;
-    const db = supabase as any;
-    await db.from("companies").update({
+    await supabase.from("companies").update({
       mca_cin: mcaProfile.cin ?? null,
       mca_pan: mcaProfile.pan ?? null,
       mca_lei: mcaProfile.lei ?? null,
@@ -452,8 +454,8 @@ export default function NewCase() {
     }).eq("id", companyId);
 
     if (mcaProfile.directors.length > 0) {
-      await db.from("company_directors").delete().eq("company_id", companyId);
-      await db.from("company_directors").insert(
+      await supabase.from("company_directors").delete().eq("company_id", companyId);
+      await supabase.from("company_directors").insert(
         mcaProfile.directors.map((d: import("@/lib/mca-parser").Director) => ({ ...d, company_id: companyId }))
       );
     }
@@ -472,8 +474,7 @@ export default function NewCase() {
     // If MCA data imported but no company selected, auto-create a company
     let companyId = selectedCompanyId || null;
     if (mcaProfile && !companyId && form.client_name.trim()) {
-      const db = supabase as any;
-      const { data: newCo, error: coErr } = await db.from("companies").insert({
+      const { data: newCo, error: coErr } = await supabase.from("companies").insert({
         name: form.client_name.trim(),
         legal_constitution: form.legal_constitution || null,
         industry: resolvedIndustry || null,
@@ -485,7 +486,7 @@ export default function NewCase() {
       if (!coErr && newCo?.id) companyId = newCo.id;
     }
 
-    const { data, error } = await (supabase.from("credit_cases") as any).insert({
+    const { data, error } = await supabase.from("credit_cases").insert({
       user_id: user.id,
       case_code: code,
       client_name: form.client_name,
@@ -505,6 +506,12 @@ export default function NewCase() {
       website: form.website || null,
       delivery_email: user.email ?? "",
       status: "draft",
+      ...(form.has_partner ? {
+        ic_note: {
+          has_partner: true,
+          partner_company_name: form.partner_company_name.trim() || null,
+        },
+      } : {}),
     }).select().single();
 
     setSubmitting(false);
@@ -719,6 +726,34 @@ export default function NewCase() {
             <div>
               <label className={labelCls}>Collateral Summary</label>
               <textarea className={inputCls} rows={2} value={form.collateral_summary} onChange={set("collateral_summary")} />
+            </div>
+
+            {/* Partner Company Toggle */}
+            <div className="border border-border bg-surface/40 px-3 py-2.5 space-y-2">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, has_partner: !f.has_partner, partner_company_name: f.has_partner ? "" : f.partner_company_name }))}
+                  className={`w-10 h-5 rounded-full transition-colors relative flex-shrink-0 ${form.has_partner ? "bg-primary" : "bg-border"}`}
+                >
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${form.has_partner ? "left-[22px]" : "left-0.5"}`} />
+                </button>
+                <span className="text-xs tracking-widest font-bold text-foreground/80">DOES THIS DEAL INVOLVE A PARTNER / GROUP COMPANY?</span>
+              </div>
+              {form.has_partner && (
+                <div>
+                  <label className={labelCls}>Partner Company Name</label>
+                  <input
+                    className={inputCls}
+                    placeholder="e.g. ABC Holdings Pvt Ltd"
+                    value={form.partner_company_name}
+                    onChange={set("partner_company_name")}
+                  />
+                  <p className="text-[10px] text-muted-foreground mt-1 tracking-wide">
+                    Partner financials can be entered in the REVIEW tab after case creation.
+                  </p>
+                </div>
+              )}
             </div>
 
             <button

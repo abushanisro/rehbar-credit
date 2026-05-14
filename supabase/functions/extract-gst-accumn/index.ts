@@ -1,64 +1,60 @@
 /**
  * Rehbar — Accumn GST Analytical Report Extraction
- * Detects and extracts all sections from Accumn-format GST advisory reports.
- * Stores structured JSON in gst_accumn_reports table (one per case, upsert).
+ * Returns 200 immediately; processes via EdgeRuntime.waitUntil (no HTTP timeout).
+ * Client polls financial_documents.extraction_status for completion.
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { callAI, type FileContent } from "../_shared/ai-caller.ts";
 
 declare const Deno: { env: { get(k: string): string | undefined } };
+declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void };
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
-
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...CORS, "content-type": "application/json" } });
 
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+// ── Background extraction ─────────────────────────────────────────────────────
 
+async function runExtraction(
+  case_id: string,
+  document_id: string,
+  user_id: string,
+  file_path: string,
+  admin: SupabaseClient,
+): Promise<void> {
   try {
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return json({ error: "Unauthorized" }, 401);
+    const MISTRAL_KEY = Deno.env.get("MISTRAL_API_KEY");
+    if (!MISTRAL_KEY) throw new Error("MISTRAL_API_KEY secret not set");
 
-    const body = await req.json() as { case_id: string; document_id: string; pdf_text?: string };
-    const { case_id, document_id, pdf_text } = body;
-    if (!case_id || !document_id) return json({ error: "Missing fields" }, 400);
+    // Signed URL — Mistral downloads the PDF directly (no base64 overhead)
+    const { data: signed } = await admin.storage.from("case-files").createSignedUrl(file_path, 600);
+    if (!signed?.signedUrl) throw new Error("Could not create signed URL for PDF");
 
-    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const userClient = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } },
-    );
-    const { data: { user } } = await userClient.auth.getUser();
-    if (!user) return json({ error: "Unauthorized" }, 401);
-
-    const { data: doc } = await admin.from("financial_documents").select("*").eq("id", document_id).single();
-    if (!doc) return json({ error: "Document not found" }, 404);
-
-    // Only process PDFs
-    if (doc.file_type !== "pdf") return json({ ok: true, is_accumn: false });
-
-    // Build file content: prefer client-supplied text (faster, more reliable) over PDF vision
-    let files: FileContent[];
-    if (pdf_text && pdf_text.length > 200) {
-      // Cap at ~60 000 chars — Accumn reports are structured; the key data is in the first portion
-      files = [{ type: "text", text: pdf_text.slice(0, 60_000) }];
-    } else {
-      // Fallback: download PDF from storage and pass as vision
-      const { data: file } = await admin.storage.from("case-files").download(doc.file_path);
-      if (!file) throw new Error("File download failed");
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      let b64 = ""; const cs = 0x8000;
-      for (let i = 0; i < bytes.length; i += cs)
-        b64 += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + cs)));
-      files = [{ type: "pdf", base64: btoa(b64) }];
+    // Step 1: OCR (no AbortSignal — background task can take as long as needed)
+    const ocrRes = await fetch("https://api.mistral.ai/v1/ocr", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${MISTRAL_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model:    "mistral-ocr-latest",
+        document: { type: "document_url", document_url: signed.signedUrl },
+      }),
+    });
+    if (!ocrRes.ok) {
+      const err = await ocrRes.text();
+      throw new Error(`Mistral OCR ${ocrRes.status}: ${err.slice(0, 300)}`);
     }
+    const ocrJson = await ocrRes.json();
+    const ocrText = ((ocrJson.pages ?? []) as { markdown?: string }[])
+      .map((p: { markdown?: string }) => p.markdown ?? "").join("\n\n").slice(0, 120_000);
+    if (!ocrText.trim()) throw new Error("Mistral OCR returned empty text");
+
+    // Step 2: Structured extraction from the OCR text
+    const files: FileContent[] = [{ type: "text", text: ocrText }];
 
     const args = await callAI({
       systemPrompt: `You are an expert at parsing Accumn GST Advisory Reports — structured analytical reports generated by the Accumn platform for Indian businesses. These reports contain multiple labelled sections: Flags/Alerts, Company Profile, Sales Summary by FY, Customer/Supplier Concentration tables, Geography breakup (state-wise), B2B Analysis, Product/HSN concentration, Tax Details, and GSTR-1 vs GSTR-3B vs GSTR-9 comparison.
@@ -94,7 +90,6 @@ EXTRACTION RULES:
         },
         company_profile: {
           type: "object",
-          description: "Company and GSTIN details from the report header",
           properties: {
             name:              { type: "string" },
             gstin:             { type: "string" },
@@ -109,18 +104,17 @@ EXTRACTION RULES:
         },
         sales_summary: {
           type: "array",
-          description: "FY-wise sales summary (FY 2021-22, FY 2022-23, FY 2023-24, TTM etc.)",
           items: {
             type: "object",
             properties: {
-              period:            { type: "string" },
-              adjusted_revenue:  { type: ["number", "null"] },
-              net_revenue:       { type: ["number", "null"] },
-              sales_return_pct:  { type: ["number", "null"] },
-              advance_pct:       { type: ["number", "null"] },
-              gross_margin_pct:  { type: ["number", "null"] },
-              ebitda_pct:        { type: ["number", "null"] },
-              pat_pct:           { type: ["number", "null"] },
+              period:           { type: "string" },
+              adjusted_revenue: { type: ["number", "null"] },
+              net_revenue:      { type: ["number", "null"] },
+              sales_return_pct: { type: ["number", "null"] },
+              advance_pct:      { type: ["number", "null"] },
+              gross_margin_pct: { type: ["number", "null"] },
+              ebitda_pct:       { type: ["number", "null"] },
+              pat_pct:          { type: ["number", "null"] },
             },
             required: ["period"],
             additionalProperties: false,
@@ -128,7 +122,6 @@ EXTRACTION RULES:
         },
         customer_categories: {
           type: "array",
-          description: "B2B/B2C/Export category breakup by period",
           items: {
             type: "object",
             properties: {
@@ -146,7 +139,6 @@ EXTRACTION RULES:
         },
         geography: {
           type: "array",
-          description: "State-wise sales breakup (all states, all periods)",
           items: {
             type: "object",
             properties: {
@@ -161,7 +153,6 @@ EXTRACTION RULES:
         },
         customer_concentration: {
           type: "array",
-          description: "Top customers by period (all FYs)",
           items: {
             type: "object",
             properties: {
@@ -178,7 +169,6 @@ EXTRACTION RULES:
         },
         supplier_concentration: {
           type: "array",
-          description: "Top suppliers/vendors by period (all FYs)",
           items: {
             type: "object",
             properties: {
@@ -195,7 +185,6 @@ EXTRACTION RULES:
         },
         product_concentration: {
           type: "array",
-          description: "Product/HSN-wise sales by period",
           items: {
             type: "object",
             properties: {
@@ -212,7 +201,6 @@ EXTRACTION RULES:
         },
         tax_details: {
           type: "array",
-          description: "Tax payment and ITC details by period",
           items: {
             type: "object",
             properties: {
@@ -231,17 +219,16 @@ EXTRACTION RULES:
         },
         gstr_comparison: {
           type: "array",
-          description: "GSTR-1 vs GSTR-3B vs GSTR-9 reconciliation by period",
           items: {
             type: "object",
             properties: {
-              period:           { type: "string" },
-              gstr1_turnover:   { type: ["number", "null"] },
-              gstr3b_turnover:  { type: ["number", "null"] },
-              gstr9_turnover:   { type: ["number", "null"] },
-              gstr1_tax:        { type: ["number", "null"] },
-              gstr3b_tax:       { type: ["number", "null"] },
-              difference:       { type: ["number", "null"] },
+              period:          { type: "string" },
+              gstr1_turnover:  { type: ["number", "null"] },
+              gstr3b_turnover: { type: ["number", "null"] },
+              gstr9_turnover:  { type: ["number", "null"] },
+              gstr1_tax:       { type: ["number", "null"] },
+              gstr3b_tax:      { type: ["number", "null"] },
+              difference:      { type: ["number", "null"] },
             },
             required: ["period"],
             additionalProperties: false,
@@ -249,15 +236,14 @@ EXTRACTION RULES:
         },
         circular_transactions: {
           type: "array",
-          description: "Entities flagged for potential circular transactions",
           items: {
             type: "object",
             properties: {
-              entity:           { type: "string" },
-              gstin:            { type: "string" },
-              sale_amount:      { type: ["number", "null"] },
-              purchase_amount:  { type: ["number", "null"] },
-              note:             { type: "string" },
+              entity:          { type: "string" },
+              gstin:           { type: "string" },
+              sale_amount:     { type: ["number", "null"] },
+              purchase_amount: { type: ["number", "null"] },
+              note:            { type: "string" },
             },
             required: ["entity"],
             additionalProperties: false,
@@ -265,29 +251,79 @@ EXTRACTION RULES:
         },
       },
       toolRequired: ["is_accumn"],
-      maxTokens: 16000,
-      retries: 0,
-      timeoutMs: 130_000,
+      maxTokens: 8192,
+      retries: 1,
+      timeoutMs: 90_000,
     });
 
     if (!args.is_accumn) {
-      return json({ ok: true, is_accumn: false });
+      // Not Accumn — mark as extracted but flag it
+      await admin.from("financial_documents")
+        .update({ extraction_status: "extracted", extraction_error: "NOT_ACCUMN" })
+        .eq("id", document_id);
+      return;
     }
 
-    // Upsert — one record per case, latest extraction wins
-    const { error: upsertErr } = await (admin as unknown as { from: (t: string) => { upsert: (d: unknown, o: unknown) => Promise<{ error: unknown }> } })
-      .from("gst_accumn_reports")
-      .upsert({
-        case_id,
-        document_id,
-        user_id: user.id,
-        report_data: args,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "case_id" });
-
+    // Upsert report data
+    const { error: upsertErr } = await (admin as unknown as {
+      from: (t: string) => { upsert: (d: unknown, o: unknown) => Promise<{ error: unknown }> }
+    }).from("gst_accumn_reports").upsert({
+      case_id, document_id, user_id,
+      report_data: args,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "case_id" });
     if (upsertErr) throw new Error(String((upsertErr as { message?: string }).message ?? upsertErr));
 
-    return json({ ok: true, is_accumn: true });
+    await admin.from("financial_documents")
+      .update({ extraction_status: "extracted", extraction_error: null })
+      .eq("id", document_id);
+
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("extract-gst-accumn background error:", msg);
+    await admin.from("financial_documents")
+      .update({ extraction_status: "failed", extraction_error: msg.slice(0, 500) })
+      .eq("id", document_id);
+  }
+}
+
+// ── HTTP handler ──────────────────────────────────────────────────────────────
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+
+  try {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return json({ error: "Unauthorized" }, 401);
+
+    const body = await req.json() as { case_id: string; document_id: string };
+    const { case_id, document_id } = body;
+    if (!case_id || !document_id) return json({ error: "Missing fields" }, 400);
+
+    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const userClient = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } },
+    );
+    const { data: { user } } = await userClient.auth.getUser();
+    if (!user) return json({ error: "Unauthorized" }, 401);
+
+    const { data: doc } = await admin.from("financial_documents").select("*").eq("id", document_id).single();
+    if (!doc) return json({ error: "Document not found" }, 404);
+
+    if (doc.file_type !== "pdf") return json({ ok: true, is_accumn: false });
+
+    // Mark running, then return immediately — background job does the work
+    await admin.from("financial_documents")
+      .update({ extraction_status: "running", extraction_error: null })
+      .eq("id", document_id);
+
+    EdgeRuntime.waitUntil(
+      runExtraction(case_id, document_id, user.id, doc.file_path, admin)
+    );
+
+    return json({ ok: true, processing: true });
 
   } catch (e) {
     console.error("extract-gst-accumn:", e);
