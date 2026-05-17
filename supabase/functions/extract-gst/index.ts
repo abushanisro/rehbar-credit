@@ -45,21 +45,13 @@ Deno.serve(async (req) => {
       for (let i = 0; i < bytes.length; i += cs) b64 += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + cs)));
       files = [{ type: "image", base64: btoa(b64), mime: "image/png" }];
     } else {
-      // PDF: OCR via signed URL (Mistral downloads directly — avoids base64 payload overhead)
-      const MISTRAL_KEY = Deno.env.get("MISTRAL_API_KEY");
-      if (!MISTRAL_KEY) throw new Error("MISTRAL_API_KEY secret not set");
-      const { data: signedData } = await supabase.storage.from("case-files").createSignedUrl(doc.file_path, 300);
-      if (!signedData?.signedUrl) throw new Error("Could not create signed URL");
-      const ocrRes = await fetch("https://api.mistral.ai/v1/ocr", {
-        method: "POST",
-        signal: AbortSignal.timeout(80_000),
-        headers: { "Authorization": `Bearer ${MISTRAL_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "mistral-ocr-latest", document: { type: "document_url", document_url: signedData.signedUrl } }),
-      });
-      if (!ocrRes.ok) throw new Error(`Mistral OCR ${ocrRes.status}: ${(await ocrRes.text()).slice(0, 200)}`);
-      const ocrJson = await ocrRes.json();
-      const ocrText = ((ocrJson.pages ?? []) as { markdown?: string }[]).map(p => p.markdown ?? "").join("\n\n").slice(0, 120_000);
-      files = [{ type: "text", text: `GST RETURN DOCUMENT:\n\n${ocrText}` }];
+      // PDF: download and send natively as document block — Claude processes it directly
+      const { data: file, error: dlErr } = await supabase.storage.from("case-files").download(doc.file_path);
+      if (!file || dlErr) throw new Error("File download failed");
+      const bytes = new Uint8Array(await (file as Blob).arrayBuffer());
+      let b64 = ""; const cs = 0x8000;
+      for (let i = 0; i < bytes.length; i += cs) b64 += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + cs)));
+      files = [{ type: "pdf", base64: btoa(b64) }];
     }
 
     const args = await callAI({

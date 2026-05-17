@@ -154,32 +154,32 @@ Deno.serve(async (req) => {
 
     const context = buildContext(ratios as RatioRow[], cc as Record<string,unknown>);
 
-    const apiKey = Deno.env.get("MISTRAL_API_KEY");
-    if (!apiKey) return json({ error: "MISTRAL_API_KEY not configured" }, 500);
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return json({ error: "ANTHROPIC_API_KEY not configured" }, 500);
 
-    const aiRes = await fetch("https://api.mistral.ai/v1/chat/completions", {
+    const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "content-type": "application/json",
+        "x-api-key":         apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
       },
       body: JSON.stringify({
-        model: "mistral-large-latest",
+        model:      "claude-haiku-4-5-20251001",
         max_tokens: 2500,
-        messages: [
-          { role: "system", content: SYSTEM },
-          { role: "user",   content: context },
-        ],
+        system:     SYSTEM,
+        messages:   [{ role: "user", content: context }],
       }),
     });
 
     const aiBody = await aiRes.json();
-    if (!aiRes.ok) return json({ error: `Mistral API ${aiRes.status}: ${JSON.stringify(aiBody).slice(0,300)}` }, 500);
+    if (!aiRes.ok) return json({ error: `Claude API ${aiRes.status}: ${JSON.stringify(aiBody).slice(0,300)}` }, 500);
 
-    if (aiBody.choices?.[0]?.finish_reason === "length")
+    if (aiBody.stop_reason === "max_tokens")
       return json({ error: "Response truncated — max_tokens too low. Contact support." }, 500);
 
-    const raw = (aiBody.choices?.[0]?.message?.content ?? "{}").trim();
+    const textBlock = (aiBody.content as { type: string; text?: string }[] ?? []).find((b) => b.type === "text");
+    const raw = (textBlock?.text ?? "{}").trim();
     const cleaned = raw.replace(/^```json\s*/,"").replace(/^```\s*/,"").replace(/\s*```$/,"");
 
     let analysis: unknown;
@@ -187,10 +187,10 @@ Deno.serve(async (req) => {
     catch (pe) { return json({ error: `JSON parse failed: ${pe}. Raw (first 200): ${cleaned.slice(0,200)}` }, 500); }
 
     const usage = {
-      input_tokens:  aiBody.usage?.prompt_tokens     ?? 0,
-      output_tokens: aiBody.usage?.completion_tokens ?? 0,
+      input_tokens:  aiBody.usage?.input_tokens  ?? 0,
+      output_tokens: aiBody.usage?.output_tokens ?? 0,
       max_tokens:    2500,
-      model:         aiBody.model ?? "mistral-large-latest",
+      model:         aiBody.model ?? "claude-haiku-4-5-20251001",
     };
 
     return json({ analysis, usage });

@@ -14,7 +14,34 @@ interface CaseRow {
   status: CaseStatus;
   deal_amount: number | null;
   created_at: string;
+  user_id: string;
+  assigned_to_email: string | null;
+  assigned_to_name: string | null;
+  creator_name: string | null;
+  creator_email: string | null;
+  creator_role: string | null;
+  assignee_role: string | null;
 }
+
+type ProfileRow  = { id: string; email: string | null; full_name: string | null };
+type RoleRow     = { user_id: string; role: string };
+
+const ROLE_SHORT: Record<string, string> = {
+  admin:                "ADM",
+  analyst:              "ANL",
+  business_development: "BD",
+  ic_member:            "IC",
+  credit_committee:     "CC",
+  operations:           "OPS",
+};
+const ROLE_COLOR: Record<string, string> = {
+  admin:                "text-destructive border-destructive/40",
+  analyst:              "text-primary border-primary/30",
+  business_development: "text-accent border-accent/30",
+  ic_member:            "text-success border-success/30",
+  credit_committee:     "text-warning border-warning/30",
+  operations:           "text-muted-foreground border-border",
+};
 
 const COLUMNS: CaseStatus[] = [
   "draft", "extracting", "extracted", "analysis", "narrative", "ic_review", "approved",
@@ -26,12 +53,33 @@ export default function Pipeline() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverCol, setDragOverCol] = useState<CaseStatus | null>(null);
 
-  const load = () =>
-    supabase
-      .from("credit_cases")
-      .select("id,case_code,client_name,product_type,status,deal_amount,created_at")
-      .order("created_at", { ascending: false })
-      .then(({ data }) => setCases((data ?? []) as CaseRow[]));
+  const load = async () => {
+    const [{ data: rawCases }, { data: profiles }, { data: roles }] = await Promise.all([
+      supabase
+        .from("credit_cases")
+        .select("id,case_code,client_name,product_type,status,deal_amount,created_at,user_id,assigned_to_email,assigned_to_name")
+        .order("created_at", { ascending: false }),
+      supabase.from("profiles").select("id,email,full_name"),
+      supabase.from("user_roles").select("user_id,role"),
+    ]);
+
+    const profileMap  = Object.fromEntries(((profiles ?? []) as ProfileRow[]).map(p => [p.id, p]));
+    const emailToId   = Object.fromEntries(((profiles ?? []) as ProfileRow[]).filter(p => p.email).map(p => [p.email!, p.id]));
+    const roleByUserId = Object.fromEntries(((roles ?? []) as RoleRow[]).map(r => [r.user_id, r.role]));
+
+    setCases(((rawCases ?? []) as (Omit<CaseRow, "creator_name"|"creator_email"|"creator_role"|"assignee_role"> & { assigned_to_email?: string|null; assigned_to_name?: string|null })[]).map(c => {
+      const assigneeId   = c.assigned_to_email ? (emailToId[c.assigned_to_email] ?? null) : null;
+      return {
+        ...c,
+        assigned_to_email: c.assigned_to_email ?? null,
+        assigned_to_name:  c.assigned_to_name  ?? null,
+        creator_name:  profileMap[c.user_id]?.full_name ?? null,
+        creator_email: profileMap[c.user_id]?.email     ?? null,
+        creator_role:  roleByUserId[c.user_id]          ?? null,
+        assignee_role: assigneeId ? (roleByUserId[assigneeId] ?? null) : null,
+      };
+    }));
+  };
 
   useEffect(() => {
     load().then(() => setLoading(false));
@@ -181,11 +229,39 @@ export default function Pipeline() {
                           draggable={false}
                         >
                           <div className="text-primary font-bold truncate pr-5">{c.client_name}</div>
-                          <div className="text-muted-foreground truncate">{c.case_code}</div>
-                          <div className="text-accent text-[10px] mt-1">{PRODUCTS[c.product_type].short}</div>
-                          {c.deal_amount && (
-                            <div className="text-success text-[10px]">
-                              ₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr
+                          <div className="text-muted-foreground truncate text-[10px]">{c.case_code}</div>
+                          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                            <span className="text-accent text-[10px]">{PRODUCTS[c.product_type].short}</span>
+                            {c.deal_amount && (
+                              <span className="text-success text-[10px]">
+                                ₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr
+                              </span>
+                            )}
+                          </div>
+                          {/* Creator */}
+                          <div className="mt-1.5 flex items-center gap-1 min-w-0">
+                            <span className="text-[8px] tracking-widest text-muted-foreground/40 shrink-0">BY</span>
+                            <span className="text-[9px] text-muted-foreground truncate">
+                              {c.creator_name ?? (c.creator_email ? c.creator_email.split("@")[0] : "—")}
+                            </span>
+                            {c.creator_role && (
+                              <span className={`shrink-0 text-[7px] font-bold tracking-widest border px-1 py-px ${ROLE_COLOR[c.creator_role] ?? "text-muted-foreground border-border"}`}>
+                                {ROLE_SHORT[c.creator_role] ?? c.creator_role.toUpperCase()}
+                              </span>
+                            )}
+                          </div>
+                          {/* Assignee */}
+                          {(c.assigned_to_name || c.assigned_to_email) && (
+                            <div className="flex items-center gap-1 min-w-0">
+                              <span className="text-[8px] tracking-widest text-primary/40 shrink-0">→</span>
+                              <span className="text-[9px] text-primary/70 truncate font-medium">
+                                {c.assigned_to_name ?? c.assigned_to_email?.split("@")[0]}
+                              </span>
+                              {c.assignee_role && (
+                                <span className={`shrink-0 text-[7px] font-bold tracking-widest border px-1 py-px ${ROLE_COLOR[c.assignee_role] ?? "text-muted-foreground border-border"}`}>
+                                  {ROLE_SHORT[c.assignee_role] ?? c.assignee_role.toUpperCase()}
+                                </span>
+                              )}
                             </div>
                           )}
                         </Link>

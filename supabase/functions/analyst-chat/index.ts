@@ -315,29 +315,32 @@ Deno.serve(async (req) => {
       ? await buildCaseSystemPrompt(sb, case_id, page_name)
       : await buildGlobalSystemPrompt(sb, page_name, current_path);
 
-    const key = Deno.env.get("MISTRAL_API_KEY");
-    if (!key) throw new Error("MISTRAL_API_KEY not set");
+    const key = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!key) throw new Error("ANTHROPIC_API_KEY not set");
 
-    const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${key}`,
-        "content-type": "application/json",
+        "x-api-key":         key,
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
       },
       body: JSON.stringify({
-        model: "mistral-large-latest",
+        model:      "claude-haiku-4-5-20251001",
         max_tokens: 1024,
-        messages: [{ role: "system", content: systemPrompt }, ...messages],
+        system:     systemPrompt,
+        messages,
       }),
     });
 
     if (!res.ok) {
       const body = await res.text();
-      throw new Error(`Mistral API ${res.status}: ${body.slice(0, 200)}`);
+      throw new Error(`Claude API ${res.status}: ${body.slice(0, 200)}`);
     }
 
     const json = await res.json();
-    const reply = (json.choices?.[0]?.message?.content ?? "").trim();
+    const textBlock = (json.content as { type: string; text?: string }[] ?? []).find(b => b.type === "text");
+    const reply = (textBlock?.text ?? "").trim();
 
     return new Response(JSON.stringify({ reply }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

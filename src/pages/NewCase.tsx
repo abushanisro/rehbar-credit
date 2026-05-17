@@ -49,6 +49,9 @@ type FormState = {
   website: string;
   has_partner: boolean;
   partner_company_name: string;
+  assign_name: string;
+  assign_email: string;
+  assign_role: string;
 };
 
 type FileQueueItem = {
@@ -104,6 +107,8 @@ interface CompanySuggestion {
 }
 
 
+type TeamMember = { id: string; email: string; full_name: string | null; role: string | null };
+
 export default function NewCase() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -111,6 +116,7 @@ export default function NewCase() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [submitting, setSubmitting] = useState(false);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(
     searchParams.get("company_id")
   );
@@ -137,6 +143,9 @@ export default function NewCase() {
     website: "",
     has_partner: false,
     partner_company_name: "",
+    assign_name: "",
+    assign_email: "",
+    assign_role: "analyst",
   });
 
   const [scanning, setScanning] = useState(false);
@@ -226,6 +235,22 @@ export default function NewCase() {
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
+
+  // ── load team members for assignee picker ─────────────────────────────────
+  useEffect(() => {
+    Promise.all([
+      supabase.from("profiles").select("id,email,full_name"),
+      supabase.from("user_roles").select("user_id,role"),
+    ]).then(([{ data: profiles }, { data: roles }]) => {
+      const roleMap = Object.fromEntries((roles ?? []).map(r => [r.user_id, r.role as string]));
+      setTeamMembers(
+        (profiles ?? [])
+          .filter(p => p.email && p.id !== user?.id)
+          .map(p => ({ id: p.id, email: p.email!, full_name: p.full_name ?? null, role: roleMap[p.id] ?? null }))
+          .sort((a, b) => (a.full_name ?? a.email).localeCompare(b.full_name ?? b.email))
+      );
+    });
+  }, [user?.id]);
 
   // ── form helpers ──────────────────────────────────────────────────────────
   const set = (k: keyof FormState) =>
@@ -506,6 +531,8 @@ export default function NewCase() {
       website: form.website || null,
       delivery_email: user.email ?? "",
       status: "draft",
+      assigned_to_email: (form.assign_email.trim() && form.assign_email !== "__new__") ? form.assign_email.trim() : null,
+      assigned_to_name:  form.assign_name.trim()  || null,
       ...(form.has_partner ? {
         ic_note: {
           has_partner: true,
@@ -520,7 +547,34 @@ export default function NewCase() {
     // Save MCA data to the company (whether newly created or pre-existing)
     if (mcaProfile && companyId) await saveMcaToCompany(companyId);
 
-    toast.success(`Case ${code} created`);
+    // Resolve final assignee email — "__new__" is the picker placeholder, not a real email
+    const assignEmail = (form.assign_email && form.assign_email !== "__new__")
+      ? form.assign_email.trim()
+      : "";
+    const assignName = form.assign_name.trim();
+
+    if (assignEmail) {
+      const { data: inviteData, error: inviteErr } = await supabase.functions.invoke("invite-user", {
+        body: {
+          email:            assignEmail,
+          name:             assignName || undefined,
+          role:             form.assign_role,
+          case_code:        code,
+          client_name:      form.client_name,
+          invited_by_email: user.email ?? "",
+        },
+      });
+      if (inviteErr) {
+        toast.error(`Case created but invite failed: ${inviteErr.message}`);
+      } else if (inviteData?.already_exists) {
+        toast.success(`Case ${code} created · assigned to ${assignName || assignEmail}`);
+      } else {
+        toast.success(`Case ${code} created · invite sent to ${assignEmail}`);
+      }
+    } else {
+      toast.success(`Case ${code} created`);
+    }
+
     navigate(`/case/${data.id}`);
   };
 
@@ -752,6 +806,104 @@ export default function NewCase() {
                   <p className="text-[10px] text-muted-foreground mt-1 tracking-wide">
                     Partner financials can be entered in the REVIEW tab after case creation.
                   </p>
+                </div>
+              )}
+            </div>
+
+            {/* Assign To */}
+            <div className="border border-border bg-surface/40 px-3 py-2.5 space-y-2">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">▶ ASSIGN TO</div>
+
+              {/* Existing team member picker */}
+              {teamMembers.length > 0 && (
+                <div>
+                  <label className={labelCls}>Pick from team</label>
+                  <select
+                    className={inputCls}
+                    value={form.assign_email}
+                    onChange={e => {
+                      const picked = teamMembers.find(m => m.email === e.target.value);
+                      if (picked) {
+                        setForm(f => ({
+                          ...f,
+                          assign_email: picked.email,
+                          assign_name:  picked.full_name ?? "",
+                          assign_role:  picked.role ?? "analyst",
+                        }));
+                      } else {
+                        setForm(f => ({ ...f, assign_email: "", assign_name: "", assign_role: "analyst" }));
+                      }
+                    }}
+                  >
+                    <option value="">— Select team member —</option>
+                    {teamMembers.map(m => {
+                      const roleLabel: Record<string,string> = { admin:"ADM", analyst:"ANL", business_development:"BD", ic_member:"IC", credit_committee:"CC", operations:"OPS" };
+                      const badge = m.role ? `[${roleLabel[m.role] ?? m.role.toUpperCase()}]` : "";
+                      return (
+                        <option key={m.id} value={m.email}>
+                          {m.full_name ? `${m.full_name} — ${m.email}` : m.email} {badge}
+                        </option>
+                      );
+                    })}
+                    <option value="__new__">+ Invite someone new…</option>
+                  </select>
+                </div>
+              )}
+
+              {/* Show manual inputs when "Invite new" is selected OR no team yet */}
+              {(teamMembers.length === 0 || form.assign_email === "__new__" || (form.assign_email && !teamMembers.find(m => m.email === form.assign_email))) && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className={labelCls}>Name (optional)</label>
+                    <input
+                      type="text"
+                      className={inputCls}
+                      placeholder="Full name"
+                      value={form.assign_email === "__new__" ? form.assign_name : form.assign_name}
+                      onChange={set("assign_name")}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Email *</label>
+                    <input
+                      type="email"
+                      className={inputCls}
+                      placeholder="analyst@rehbar.co.in"
+                      value={form.assign_email === "__new__" ? "" : form.assign_email}
+                      onChange={e => setForm(f => ({ ...f, assign_email: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Role selector — always shown when someone is assigned */}
+              {form.assign_email && form.assign_email !== "__new__" && (
+                <div>
+                  <label className={labelCls}>Role</label>
+                  <select className={inputCls} value={form.assign_role} onChange={set("assign_role")}>
+                    <option value="analyst">Credit Analyst</option>
+                    <option value="business_development">Business Development</option>
+                    <option value="ic_member">IC Member</option>
+                    <option value="credit_committee">Credit Committee</option>
+                    <option value="operations">Operations</option>
+                    <option value="admin">Administrator</option>
+                  </select>
+                </div>
+              )}
+
+              {form.assign_email && form.assign_email !== "__new__" && (
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] text-muted-foreground tracking-wide">
+                    Assigned to <span className="text-primary font-bold">{form.assign_name || form.assign_email}</span>
+                    {!teamMembers.find(m => m.email === form.assign_email) && " · invite email will be sent"}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setForm(f => ({ ...f, assign_email: "", assign_name: "", assign_role: "analyst" }))}
+                    className="text-[9px] text-muted-foreground/50 hover:text-destructive tracking-widest"
+                  >
+                    CLEAR ✕
+                  </button>
                 </div>
               )}
             </div>

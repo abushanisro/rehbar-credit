@@ -51,33 +51,14 @@ Deno.serve(async (req) => {
 
     await supabase.from("financial_documents").update({ extraction_status: "running" }).eq("id", document_id);
 
-    // OCR via signed URL — Mistral downloads the PDF directly, avoiding base64 payload overhead
-    const MISTRAL_KEY = Deno.env.get("MISTRAL_API_KEY");
-    if (!MISTRAL_KEY) throw new Error("MISTRAL_API_KEY secret not set");
+    // Download PDF and send natively as document block — Claude processes it directly
+    const { data: pdfBlob, error: dlErr } = await supabase.storage.from("case-files").download(doc.file_path);
+    if (!pdfBlob || dlErr) throw new Error("File download failed");
+    const bytes = new Uint8Array(await (pdfBlob as Blob).arrayBuffer());
+    let b64 = ""; const cs = 0x8000;
+    for (let i = 0; i < bytes.length; i += cs) b64 += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + cs)));
 
-    const { data: signedData } = await supabase.storage.from("case-files").createSignedUrl(doc.file_path, 300);
-    if (!signedData?.signedUrl) throw new Error("Could not create signed URL for PDF");
-
-    const ocrRes = await fetch("https://api.mistral.ai/v1/ocr", {
-      method: "POST",
-      signal: AbortSignal.timeout(80_000),
-      headers: { "Authorization": `Bearer ${MISTRAL_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model:    "mistral-ocr-latest",
-        document: { type: "document_url", document_url: signedData.signedUrl },
-      }),
-    });
-    if (!ocrRes.ok) {
-      const errBody = await ocrRes.text();
-      throw new Error(`Mistral OCR ${ocrRes.status}: ${errBody.slice(0, 300)}`);
-    }
-    const ocrJson = await ocrRes.json();
-    const ocrText = ((ocrJson.pages ?? []) as { markdown?: string }[])
-      .map(p => p.markdown ?? "").join("\n\n").slice(0, 120_000);
-
-    if (!ocrText.trim()) throw new Error("Mistral OCR returned empty text for this PDF");
-
-    const files: FileContent[] = [{ type: "text", text: ocrText }];
+    const files: FileContent[] = [{ type: "pdf", base64: btoa(b64) }];
 
     const sectionProps: Record<string, unknown> = {};
     for (const id of SECTION_IDS) {

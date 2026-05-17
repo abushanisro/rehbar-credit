@@ -27,6 +27,7 @@ import {
 import type { Tables, Json } from "@/integrations/supabase/types";
 import { toast } from "sonner";
 import { extractPdfText } from "@/lib/pdf-text-extractor";
+import { parseAccumnExcel, mapToIndustry as _mapEditIndustry, mapToConstitution as _mapEditConstitution, type McaProfile as EditMcaProfile } from "@/lib/mca-parser";
 import { ProjectionsTab } from "@/tabs/case/ProjectionsTab";
 import { PartnerAnalysisTab } from "@/tabs/case/PartnerAnalysisTab";
 import type { PartnerEntry } from "@/tabs/case/PartnerAnalysisTab";
@@ -470,7 +471,10 @@ function CaseViewInner() {
     principal_borrower: "", promoter_details: "", website: "",
     deal_amount: "", tenure_months: "", expected_irr: "",
     end_use: "", collateral_summary: "", analyst_notes: "", strategic_rationale: "",
+    assign_email: "", assign_name: "", assign_role: "analyst",
   });
+  type TeamMember = { id: string; email: string; full_name: string | null; role: string | null };
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [editScanFileQueue, setEditScanFileQueue] = useState<EditFileQueueItem[]>([]);
   const [editScanning, setEditScanning] = useState(false);
   const [editScanStage, setEditScanStage] = useState("");
@@ -481,6 +485,9 @@ function CaseViewInner() {
   const [editDragOver, setEditDragOver] = useState(false);
   const editFileInputRef = useRef<HTMLInputElement>(null);
   const editCancelledRef = useRef(false);
+  const [editMcaProfile, setEditMcaProfile] = useState<EditMcaProfile | null>(null);
+  const [editMcaImporting, setEditMcaImporting] = useState(false);
+  const editMcaFileInputRef = useRef<HTMLInputElement>(null);
 
   const reload = useCallback(async () => {
     if (!id) return;
@@ -805,6 +812,25 @@ function CaseViewInner() {
   const openHeaderEdit = () => {
     const ind = cc.industry ?? "";
     const knownIndustry = CASE_INDUSTRIES.includes(ind as typeof CASE_INDUSTRIES[number]);
+
+    // Fetch team members for the assignee picker
+    Promise.all([
+      supabase.from("profiles").select("id,email,full_name"),
+      supabase.from("user_roles").select("user_id,role"),
+    ]).then(([{ data: profiles }, { data: roles }]) => {
+      const roleMap = Object.fromEntries((roles ?? []).map(r => [r.user_id, r.role as string]));
+      setTeamMembers(
+        (profiles ?? [])
+          .filter(p => p.email)
+          .map(p => ({ id: p.id, email: p.email!, full_name: p.full_name ?? null, role: roleMap[p.id] ?? null }))
+          .sort((a, b) => (a.full_name ?? a.email).localeCompare(b.full_name ?? b.email))
+      );
+    });
+
+    // Determine current assignee's role from team members (best-effort; may load async)
+    const assigneeEmail = (cc as Record<string, unknown>).assigned_to_email as string | null ?? "";
+    const assigneeName  = (cc as Record<string, unknown>).assigned_to_name  as string | null ?? "";
+
     setHd({
       client_name: cc.client_name,
       product_type: cc.product_type,
@@ -823,6 +849,9 @@ function CaseViewInner() {
       collateral_summary: cc.collateral_summary ?? "",
       analyst_notes: cc.analyst_notes ?? "",
       strategic_rationale: cc.strategic_rationale ?? "",
+      assign_email: assigneeEmail,
+      assign_name:  assigneeName,
+      assign_role:  "analyst",
     });
     setEditingHeader(true);
   };
@@ -830,6 +859,9 @@ function CaseViewInner() {
   const saveHeader = async (e: React.FormEvent) => {
     e.preventDefault();
     const resolvedIndustry = hd.industry === "Other" ? hd.industry_custom : hd.industry;
+    const assignEmail = (hd.assign_email && hd.assign_email !== "__new__") ? hd.assign_email.trim() : "";
+    const assignName  = hd.assign_name.trim();
+
     await supabase.from("credit_cases").update({
       client_name: hd.client_name,
       product_type: hd.product_type as never,
@@ -847,8 +879,64 @@ function CaseViewInner() {
       collateral_summary: hd.collateral_summary || null,
       analyst_notes: hd.analyst_notes || null,
       strategic_rationale: hd.strategic_rationale || null,
-    }).eq("id", cc.id);
-    toast.success("Case updated");
+      assigned_to_email: assignEmail || null,
+      assigned_to_name:  assignName  || null,
+    } as never).eq("id", cc.id);
+
+    // Send invite if assignee is new (not an existing team member)
+    const prevAssignee = (cc as Record<string, unknown>).assigned_to_email as string | null ?? "";
+    const isNewAssignee = assignEmail && assignEmail !== prevAssignee;
+    const isExisting    = teamMembers.some(m => m.email === assignEmail);
+
+    if (isNewAssignee && !isExisting) {
+      const { error: invErr } = await supabase.functions.invoke("invite-user", {
+        body: {
+          email:            assignEmail,
+          name:             assignName || undefined,
+          role:             hd.assign_role,
+          case_code:        cc.case_code,
+          client_name:      cc.client_name,
+          invited_by_email: user?.email ?? "",
+        },
+      });
+      if (invErr) toast.error(`Case updated but invite failed: ${invErr.message}`);
+      else toast.success("Case updated · invite sent to " + assignEmail);
+    } else {
+      toast.success("Case updated");
+    }
+
+    // Persist MCA data to linked company if imported
+    const companyId = (cc as unknown as { company_id?: string }).company_id;
+    if (editMcaProfile && companyId) {
+      await supabase.from("companies").update({
+        mca_cin: editMcaProfile.cin ?? null,
+        mca_pan: editMcaProfile.pan ?? null,
+        mca_lei: editMcaProfile.lei ?? null,
+        mca_category: editMcaProfile.category ?? null,
+        mca_sub_category: editMcaProfile.sub_category ?? null,
+        mca_type: editMcaProfile.mca_type ?? null,
+        mca_authorized_capital: editMcaProfile.authorized_capital ?? null,
+        mca_paid_up_capital: editMcaProfile.paid_up_capital ?? null,
+        mca_status: editMcaProfile.mca_status ?? null,
+        mca_nse_sector: editMcaProfile.nse_sector ?? null,
+        mca_sector: editMcaProfile.sector ?? null,
+        mca_products_services: editMcaProfile.products_services ?? null,
+        mca_email: editMcaProfile.email ?? null,
+        mca_telephone: editMcaProfile.telephone ?? null,
+        mca_date_of_incorp: editMcaProfile.date_of_incorporation ?? null,
+        mca_date_last_bs: editMcaProfile.date_of_last_bs ?? null,
+        mca_date_last_agm: editMcaProfile.date_of_last_agm ?? null,
+        mca_about: editMcaProfile.about ?? null,
+      } as never).eq("id", companyId);
+      if (editMcaProfile.directors.length > 0) {
+        await supabase.from("company_directors").delete().eq("company_id", companyId);
+        await supabase.from("company_directors").insert(
+          editMcaProfile.directors.map(d => ({ ...d, company_id: companyId }))
+        );
+      }
+      setEditMcaProfile(null);
+    }
+
     setEditingHeader(false);
     await reload();
   };
@@ -919,6 +1007,42 @@ function CaseViewInner() {
     setEditScanStage("");
     setEditScanFileQueue([]);
     setEditScanResult(null);
+  };
+
+  const handleEditMcaExcelImport = async (file: File) => {
+    setEditMcaImporting(true);
+    try {
+      const { profile, companyName, websiteUrl } = await parseAccumnExcel(file);
+      setEditMcaProfile(profile);
+
+      const industry = _mapEditIndustry(profile.sector || profile.nse_sector || "");
+      const constitution = _mapEditConstitution(profile.category || "", profile.mca_type || "");
+      let yearEst = "";
+      if (profile.date_of_incorporation) {
+        const parts = profile.date_of_incorporation.split("/");
+        const yr = parts.length === 3 ? parts[2] : parts[0];
+        if (yr && yr.length === 4) yearEst = yr;
+      }
+
+      setHd(f => ({
+        ...f,
+        client_name: companyName || f.client_name,
+        website: websiteUrl || f.website,
+        year_established: yearEst || f.year_established,
+        industry: industry && CASE_INDUSTRIES.includes(industry as typeof CASE_INDUSTRIES[number]) ? industry : f.industry,
+        legal_constitution: constitution || f.legal_constitution,
+      }));
+
+      toast.success(
+        `Imported: ${companyName || "Company"} · ${profile.directors.length} director${profile.directors.length !== 1 ? "s" : ""}`
+      );
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to parse Excel — check the file format");
+    } finally {
+      setEditMcaImporting(false);
+      if (editMcaFileInputRef.current) editMcaFileInputRef.current.value = "";
+    }
   };
 
   const handleEditScanFiles = async (rawFiles: File[]) => {
@@ -2066,6 +2190,7 @@ function CaseViewInner() {
       <LiveCursors />
       {/* Header strip */}
       {editingHeader ? (
+        <>
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 mb-3">
           <Panel title="EDIT CASE — CLIENT & DEAL INFO" ticker={cc.case_code} className="xl:col-span-8"
             actions={<button type="button" onClick={() => setEditingHeader(false)} className="text-[10px] border border-border text-foreground/60 px-3 py-1 hover:text-foreground">[CANCEL]</button>}
@@ -2104,6 +2229,42 @@ function CaseViewInner() {
                     <p className="text-[10px] text-foreground/40 mt-1 tracking-wider">Enter client name or website above first</p>
                   )}
                 </div>
+
+                {/* MCA / Corpository Excel import */}
+                <div className="col-span-2">
+                  <input
+                    ref={editMcaFileInputRef}
+                    type="file"
+                    className="hidden"
+                    accept=".xlsx,.xls,.csv"
+                    onChange={e => {
+                      const f = e.target.files?.[0];
+                      if (f) handleEditMcaExcelImport(f);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => editMcaFileInputRef.current?.click()}
+                    disabled={editMcaImporting}
+                    className="w-full border border-border bg-surface-2 text-muted-foreground px-4 py-2 text-xs tracking-widest font-bold hover:border-primary hover:text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                  >
+                    {editMcaImporting ? "IMPORTING MCA EXCEL…" : "↑ IMPORT CORPOSITORY / MCA EXCEL  (auto-fills company + directors)"}
+                  </button>
+                  {editMcaProfile && (
+                    <p className="text-[10px] text-success mt-1 tracking-wider">
+                      ● MCA profile imported — {editMcaProfile.directors.length} director{editMcaProfile.directors.length !== 1 ? "s" : ""} · will save on update
+                      {editMcaProfile.cin ? ` · CIN: ${editMcaProfile.cin}` : ""}
+                      <button
+                        type="button"
+                        onClick={() => setEditMcaProfile(null)}
+                        className="ml-2 text-destructive hover:opacity-70"
+                      >
+                        ✕ clear
+                      </button>
+                    </p>
+                  )}
+                </div>
+
                 <div>
                   <label className={labelCls}>Legal Constitution</label>
                   <select className={inputCls} value={hd.legal_constitution} onChange={sHd("legal_constitution")}>
@@ -2161,6 +2322,84 @@ function CaseViewInner() {
                 <label className={labelCls}>Analyst Notes</label>
                 <textarea className={inputCls} rows={2} value={hd.analyst_notes} onChange={sHd("analyst_notes")} />
               </div>
+
+              {/* ── Assign To ─────────────────────────────────────────── */}
+              <div className="border border-border bg-surface/40 px-3 py-2.5 space-y-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">▶ ASSIGN TO</div>
+
+                {teamMembers.length > 0 && (
+                  <div>
+                    <label className={labelCls}>Pick from team</label>
+                    <select
+                      className={inputCls}
+                      value={hd.assign_email}
+                      onChange={e => {
+                        const picked = teamMembers.find(m => m.email === e.target.value);
+                        if (picked) {
+                          setHd(h => ({ ...h, assign_email: picked.email, assign_name: picked.full_name ?? "", assign_role: picked.role ?? "analyst" }));
+                        } else if (e.target.value === "__new__") {
+                          setHd(h => ({ ...h, assign_email: "__new__", assign_name: "", assign_role: "analyst" }));
+                        } else {
+                          setHd(h => ({ ...h, assign_email: "", assign_name: "", assign_role: "analyst" }));
+                        }
+                      }}
+                    >
+                      <option value="">— Select team member —</option>
+                      {teamMembers.map(m => {
+                        const rl: Record<string,string> = { admin:"ADM", analyst:"ANL", business_development:"BD", ic_member:"IC", credit_committee:"CC", operations:"OPS" };
+                        return (
+                          <option key={m.id} value={m.email}>
+                            {m.full_name ? `${m.full_name} — ${m.email}` : m.email}{m.role ? ` [${rl[m.role] ?? m.role.toUpperCase()}]` : ""}
+                          </option>
+                        );
+                      })}
+                      <option value="__new__">+ Invite someone new…</option>
+                    </select>
+                  </div>
+                )}
+
+                {(teamMembers.length === 0 || hd.assign_email === "__new__" || (hd.assign_email && !teamMembers.find(m => m.email === hd.assign_email))) && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className={labelCls}>Name (optional)</label>
+                      <input type="text" className={inputCls} placeholder="Full name" value={hd.assign_name} onChange={sHd("assign_name")} />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Email</label>
+                      <input type="email" className={inputCls} placeholder="analyst@rehbar.co.in"
+                        value={hd.assign_email === "__new__" ? "" : hd.assign_email}
+                        onChange={e => setHd(h => ({ ...h, assign_email: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {hd.assign_email && hd.assign_email !== "__new__" && (
+                  <div>
+                    <label className={labelCls}>Role</label>
+                    <select className={inputCls} value={hd.assign_role} onChange={sHd("assign_role")}>
+                      <option value="analyst">Credit Analyst</option>
+                      <option value="business_development">Business Development</option>
+                      <option value="ic_member">IC Member</option>
+                      <option value="credit_committee">Credit Committee</option>
+                      <option value="operations">Operations</option>
+                      <option value="admin">Administrator</option>
+                    </select>
+                  </div>
+                )}
+
+                {hd.assign_email && hd.assign_email !== "__new__" && (
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] text-muted-foreground">
+                      Assigned to <span className="text-primary font-bold">{hd.assign_name || hd.assign_email}</span>
+                      {!teamMembers.find(m => m.email === hd.assign_email) && " · invite will be sent on save"}
+                    </p>
+                    <button type="button" onClick={() => setHd(h => ({ ...h, assign_email: "", assign_name: "", assign_role: "analyst" }))}
+                      className="text-[9px] text-muted-foreground/50 hover:text-destructive tracking-widest">CLEAR ✕</button>
+                  </div>
+                )}
+              </div>
+
               <button type="submit" className="bg-primary text-primary-foreground px-4 py-2 text-sm tracking-widest font-bold hover:opacity-90">
                 [UPDATE CASE →]
               </button>
@@ -2335,6 +2574,113 @@ function CaseViewInner() {
             </Panel>
           </div>
         </div>
+
+        {/* MCA profile + directors — shown below grid when Excel imported */}
+        {editMcaProfile && (
+          <div className="space-y-3 mt-3">
+            <Panel title="MCA / CORPOSITORY PROFILE" ticker={editMcaProfile.cin ?? "IMPORTED"} status="live">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-xs">
+                {[
+                  { label: "CIN",                value: editMcaProfile.cin },
+                  { label: "PAN",                value: editMcaProfile.pan },
+                  { label: "LEI",                value: editMcaProfile.lei },
+                  { label: "CATEGORY",           value: editMcaProfile.category },
+                  { label: "SUB CATEGORY",       value: editMcaProfile.sub_category },
+                  { label: "COMPANY TYPE",       value: editMcaProfile.mca_type },
+                  { label: "AUTH. CAPITAL",      value: editMcaProfile.authorized_capital },
+                  { label: "PAID UP CAPITAL",    value: editMcaProfile.paid_up_capital },
+                  { label: "STATUS",             value: editMcaProfile.mca_status },
+                  { label: "NSE SECTOR",         value: editMcaProfile.nse_sector },
+                  { label: "SECTOR",             value: editMcaProfile.sector },
+                  { label: "PRODUCTS/SERVICES",  value: editMcaProfile.products_services },
+                  { label: "EMAIL",              value: editMcaProfile.email },
+                  { label: "TELEPHONE",          value: editMcaProfile.telephone },
+                  { label: "INCORPORATION DATE", value: editMcaProfile.date_of_incorporation },
+                  { label: "LAST BALANCE SHEET", value: editMcaProfile.date_of_last_bs },
+                  { label: "LAST AGM",           value: editMcaProfile.date_of_last_agm },
+                ].filter(f => f.value).map(f => (
+                  <div key={f.label}>
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">{f.label}</div>
+                    <div className="text-primary font-mono">{f.value}</div>
+                  </div>
+                ))}
+                {editMcaProfile.raw_address && (
+                  <div className="col-span-2 sm:col-span-3 lg:col-span-5">
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">REGISTERED ADDRESS</div>
+                    <div className="text-primary">{editMcaProfile.raw_address}</div>
+                  </div>
+                )}
+              </div>
+            </Panel>
+
+            {editMcaProfile.directors.length > 0 && (
+              <Panel title="DIRECTORS" ticker={`${editMcaProfile.directors.length} DIRECTORS`} status="live">
+                <div className="overflow-x-auto">
+                  <table className="text-[11px] font-mono border-collapse" style={{ minWidth: "2400px" }}>
+                    <thead>
+                      <tr className="border-b border-border bg-surface/60 text-[9px] tracking-widest text-muted-foreground">
+                        {["NAME","DIN","PAN","DIN STATUS","DSC STATUS","DOB","AGE","GENDER","NATIONALITY",
+                          "DESIGNATION","CATEGORY","APPOINTED CURRENT","ORIGINALLY APPOINTED",
+                          "CESSATION","% SHAREHOLDING","EMAIL","PHONE","REMARKS","ADDRESS"].map(h => (
+                          <th key={h} className="text-left py-2 px-3 font-normal whitespace-nowrap border-r border-border/30">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {editMcaProfile.directors.map((d, i) => {
+                        const dm = d.designation?.match(/^(.+?)\((.+?)\)$/);
+                        const role = dm ? dm[1].trim() : (d.designation || "");
+                        const cat  = dm ? dm[2].trim() : "";
+                        return (
+                          <tr key={i} className="border-b border-border/40 hover:bg-surface-2 transition-colors align-top">
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              <div className="font-bold text-primary">{d.name}</div>
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.din || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.pan || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {d.din_status ? <span className={`text-[9px] font-bold tracking-widest ${d.din_status.toLowerCase() === "approved" ? "text-success" : "text-muted-foreground"}`}>{d.din_status.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dsc_status || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dob || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.age || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {d.gender ? <span className={`text-[9px] font-bold tracking-widest ${d.gender.toLowerCase() === "female" ? "text-accent" : "text-primary"}`}>{d.gender.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.nationality || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-primary">{role || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {cat && cat !== "-" ? <span className="text-accent text-[9px] tracking-widest">{cat}</span> : <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.appointed_current || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.originally_appointed || "—"}</td>
+                            <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
+                              {d.cessation_date && d.cessation_date !== "-"
+                                ? <span className="text-[9px] font-bold tracking-widest text-destructive">{d.cessation_date}</span>
+                                : <span className="text-[9px] text-success font-bold tracking-widest">ACTIVE</span>}
+                            </td>
+                            <td className="py-2 px-3 border-r border-border/20 whitespace-nowrap">
+                              {d.shareholding ? <span className="text-muted-foreground">{d.shareholding}</span> : "—"}
+                            </td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.email || "—"}</td>
+                            <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.phone || "—"}</td>
+                            <td className="py-2 px-3 border-r border-border/20" style={{maxWidth:"180px"}}>
+                              <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2" style={{wordBreak:"break-word"}} title={d.remarks||""}>{d.remarks || "—"}</div>
+                            </td>
+                            <td className="py-2 px-3" style={{maxWidth:"200px"}}>
+                              <div className="text-muted-foreground text-[10px] leading-snug line-clamp-2" style={{wordBreak:"break-word"}} title={d.address||""}>{d.address || "—"}</div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </Panel>
+            )}
+          </div>
+        )}
+        </>
       ) : (
         /* ── Header (always visible) + optional detail panel below ─────────── */
         <div className="space-y-3 mb-3">

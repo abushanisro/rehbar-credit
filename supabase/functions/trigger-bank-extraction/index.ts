@@ -2,7 +2,7 @@
  * Rehbar — Bank Statement Batch Extraction
  * Processes all bank statement documents for a case in parallel via Claude.
  * Uses EdgeRuntime.waitUntil for background execution (no Trigger.dev).
- * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, MISTRAL_API_KEY
+ * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY
  */
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";

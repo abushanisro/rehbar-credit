@@ -1,5 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
+declare const Deno: { env: { get(k: string): string | undefined } };
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -7,6 +9,15 @@ const corsHeaders = {
 
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY")!;
 const FROM = "Rehbar Credit Terminal <onboarding@resend.dev>";
+
+const ROLE_LABEL: Record<string, string> = {
+  admin:              "ADMINISTRATOR",
+  analyst:            "CREDIT ANALYST",
+  business_development: "BUSINESS DEVELOPMENT",
+  ic_member:          "IC MEMBER",
+  credit_committee:   "CREDIT COMMITTEE",
+  operations:         "OPERATIONS",
+};
 
 async function sendEmail(to: string, subject: string, html: string) {
   const res = await fetch("https://api.resend.com/emails", {
@@ -21,27 +32,34 @@ async function sendEmail(to: string, subject: string, html: string) {
   return res.json();
 }
 
-function sessionId() {
-  return Math.random().toString(36).substring(2, 10).toUpperCase();
-}
+function sid() { return Math.random().toString(36).substring(2, 10).toUpperCase(); }
 
-function inviteEmailHtml(inviteLink: string, caseCode: string, clientName: string) {
-  const sid = sessionId();
-  const ts  = new Date().toISOString().replace("T", " ").substring(0, 19) + " UTC";
+function inviteEmailHtml(opts: {
+  inviteLink:    string;
+  caseCode:      string;
+  clientName:    string;
+  role:          string;
+  invitedByEmail: string;
+  assigneeName:  string;
+}) {
+  const { inviteLink, caseCode, clientName, role, invitedByEmail, assigneeName } = opts;
+  const roleLabel = ROLE_LABEL[role] ?? role.toUpperCase();
+  const sessionId = sid();
+  const ts = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+  const greeting = assigneeName ? `Hello ${assigneeName},` : "Hello,";
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Rehbar Credit Terminal — Case Invite</title>
+  <title>Rehbar Credit Terminal — You've been assigned</title>
 </head>
-<body style="margin:0;padding:0;background:#060606;font-family:'Courier New',Courier,monospace;-webkit-text-size-adjust:100%;">
+<body style="margin:0;padding:0;background:#060606;font-family:'Courier New',Courier,monospace;">
 
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#060606;padding:36px 16px;">
 <tr><td align="center">
 
-  <!-- ═══ OUTER SHELL ═══ -->
   <table width="580" cellpadding="0" cellspacing="0"
     style="max-width:580px;width:100%;
            border-top:1px solid #242424;
@@ -50,57 +68,52 @@ function inviteEmailHtml(inviteLink: string, caseCode: string, clientName: strin
            border-left:3px solid #E8721C;
            background:#0a0a0a;">
 
-    <!-- ── TOP CHROME ── -->
+    <!-- TOP CHROME -->
     <tr>
       <td style="background:#0d0d0d;border-bottom:1px solid #1e1e1e;padding:10px 20px;">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
           <td valign="middle">
-            <span style="color:#E8721C;font-size:14px;line-height:1;">●</span>
+            <span style="color:#E8721C;font-size:14px;">●</span>
             <span style="color:#E8721C;font-size:9px;font-weight:bold;letter-spacing:4px;"> REHBAR CREDIT TERMINAL</span>
-            <span style="color:#2e2e2e;font-size:9px;letter-spacing:2px;">  v1.0.0</span>
+            <span style="color:#2e2e2e;font-size:9px;letter-spacing:2px;"> v1.0.0</span>
           </td>
           <td align="right" valign="middle">
-            <span style="color:#2a2a2a;font-size:8px;letter-spacing:1px;">SID:${sid}</span>
+            <span style="color:#2a2a2a;font-size:8px;letter-spacing:1px;">SID:${sessionId}</span>
           </td>
         </tr></table>
       </td>
     </tr>
 
-    <!-- ── BOOT LOG ── -->
+    <!-- BOOT LOG -->
     <tr>
       <td style="background:#070707;border-bottom:1px solid #161616;padding:14px 20px;">
         <div style="color:#2e2e2e;font-size:8px;letter-spacing:3px;margin-bottom:10px;"># SYSTEM INIT — ${ts}</div>
         <div style="color:#22c55e;font-size:9px;line-height:2;letter-spacing:0.5px;">CREDIT ANALYSIS ENGINE...............<span style="color:#16a34a;">[ONLINE]</span></div>
-        <div style="color:#22c55e;font-size:9px;line-height:2;letter-spacing:0.5px;">FINANCIAL RATIO MATRIX...............<span style="color:#16a34a;">[LOADED]</span></div>
-        <div style="color:#22c55e;font-size:9px;line-height:2;letter-spacing:0.5px;">DSCR COMPUTATION MODULE..............<span style="color:#16a34a;">[READY]</span></div>
-        <div style="color:#22c55e;font-size:9px;line-height:2;letter-spacing:0.5px;">SHARIA COMPLIANCE ENGINE.............<span style="color:#16a34a;">[ACTIVE]</span></div>
+        <div style="color:#22c55e;font-size:9px;line-height:2;letter-spacing:0.5px;">ROLE ASSIGNMENT MODULE...............<span style="color:#16a34a;">[${roleLabel}]</span></div>
         <div style="color:#22c55e;font-size:9px;line-height:2;letter-spacing:0.5px;">COLLABORATION PROTOCOL...............<span style="color:#16a34a;">[OPEN]</span></div>
-        <div style="color:#E8721C;font-size:9px;line-height:2;letter-spacing:0.5px;">ANALYST INVITE DISPATCHED............<span style="color:#c2601a;">[PENDING ACCEPTANCE]</span></div>
+        <div style="color:#E8721C;font-size:9px;line-height:2;letter-spacing:0.5px;">CASE ASSIGNMENT DISPATCHED...........<span style="color:#c2601a;">[PENDING ACCEPTANCE]</span></div>
       </td>
     </tr>
 
-    <!-- ── MAIN BODY ── -->
+    <!-- MAIN BODY -->
     <tr>
       <td style="padding:28px 24px 20px 24px;">
 
-        <!-- Section label -->
-        <div style="color:#333;font-size:8px;letter-spacing:4px;margin-bottom:4px;">▶ INCOMING COLLABORATION REQUEST</div>
+        <div style="color:#333;font-size:8px;letter-spacing:4px;margin-bottom:4px;">▶ CASE ASSIGNMENT NOTICE</div>
         <div style="height:1px;background:linear-gradient(to right,#2a2a2a,#111);margin-bottom:22px;"></div>
 
-        <!-- Intro -->
+        <p style="color:#bbb;font-size:12px;line-height:1.9;margin:0 0 8px 0;">${greeting}</p>
         <p style="color:#bbb;font-size:12px;line-height:1.9;margin:0 0 22px 0;">
-          You have been invited to join a credit analysis case on the
-          <span style="color:#E8721C;font-weight:bold;">Rehbar Credit Terminal</span>.<br>
-          Accept below to access the case workspace and collaborate in real time.
+          <span style="color:#E8721C;font-weight:bold;">${invitedByEmail}</span> has assigned you to a credit case on
+          <span style="color:#E8721C;font-weight:bold;">Rehbar Credit Terminal</span>
+          as <span style="color:#E8721C;font-weight:bold;">${roleLabel}</span>.
         </p>
 
         <!-- Case details panel -->
         <table width="100%" cellpadding="0" cellspacing="0"
           style="background:#070707;border:1px solid #1e1e1e;border-left:2px solid #E8721C;margin-bottom:24px;">
           <tr><td style="padding:16px 18px;">
-            <div style="color:#2e2e2e;font-size:8px;letter-spacing:3px;margin-bottom:14px;">
-              ─── CASE MANIFEST ──────────────────────────────
-            </div>
+            <div style="color:#2e2e2e;font-size:8px;letter-spacing:3px;margin-bottom:14px;">─── CASE MANIFEST ──────────────────────────────</div>
             <table cellpadding="0" cellspacing="0">
               <tr>
                 <td style="color:#444;font-size:9px;letter-spacing:2px;padding-bottom:8px;padding-right:20px;">CASE CODE</td>
@@ -117,20 +130,26 @@ function inviteEmailHtml(inviteLink: string, caseCode: string, clientName: strin
                 </td>
               </tr>
               <tr>
-                <td style="color:#444;font-size:9px;letter-spacing:2px;padding-right:20px;">ACCESS</td>
+                <td style="color:#444;font-size:9px;letter-spacing:2px;padding-bottom:8px;padding-right:20px;">YOUR ROLE</td>
+                <td style="font-size:9px;padding-bottom:8px;">
+                  <span style="color:#555;">: </span>
+                  <span style="color:#E8721C;font-weight:bold;letter-spacing:1px;">${roleLabel}</span>
+                </td>
+              </tr>
+              <tr>
+                <td style="color:#444;font-size:9px;letter-spacing:2px;padding-right:20px;">ASSIGNED BY</td>
                 <td style="font-size:9px;">
                   <span style="color:#555;">: </span>
-                  <span style="color:#22c55e;letter-spacing:1px;">FULL COLLABORATION</span>
+                  <span style="color:#888;letter-spacing:1px;">${invitedByEmail}</span>
                 </td>
               </tr>
             </table>
           </td></tr>
         </table>
 
-        <!-- Prompt -->
         <p style="color:#555;font-size:10px;line-height:1.8;margin:0 0 22px 0;">
-          &gt;_ Click the button below to accept your invite.<br>
-          &gt;_ You will set your password and land directly on the case.
+          &gt;_ Click below to accept your invite and access the case workspace.<br>
+          &gt;_ You will set your password on first login.
         </p>
 
         <!-- CTA -->
@@ -141,7 +160,7 @@ function inviteEmailHtml(inviteLink: string, caseCode: string, clientName: strin
                  style="display:block;color:#000;font-family:'Courier New',Courier,monospace;
                         font-size:11px;font-weight:bold;letter-spacing:5px;
                         text-decoration:none;padding:16px 20px;">
-                &#91; ACCEPT INVITE &amp; OPEN CASE &#93;
+                &#91; ACCEPT &amp; OPEN CASE &#93;
               </a>
             </td>
           </tr>
@@ -153,17 +172,14 @@ function inviteEmailHtml(inviteLink: string, caseCode: string, clientName: strin
           </tr>
         </table>
 
-        <!-- Divider -->
         <div style="height:1px;background:#161616;margin-bottom:16px;"></div>
-
-        <!-- Fallback -->
         <div style="color:#2a2a2a;font-size:8px;letter-spacing:2px;margin-bottom:6px;">&gt;_ FALLBACK URL:</div>
         <div style="color:#383838;font-size:8px;word-break:break-all;line-height:1.6;">${inviteLink}</div>
 
       </td>
     </tr>
 
-    <!-- ── FOOTER ── -->
+    <!-- FOOTER -->
     <tr>
       <td style="background:#070707;border-top:1px solid #141414;padding:12px 24px;">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
@@ -177,7 +193,6 @@ function inviteEmailHtml(inviteLink: string, caseCode: string, clientName: strin
 
 </td></tr>
 </table>
-
 </body>
 </html>`;
 }
@@ -186,41 +201,80 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const { email, case_code, client_name, redirect_url } = await req.json();
+    const {
+      email,
+      name         = "",
+      role         = "analyst",
+      case_code    = "",
+      client_name  = "",
+      invited_by_email = "",
+      redirect_url,
+    } = await req.json();
+
     if (!email) return new Response(JSON.stringify({ error: "Email required" }), {
       status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
-    const supabase = createClient(
+    const admin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-      { auth: { autoRefreshToken: false, persistSession: false } }
+      { auth: { autoRefreshToken: false, persistSession: false } },
     );
 
     const siteBase   = Deno.env.get("SITE_URL") ?? "https://rehbar-credit.vercel.app";
     const redirectTo = redirect_url ?? siteBase;
 
-    // Step 1: create the user — supabase sends NO email with createUser
-    const { error: createError } = await supabase.auth.admin.createUser({
+    // Create the user (no Supabase email sent with createUser)
+    const { data: userData, error: createError } = await admin.auth.admin.createUser({
       email,
-      email_confirm: true,           // skip email confirmation gate
-      user_metadata: { invited_to_case: case_code, invited_client: client_name },
+      email_confirm: true,
+      user_metadata: {
+        full_name:        name || null,
+        role,
+        invited_to_case:  case_code,
+        invited_client:   client_name,
+        invited_by_email,
+      },
     });
+
+    let alreadyExists = false;
+    let userId: string | undefined;
 
     if (createError) {
       const msg = createError.message?.toLowerCase() ?? "";
       if (msg.includes("already been registered") || msg.includes("already registered")) {
-        return new Response(JSON.stringify({
-          ok: false,
-          already_exists: true,
-          error: "This email already has a Rehbar account — share the case link directly.",
-        }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        alreadyExists = true;
+        // Look up existing user id so we can still assign role
+        const { data: list } = await admin.auth.admin.listUsers();
+        userId = list?.users?.find(u => u.email === email)?.id;
+      } else {
+        throw createError;
       }
-      throw createError;
+    } else {
+      userId = userData.user?.id;
     }
 
-    // Step 2: generate a magic-link — supabase sends NO email with generateLink
-    const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({
+    // Assign (or update) role — remove any other roles then insert the desired one
+    if (userId) {
+      await admin.from("user_roles").delete().eq("user_id", userId);
+      await admin.from("user_roles").insert({ user_id: userId, role });
+
+      // Upsert display name into user_profiles if provided
+      if (name) {
+        await admin.from("user_profiles").upsert({ id: userId, full_name: name }, { onConflict: "id" });
+      }
+    }
+
+    if (alreadyExists) {
+      return new Response(JSON.stringify({
+        ok: false,
+        already_exists: true,
+        error: "This email already has a Rehbar account — share the case link directly.",
+      }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    // Generate magic link (no Supabase email sent with generateLink)
+    const { data: linkData, error: linkError } = await admin.auth.admin.generateLink({
       type: "magiclink",
       email,
       options: { redirectTo },
@@ -229,13 +283,21 @@ Deno.serve(async (req) => {
 
     await sendEmail(
       email,
-      `[Rehbar] Case Invite: ${case_code} — ${client_name}`,
-      inviteEmailHtml(linkData.properties.action_link, case_code ?? "", client_name ?? ""),
+      `[Rehbar] You've been assigned: ${case_code} — ${client_name}`,
+      inviteEmailHtml({
+        inviteLink:     linkData.properties.action_link,
+        caseCode:       case_code,
+        clientName:     client_name,
+        role,
+        invitedByEmail: invited_by_email,
+        assigneeName:   name,
+      }),
     );
 
     return new Response(JSON.stringify({ ok: true }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Invite failed";
     return new Response(JSON.stringify({ error: msg }), {

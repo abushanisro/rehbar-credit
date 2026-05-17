@@ -40,7 +40,7 @@
     --destructive:            5 69% 48%;
     --destructive-foreground: 0 0% 100%;
 
-    /* Success — keep green (approved/verified states) */
+    /* Success */
     --success:            145 80% 42%;
     --success-foreground: 0 0% 4%;
 
@@ -48,11 +48,11 @@
     --warning:            45 84% 68%;
     --warning-foreground: 229 58% 8%;
 
-    --border: 229 38% 20%;           /* muted navy border */
+    --border: 229 38% 20%;
     --input:  229 48% 9%;
     --ring:   25 82% 51%;
 
-    --grid-line: 229 40% 16%;        /* subtle navy grid */
+    --grid-line: 229 40% 16%;
 
     --radius: 0px;
 
@@ -64,24 +64,116 @@
 
     --gradient-scan: linear-gradient(180deg, transparent 0%, hsl(25 82% 51% / 0.04) 50%, transparent 100%);
 
-    --sidebar-background:        229 58% 4%;
-    --sidebar-foreground:        36 88% 72%;
-    --sidebar-primary:           25 82% 51%;
+    --sidebar-background:         229 58% 4%;
+    --sidebar-foreground:         36 88% 72%;
+    --sidebar-primary:            25 82% 51%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent:            229 48% 10%;
-    --sidebar-accent-foreground: 36 88% 72%;
-    --sidebar-border:            229 38% 20%;
-    --sidebar-ring:              25 82% 51%;
+    --sidebar-accent:             229 48% 10%;
+    --sidebar-accent-foreground:  36 88% 72%;
+    --sidebar-border:             229 38% 20%;
+    --sidebar-ring:               25 82% 51%;
   }
 
-  /* .dark {
-    same — terminal is always dark
-  } */
+  /* ── Light mode ──────────────────────────────────────────────────────────────
+     WCAG AA requires 4.5:1 contrast for normal text, 3:1 for large/bold text.
+     Background ≈ HSL(225,28%,95%) ≈ #EDF0F7 — luminance ~0.89.
+     To hit 4.5:1 a foreground needs luminance ≤ 0.16.
+
+     Brand orange  #E8721C (dark mode primary, lum 0.30) → fails 2.8:1 on white.
+     Brand gold    #F5A428 (dark mode accent,  lum 0.48) → fails 1.9:1 on white.
+
+     Both are completely retuned for light mode while keeping Rehbar's visual identity.
+  ──────────────────────────────────────────────────────────────────────────── */
+  :root.light {
+    /* ── Backgrounds ── */
+    --background: 225 28% 95%;       /* #EDF0F7  soft blue-gray, not stark white */
+    --foreground: 229 55% 13%;       /* #111843  very dark navy — 12:1 contrast ✓ */
+
+    --surface:   0 0% 100%;          /* #FFFFFF  card panels pop off background */
+    --surface-2: 225 22% 91%;        /* #E2E6F2  secondary surfaces */
+    --surface-3: 225 20% 85%;        /* #D1D7E8  tertiary / hover */
+
+    --card:             0 0% 100%;
+    --card-foreground:  229 55% 13%;
+
+    --popover:            0 0% 100%;
+    --popover-foreground: 229 55% 13%;
+
+    /* Primary — darkened orange: HSL(22,88%,36%) ≈ #AE4308
+       Luminance ≈ 0.13 → contrast 5.5:1 on background ✓ */
+    --primary:            22 88% 36%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary:            225 20% 89%;
+    --secondary-foreground: 229 55% 13%;
+
+    /* Muted foreground: HSL(229,28%,38%) ≈ #485280
+       Luminance ≈ 0.11 → contrast 6.1:1 ✓ */
+    --muted:            225 22% 92%;
+    --muted-foreground: 229 28% 38%;
+
+    /* Accent — dark amber: HSL(32,72%,32%) ≈ #8B5A08
+       Luminance ≈ 0.11 → contrast 6.1:1 ✓ */
+    --accent:            32 72% 32%;
+    --accent-foreground: 0 0% 100%;
+
+    /* Destructive — darkened red: HSL(5,68%,40%) ≈ #AE2812
+       Luminance ≈ 0.10 → contrast 6.7:1 ✓ */
+    --destructive:            5 68% 40%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Success — dark green: HSL(142,58%,28%) ≈ #1C7038
+       Luminance ≈ 0.09 → contrast 7.1:1 ✓ */
+    --success:            142 58% 28%;
+    --success-foreground: 0 0% 100%;
+
+    /* Warning — dark amber: HSL(35,80%,32%) ≈ #986106
+       Luminance ≈ 0.10 → contrast 6.4:1 ✓ */
+    --warning:            35 80% 32%;
+    --warning-foreground: 0 0% 100%;
+
+    --border: 225 20% 74%;           /* visible, medium-contrast borders */
+    --input:  225 15% 97%;           /* near-white input backgrounds */
+    --ring:   22 88% 36%;
+
+    --grid-line: 225 20% 82%;        /* subtle grid on light background */
+
+    --shadow-glow: 0 0 0 1px hsl(22 88% 36% / 0.25), 0 0 14px hsl(22 88% 36% / 0.07);
+    --shadow-panel: inset 0 0 0 1px hsl(var(--border)), 0 2px 8px hsl(229 40% 10% / 0.07);
+
+    --gradient-scan: linear-gradient(180deg, transparent 0%, hsl(22 88% 36% / 0.025) 50%, transparent 100%);
+
+    --sidebar-background:         225 25% 92%;
+    --sidebar-foreground:         229 55% 13%;
+    --sidebar-primary:            22 88% 36%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent:             225 20% 89%;
+    --sidebar-accent-foreground:  229 55% 13%;
+    --sidebar-border:             225 20% 74%;
+    --sidebar-ring:               22 88% 36%;
+  }
 }
 
 @layer base {
   * {
     @apply border-border;
+  }
+
+  /* Smooth theme transitions — the .theme-switching class is added for 250 ms
+     on toggle, so all panels/cards animate together. Removed immediately after
+     so hover effects on individual elements stay instant. */
+  html.theme-switching *,
+  html.theme-switching *::before,
+  html.theme-switching *::after {
+    transition:
+      background-color 0.2s ease,
+      border-color 0.2s ease,
+      color 0.2s ease,
+      box-shadow 0.2s ease !important;
+  }
+
+  html {
+    transition: background-color 0.2s ease, color 0.2s ease;
   }
 
   html, body, #root {
@@ -96,6 +188,7 @@
       linear-gradient(90deg, hsl(var(--grid-line) / 0.4) 1px, transparent 1px);
     background-size: 32px 32px;
     background-attachment: fixed;
+    transition: background-color 0.2s ease, color 0.2s ease;
   }
 
   ::selection {
@@ -145,6 +238,18 @@
     z-index: 1;
   }
 
+  /* In light mode, scanlines are barely perceptible — enough for texture,
+     not enough to reduce readability. */
+  :root.light .scanlines::before {
+    background: repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 3px,
+      hsl(229 40% 10% / 0.035) 4px,
+      transparent 5px
+    );
+  }
+
   .ticker-blink {
     animation: blink 1s steps(2) infinite;
   }
@@ -168,5 +273,16 @@
 
   .glow {
     text-shadow: 0 0 8px hsl(var(--primary) / 0.6);
+  }
+
+  /* Glow is more restrained on light backgrounds to avoid bleed. */
+  :root.light .glow {
+    text-shadow: 0 0 5px hsl(var(--primary) / 0.28);
+  }
+
+  /* Light mode: cards and panels get a subtle lift shadow instead of
+     relying purely on colour difference. */
+  :root.light .terminal-panel {
+    box-shadow: var(--shadow-panel);
   }
 }

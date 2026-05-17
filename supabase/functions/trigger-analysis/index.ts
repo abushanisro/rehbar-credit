@@ -1,10 +1,10 @@
 /**
  * Rehbar — Document Analysis Edge Function
- * Downloads uploaded financial documents, sends them to Mistral for extraction,
+ * Downloads uploaded financial documents, sends them to Claude for extraction,
  * and writes structured data to extracted_financials + financial_ratios.
  * Uses EdgeRuntime.waitUntil so the caller gets an immediate response while
  * extraction runs in the background. No Trigger.dev dependency.
- * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, MISTRAL_API_KEY
+ * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
@@ -46,14 +46,15 @@ type ExtractionResult = {
 };
 
 type ContentBlock =
-  | { type: "text";      text: string }
-  | { type: "image_url"; image_url: { url: string } };
+  | { type: "text";     text: string }
+  | { type: "image";    source: { type: "base64"; media_type: string; data: string } }
+  | { type: "document"; source: { type: "base64"; media_type: "application/pdf"; data: string } };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const MISTRAL_API    = "https://api.mistral.ai/v1";
-const MODEL_VISION   = "pixtral-large-latest";
-const MODEL_TEXT     = "mistral-large-latest";
+const ANTHROPIC_API     = "https://api.anthropic.com/v1";
+const ANTHROPIC_VERSION = "2023-06-01";
+const MODEL             = "claude-haiku-4-5-20251001";
 
 const STATEMENT_TYPES: StatementType[] = [
   "profit_loss", "balance_sheet", "cash_flow", "projections",
@@ -106,22 +107,8 @@ async function downloadAsBase64(supabase: any, path: string): Promise<string> {
   return encodeBase64(new Uint8Array(buf));
 }
 
-async function ocrPdf(base64: string, apiKey: string): Promise<string> {
-  const res = await fetch(`${MISTRAL_API}/ocr`, {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model:    "mistral-ocr-latest",
-      document: { type: "document_url", document_url: `data:application/pdf;base64,${base64}` },
-    }),
-  });
-  if (!res.ok) { const t = await res.text(); throw new Error(`Mistral OCR ${res.status}: ${t.slice(0,200)}`); }
-  const json = await res.json();
-  return (json.pages as { markdown?: string }[] ?? []).map(p => p.markdown ?? "").join("\n\n");
-}
-
 function buildImageBlock(f: FileRecord, base64: string): ContentBlock {
-  return { type: "image_url", image_url: { url: `data:${imageMime(f.file_name)};base64,${base64}` } };
+  return { type: "image", source: { type: "base64", media_type: imageMime(f.file_name), data: base64 } };
 }
 
 function computeRatiosForYear(stmts: StatementOut[], fy: number): Record<string, number | null> {
@@ -151,7 +138,7 @@ async function runAnalysis(
   document_ids: string[],
   user_id: string,
   excel_texts: Record<string, string>,
-  apiKey: string,
+  anthropicKey: string,
   supabase: any,
 ): Promise<void> {
   try {
@@ -167,7 +154,6 @@ async function runAnalysis(
     const contentBlocks: ContentBlock[] = [];
     const skipped: string[] = [];
     let docIndex = 0;
-    let hasImage = false;
 
     for (const doc of docs as FileRecord[]) {
       docIndex++;
@@ -183,18 +169,16 @@ async function runAnalysis(
       try {
         const base64 = await downloadAsBase64(supabase, doc.file_path);
         if (doc.file_type === "image") {
-          hasImage = true;
           contentBlocks.push(
             { type: "text", text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (Image) ===` },
             buildImageBlock(doc, base64),
           );
         } else {
-          // PDF — extract text via OCR, include as text
-          const ocrText = await ocrPdf(base64, apiKey);
-          contentBlocks.push({
-            type: "text",
-            text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (PDF) ===\n\n${ocrText}`,
-          });
+          // PDF — send natively as document block (Claude processes it directly)
+          contentBlocks.push(
+            { type: "text", text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (PDF) ===` },
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+          );
         }
       } catch (e) {
         console.error("Download/OCR failed", doc.id, String(e));
@@ -205,8 +189,6 @@ async function runAnalysis(
     if (contentBlocks.length === 0) {
       throw new Error("No downloadable documents — all failed or are Excel-only without text");
     }
-
-    const model = hasImage ? MODEL_VISION : MODEL_TEXT;
 
     const itemsBlock = STATEMENT_TYPES.map(t =>
       `### ${t.toUpperCase()}\n${STANDARD_LINE_ITEMS[t].map(i => `- ${i}`).join("\n")}`
@@ -229,72 +211,68 @@ EXTRACTION RULES:
 10. When the same fiscal year appears in multiple documents, synthesise — prefer audited over provisional data.`;
 
     const tools = [{
-      type: "function",
-      function: {
-        name: "submit_extraction",
-        description: "Submit all extracted financial statements. One entry per (statement_type, fiscal_year) pair.",
-        parameters: {
-          type: "object",
-          properties: {
-            unit: { type: "string", description: "Unit of all figures: Crores, Lakhs, Thousands, Millions, USD Millions, USD" },
-            statements: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  statement_type: { type: "string", enum: STATEMENT_TYPES },
-                  fiscal_year:    { type: "integer" },
-                  line_items: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        label:      { type: "string" },
-                        value:      { type: ["number", "null"] },
-                        confidence: { type: "number", minimum: 0, maximum: 100 },
-                        note:       { type: "string" },
-                      },
-                      required: ["label", "value", "confidence"],
-                      additionalProperties: false,
+      name:        "submit_extraction",
+      description: "Submit all extracted financial statements. One entry per (statement_type, fiscal_year) pair.",
+      input_schema: {
+        type: "object",
+        properties: {
+          unit: { type: "string", description: "Unit of all figures: Crores, Lakhs, Thousands, Millions, USD Millions, USD" },
+          statements: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                statement_type: { type: "string", enum: STATEMENT_TYPES },
+                fiscal_year:    { type: "integer" },
+                line_items: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      label:      { type: "string" },
+                      value:      { type: ["number", "null"] },
+                      confidence: { type: "number", minimum: 0, maximum: 100 },
+                      note:       { type: "string" },
                     },
+                    required: ["label", "value", "confidence"],
+                    additionalProperties: false,
                   },
                 },
-                required: ["statement_type", "fiscal_year", "line_items"],
-                additionalProperties: false,
               },
+              required: ["statement_type", "fiscal_year", "line_items"],
+              additionalProperties: false,
             },
           },
-          required: ["unit", "statements"],
-          additionalProperties: false,
         },
+        required: ["unit", "statements"],
+        additionalProperties: false,
       },
     }];
 
     let extracted: ExtractionResult | undefined;
 
     for (let attempt = 0; attempt < 3; attempt++) {
-      const res = await fetch(`${MISTRAL_API}/chat/completions`, {
+      const res = await fetch(`${ANTHROPIC_API}/messages`, {
         method: "POST",
         signal: AbortSignal.timeout(120_000),
         headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "content-type": "application/json",
+          "x-api-key":         anthropicKey,
+          "anthropic-version": ANTHROPIC_VERSION,
+          "content-type":      "application/json",
         },
         body: JSON.stringify({
-          model,
+          model:      MODEL,
           max_tokens: 16000,
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content: [
-                { type: "text", text: `Extract the following financial statements for ALL fiscal years:\n\n${itemsBlock}\n\nFor Projections without an explicit FY, use the next fiscal year after the latest historical year.` },
-                ...contentBlocks,
-              ],
-            },
-          ],
+          system:     systemPrompt,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: `Extract the following financial statements for ALL fiscal years:\n\n${itemsBlock}\n\nFor Projections without an explicit FY, use the next fiscal year after the latest historical year.` },
+              ...contentBlocks,
+            ],
+          }],
           tools,
-          tool_choice: "any",
+          tool_choice: { type: "any" },
         }),
       });
 
@@ -304,24 +282,22 @@ EXTRACTION RULES:
       }
       if (!res.ok) {
         const txt = await res.text();
-        throw new Error(`Mistral API ${res.status}: ${txt.slice(0, 300)}`);
+        throw new Error(`Claude API ${res.status}: ${txt.slice(0, 300)}`);
       }
 
       const json = await res.json();
-      const choice = json.choices?.[0];
-      if (choice?.finish_reason === "length") throw new Error("Mistral output truncated — increase max_tokens");
+      if (json.stop_reason === "max_tokens") throw new Error("Claude output truncated — increase max_tokens");
 
-      const toolCall = choice?.message?.tool_calls?.[0];
-      if (!toolCall?.function?.arguments)
-        throw new Error(`No tool_call in Mistral response (finish_reason: ${choice?.finish_reason})`);
+      const toolUse = (json.content as { type: string; input?: unknown }[] ?? [])
+        .find(b => b.type === "tool_use");
+      if (!toolUse?.input)
+        throw new Error(`No tool_use in Claude response (stop_reason: ${json.stop_reason})`);
 
-      extracted = (typeof toolCall.function.arguments === "string"
-        ? JSON.parse(toolCall.function.arguments)
-        : toolCall.function.arguments) as ExtractionResult;
+      extracted = toolUse.input as ExtractionResult;
       break;
     }
 
-    if (!extracted) throw new Error("All Mistral attempts failed — no extraction result");
+    if (!extracted) throw new Error("All Claude attempts failed — no extraction result");
 
     // ── Write extracted_financials ────────────────────────────────────────────
     let totalRows = 0;
@@ -400,8 +376,8 @@ Deno.serve(async (req) => {
       status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
-    const apiKey = Deno.env.get("MISTRAL_API_KEY");
-    if (!apiKey) return new Response(JSON.stringify({ error: "MISTRAL_API_KEY not configured" }), {
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY not configured" }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
