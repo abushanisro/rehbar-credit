@@ -15,14 +15,19 @@ export type ProductType =
 
 export type CaseStatus =
   | "draft"
+  | "docs_received"
+  | "on_hold"
   | "uploading"
   | "extracting"
   | "extracted"
   | "analysis"
   | "narrative"
+  | "recommended_ic"
   | "ic_review"
   | "approved"
-  | "declined";
+  | "conditionally_approved"
+  | "declined"
+  | "queries_resubmission";
 
 export type StatementType = "profit_loss" | "balance_sheet" | "cash_flow" | "projections" | "all_in_one";
 export type DocClass = StatementType | "bank_statement" | "gst_return" | "other";
@@ -158,15 +163,20 @@ export const PRODUCTS: Record<ProductType, ProductMeta> = {
 };
 
 export const CASE_STATUS_META: Record<CaseStatus, { label: string; color: string; pipeline: number }> = {
-  draft: { label: "DRAFT", color: "muted", pipeline: 0 },
-  uploading: { label: "UPLOADING", color: "warning", pipeline: 1 },
-  extracting: { label: "EXTRACTING", color: "warning", pipeline: 2 },
-  extracted: { label: "REVIEW EXTRACTION", color: "warning", pipeline: 3 },
-  analysis: { label: "RATIO ANALYSIS", color: "accent", pipeline: 4 },
-  narrative: { label: "NARRATIVE DRAFT", color: "accent", pipeline: 5 },
-  ic_review: { label: "IC REVIEW", color: "primary", pipeline: 6 },
-  approved: { label: "APPROVED", color: "success", pipeline: 7 },
-  declined: { label: "DECLINED", color: "destructive", pipeline: 7 },
+  draft:                  { label: "CASE CREATED",         color: "muted",        pipeline: 1  },
+  docs_received:          { label: "DOCS RECEIVED",         color: "primary",      pipeline: 2  },
+  on_hold:                { label: "ON HOLD",               color: "warning",      pipeline: 3  },
+  uploading:              { label: "UPLOADING",             color: "warning",      pipeline: 2  },
+  extracting:             { label: "EXTRACTING",            color: "warning",      pipeline: 2  },
+  extracted:              { label: "REVIEW EXTRACTION",     color: "warning",      pipeline: 2  },
+  analysis:               { label: "ANALYSIS IN PROCESS",   color: "accent",       pipeline: 4  },
+  narrative:              { label: "NARRATIVE DRAFT",       color: "accent",       pipeline: 5  },
+  recommended_ic:         { label: "RECOMMENDED FOR IC",    color: "accent",       pipeline: 5  },
+  ic_review:              { label: "SUBMITTED TO IC",       color: "primary",      pipeline: 6  },
+  approved:               { label: "APPROVED BY IC",        color: "success",      pipeline: 7  },
+  conditionally_approved: { label: "COND. APPROVED BY IC",  color: "success",      pipeline: 8  },
+  declined:               { label: "REJECTED BY IC",        color: "destructive",  pipeline: 9  },
+  queries_resubmission:   { label: "QUERIES RESUBMISSION",  color: "warning",      pipeline: 10 },
 };
 
 /**

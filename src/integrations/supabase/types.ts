@@ -694,14 +694,19 @@ export type Database = {
       app_role: "analyst" | "credit_committee" | "operations" | "admin"
       case_status:
         | "draft"
+        | "docs_received"
+        | "on_hold"
         | "uploading"
         | "extracting"
         | "extracted"
         | "analysis"
         | "narrative"
+        | "recommended_ic"
         | "ic_review"
         | "approved"
+        | "conditionally_approved"
         | "declined"
+        | "queries_resubmission"
       doc_class:
         | "profit_loss"
         | "balance_sheet"
@@ -857,14 +862,19 @@ export const Constants = {
       app_role: ["analyst", "credit_committee", "operations", "admin"],
       case_status: [
         "draft",
+        "docs_received",
+        "on_hold",
         "uploading",
         "extracting",
         "extracted",
         "analysis",
         "narrative",
+        "recommended_ic",
         "ic_review",
         "approved",
+        "conditionally_approved",
         "declined",
+        "queries_resubmission",
       ],
       doc_class: [
         "profit_loss",
