@@ -3,12 +3,7 @@
 // DSCR formula fixed by Finance team (not analyst-overridable).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
 type LineItem = {
   label: string;
@@ -162,15 +157,16 @@ function applyThreshold(value: number | null, t: { green_min: number | null; amb
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  const preflight = handleOptions(req); if (preflight) return preflight;
+  const cors = getCorsHeaders(req);
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
     const { case_id } = await req.json();
     if (!case_id) return new Response(JSON.stringify({ error: "case_id required" }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const supabase = createClient(
@@ -185,12 +181,12 @@ Deno.serve(async (req) => {
     );
     const { data: { user } } = await userClient.auth.getUser();
     if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const { data: cc, error: ccErr } = await supabase.from("credit_cases").select("*").eq("id", case_id).single();
     if (ccErr || !cc) return new Response(JSON.stringify({ error: "Case not found" }), {
-      status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 404, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const { data: financials } = await supabase.from("extracted_financials").select("*").eq("case_id", case_id);
@@ -222,7 +218,7 @@ Deno.serve(async (req) => {
 
     if (yearMap.size === 0) {
       return new Response(JSON.stringify({ error: "No confirmed financials" }), {
-        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
@@ -367,7 +363,7 @@ Deno.serve(async (req) => {
       if (insErr) {
         console.error("insert ratios error", insErr);
         return new Response(JSON.stringify({ error: insErr.message }), {
-          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 500, headers: { ...cors, "Content-Type": "application/json" },
         });
       }
     }
@@ -375,12 +371,12 @@ Deno.serve(async (req) => {
     await supabase.from("credit_cases").update({ status: "analysis" }).eq("id", case_id);
 
     return new Response(JSON.stringify({ ok: true, count: rows.length }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...cors, "Content-Type": "application/json" },
     });
   } catch (e) {
     console.error("compute-ratios error", e);
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown" }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 });

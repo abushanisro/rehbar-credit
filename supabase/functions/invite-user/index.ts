@@ -1,11 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
 declare const Deno: { env: { get(k: string): string | undefined } };
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
 
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY")!;
 const FROM = "Rehbar Credit Terminal <onboarding@resend.dev>";
@@ -184,7 +180,7 @@ function inviteEmailHtml(opts: {
       <td style="background:#070707;border-top:1px solid #141414;padding:12px 24px;">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
           <td><span style="color:#252525;font-size:8px;letter-spacing:2px;">REHBAR FINANCIAL SERVICES</span></td>
-          <td align="right"><span style="color:#252525;font-size:8px;letter-spacing:1px;">rehbar.co.in · DO NOT REPLY</span></td>
+          <td align="right"><span style="color:#252525;font-size:8px;letter-spacing:1px;">rehbarfin.com · DO NOT REPLY</span></td>
         </tr></table>
       </td>
     </tr>
@@ -198,9 +194,30 @@ function inviteEmailHtml(opts: {
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  const preflight = handleOptions(req); if (preflight) return preflight;
+  const cors = getCorsHeaders(req);
 
   try {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
+    });
+
+    // Verify caller is admin
+    const caller = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } },
+    );
+    const { data: { user: callerUser } } = await caller.auth.getUser();
+    if (!callerUser) return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
+    });
+    const { data: roleRow } = await caller.from("user_roles").select("role").eq("user_id", callerUser.id).single();
+    if (roleRow?.role !== "admin") return new Response(JSON.stringify({ error: "Admin only" }), {
+      status: 403, headers: { ...cors, "Content-Type": "application/json" },
+    });
+
     const {
       email,
       name         = "",
@@ -212,7 +229,7 @@ Deno.serve(async (req) => {
     } = await req.json();
 
     if (!email) return new Response(JSON.stringify({ error: "Email required" }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const admin = createClient(
@@ -221,7 +238,7 @@ Deno.serve(async (req) => {
       { auth: { autoRefreshToken: false, persistSession: false } },
     );
 
-    const siteBase   = Deno.env.get("SITE_URL") ?? "https://rehbar-credit.vercel.app";
+    const siteBase   = Deno.env.get("SITE_URL") ?? "https://credit.rehbarfin.com";
     const redirectTo = redirect_url ?? siteBase;
 
     // Create the user (no Supabase email sent with createUser)
@@ -270,7 +287,7 @@ Deno.serve(async (req) => {
         ok: false,
         already_exists: true,
         error: "This email already has a Rehbar account — share the case link directly.",
-      }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }), { status: 200, headers: { ...cors, "Content-Type": "application/json" } });
     }
 
     // Generate magic link (no Supabase email sent with generateLink)
@@ -295,13 +312,13 @@ Deno.serve(async (req) => {
     );
 
     return new Response(JSON.stringify({ ok: true }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...cors, "Content-Type": "application/json" },
     });
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Invite failed";
     return new Response(JSON.stringify({ error: msg }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 });

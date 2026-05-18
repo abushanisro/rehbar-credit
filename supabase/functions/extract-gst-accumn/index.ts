@@ -7,16 +7,13 @@
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { callAI, type FileContent } from "../_shared/ai-caller.ts";
 
+import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
+
 declare const Deno: { env: { get(k: string): string | undefined } };
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void };
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { ...CORS, "content-type": "application/json" } });
+const json = (body: unknown, status = 200, cors: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
 
 // ── Background extraction ─────────────────────────────────────────────────────
 
@@ -271,15 +268,16 @@ EXTRACTION RULES:
 // ── HTTP handler ──────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+  const preflight = handleOptions(req); if (preflight) return preflight;
+  const cors = getCorsHeaders(req);
 
   try {
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return json({ error: "Unauthorized" }, 401);
+    if (!authHeader) return json({ error: "Unauthorized" }, 401, cors);
 
     const body = await req.json() as { case_id: string; document_id: string };
     const { case_id, document_id } = body;
-    if (!case_id || !document_id) return json({ error: "Missing fields" }, 400);
+    if (!case_id || !document_id) return json({ error: "Missing fields" }, 400, cors);
 
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const userClient = createClient(
@@ -288,12 +286,12 @@ Deno.serve(async (req) => {
       { global: { headers: { Authorization: authHeader } } },
     );
     const { data: { user } } = await userClient.auth.getUser();
-    if (!user) return json({ error: "Unauthorized" }, 401);
+    if (!user) return json({ error: "Unauthorized" }, 401, cors);
 
     const { data: doc } = await admin.from("financial_documents").select("*").eq("id", document_id).single();
-    if (!doc) return json({ error: "Document not found" }, 404);
+    if (!doc) return json({ error: "Document not found" }, 404, cors);
 
-    if (doc.file_type !== "pdf") return json({ ok: true, is_accumn: false });
+    if (doc.file_type !== "pdf") return json({ ok: true, is_accumn: false }, 200, cors);
 
     // Mark running, then return immediately — background job does the work
     await admin.from("financial_documents")
@@ -304,10 +302,10 @@ Deno.serve(async (req) => {
       runExtraction(case_id, document_id, user.id, doc.file_path, admin)
     );
 
-    return json({ ok: true, processing: true });
+    return json({ ok: true, processing: true }, 200, cors);
 
   } catch (e) {
     console.error("extract-gst-accumn:", e);
-    return json({ error: String(e) }, 500);
+    return json({ error: String(e) }, 500, cors);
   }
 });

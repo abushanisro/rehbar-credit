@@ -8,12 +8,7 @@
 
 import { createClient }             from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { callAI, type FileContent } from "../_shared/ai-caller.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
 type FileSpec = {
   file_path: string;
@@ -51,12 +46,13 @@ async function specToContent(supabase: ReturnType<typeof createClient>, spec: Fi
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  const preflight = handleOptions(req); if (preflight) return preflight;
+  const cors = getCorsHeaders(req);
 
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const supabase = createClient(
@@ -70,7 +66,7 @@ Deno.serve(async (req) => {
     );
     const { data: { user } } = await userClient.auth.getUser();
     if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     // ── Normalise payload to a file list ──────────────────────────────────────
@@ -84,7 +80,7 @@ Deno.serve(async (req) => {
       fileSpecs = [{ file_path: body.file_path, file_type: body.file_type, file_name: body.file_name, excel_text: body.excel_text }];
     } else {
       return new Response(JSON.stringify({ error: "Provide files[] array or legacy file_path/file_type/file_name" }), {
-        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
@@ -97,7 +93,7 @@ Deno.serve(async (req) => {
 
     if (files.length === 0) {
       return new Response(JSON.stringify({ error: "No valid files could be loaded" }), {
-        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
@@ -150,13 +146,13 @@ RULES:
     });
 
     return new Response(JSON.stringify({ ok: true, extracted }), {
-      status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 200, headers: { ...cors, "Content-Type": "application/json" },
     });
 
   } catch (err) {
     console.error("extract-case-meta error:", err);
     return new Response(JSON.stringify({ error: err instanceof Error ? err.message : "Unexpected error" }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 });

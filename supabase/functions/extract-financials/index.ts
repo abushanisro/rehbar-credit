@@ -7,12 +7,7 @@
 
 import { createClient }           from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { callAI, callAIText, type FileContent } from "../_shared/ai-caller.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
 type StatementType = "profit_loss" | "balance_sheet" | "cash_flow" | "projections";
 
@@ -50,12 +45,13 @@ async function downloadAsFile(
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  const preflight = handleOptions(req); if (preflight) return preflight;
+  const cors = getCorsHeaders(req);
 
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const body: {
@@ -68,7 +64,7 @@ Deno.serve(async (req) => {
 
     const { case_id, document_id, statement_type, fiscal_year, excel_text, unit_only } = body;
     if (!case_id || !document_id) return new Response(JSON.stringify({ error: "Missing fields" }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const supabase    = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -80,12 +76,12 @@ Deno.serve(async (req) => {
 
     const { data: { user } } = await userClient.auth.getUser();
     if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const { data: doc } = await supabase.from("financial_documents").select("*").eq("id", document_id).single();
     if (!doc) return new Response(JSON.stringify({ error: "Document not found" }), {
-      status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 404, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     // Build file content — Excel arrives as pre-parsed text, PDF/image downloaded from storage
@@ -105,7 +101,7 @@ Deno.serve(async (req) => {
       if (cleaned) await supabase.from("extracted_financials").update({ unit: cleaned }).eq("case_id", case_id);
       await supabase.from("financial_documents").update({ extraction_status: "done" }).eq("id", document_id);
       return new Response(JSON.stringify({ ok: true, unit: cleaned }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
@@ -201,21 +197,21 @@ CRITICAL RULES:
         extraction_status: "failed", extraction_error: "No statements detected",
       }).eq("id", document_id);
       return new Response(JSON.stringify({ error: "No data extracted" }), {
-        status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 422, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
     await supabase.from("financial_documents").update({ extraction_status: "extracted", extraction_error: null }).eq("id", document_id);
     await supabase.from("credit_cases").update({ status: "extracted" }).eq("id", case_id);
     return new Response(JSON.stringify({ ok: true, unit: args.unit, statements_extracted: totalRows }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...cors, "Content-Type": "application/json" },
     });
 
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("extract-financials error:", msg);
     return new Response(JSON.stringify({ error: msg }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 });

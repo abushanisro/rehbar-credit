@@ -495,10 +495,18 @@ export const TerminalHeader = () => {
         </div>
       </div>
       <nav className="border-b border-border bg-card flex items-center h-9">
-        {navItem("/", "PIPELINE", "F1")}
-        {navItem("/new", "NEW CASE", "F2")}
-        {navItem("/companies", "MASTER DATA", "F3")}
-        {navItem("/users", "TEAM", "F5")}
+        {["ic_member", "credit_committee"].includes(role ?? "") ? (
+          // IC-only nav — no access to the rest of the app
+          navItem("/ic", "IC REVIEW PORTAL", "IC")
+        ) : (
+          <>
+            {navItem("/", "PIPELINE", "F1")}
+            {navItem("/new", "NEW CASE", "F2")}
+            {navItem("/companies", "MASTER DATA", "F3")}
+            {navItem("/users", "TEAM", "F5")}
+            {role === "admin" && navItem("/ic", "IC PORTAL", "IC")}
+          </>
+        )}
         <div className="flex-1" />
         <div className="px-3 text-[11px] text-muted-foreground tracking-widest hidden md:block">
           REHBAR FINANCIAL SERVICES · IC APPRAISAL <span className="text-primary">_</span>

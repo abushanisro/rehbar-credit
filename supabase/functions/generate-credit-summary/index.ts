@@ -5,17 +5,12 @@
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
 declare const Deno: { env: { get(k: string): string | undefined } };
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { ...CORS, "content-type": "application/json" } });
+const json = (body: unknown, status = 200, cors: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
 
 type RatioRow = {
   fiscal_year: number; category: string; ratio_name: string;
@@ -112,15 +107,16 @@ Return exactly this structure:
 Rules: Quote specific values and fiscal years. Do NOT recommend approval or rejection. Maximum 4 risk_factors, 3 positive_factors, 2 data_accuracy_notes.`;
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  const preflight = handleOptions(req); if (preflight) return preflight;
+  const cors = getCorsHeaders(req);
 
   try {
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return json({ error: "Unauthorized" }, 401);
+    if (!authHeader) return json({ error: "Unauthorized" }, 401, cors);
 
     const body = await req.json().catch(() => ({}));
     const { case_id } = body;
-    if (!case_id) return json({ error: "case_id required" }, 400);
+    if (!case_id) return json({ error: "case_id required" }, 400, cors);
 
     // Service role — bypasses RLS
     const admin = createClient(
@@ -135,27 +131,27 @@ Deno.serve(async (req) => {
       { global: { headers: { Authorization: authHeader } } },
     );
     const { data: { user } } = await userClient.auth.getUser();
-    if (!user) return json({ error: "Unauthorized" }, 401);
+    if (!user) return json({ error: "Unauthorized" }, 401, cors);
 
     const { data: cc, error: ccErr } = await admin
       .from("credit_cases")
       .select("client_name,industry,deal_amount,tenure_months,expected_irr,product_type")
       .eq("id", case_id)
       .single();
-    if (ccErr || !cc) return json({ error: `Case not found: ${ccErr?.message??'null'}` }, 404);
+    if (ccErr || !cc) return json({ error: `Case not found: ${ccErr?.message??'null'}` }, 404, cors);
 
     const { data: ratios, error: rErr } = await admin
       .from("financial_ratios")
       .select("fiscal_year,category,ratio_name,ratio_value,threshold_status,benchmark")
       .eq("case_id", case_id)
       .order("fiscal_year");
-    if (rErr) return json({ error: `Ratio query error: ${rErr.message}` }, 500);
-    if (!ratios?.length) return json({ error: "No ratios found — run ratio analysis first" }, 400);
+    if (rErr) return json({ error: `Ratio query error: ${rErr.message}` }, 500, cors);
+    if (!ratios?.length) return json({ error: "No ratios found — run ratio analysis first" }, 400, cors);
 
     const context = buildContext(ratios as RatioRow[], cc as Record<string,unknown>);
 
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-    if (!apiKey) return json({ error: "ANTHROPIC_API_KEY not configured" }, 500);
+    if (!apiKey) return json({ error: "ANTHROPIC_API_KEY not configured" }, 500, cors);
 
     const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -173,10 +169,10 @@ Deno.serve(async (req) => {
     });
 
     const aiBody = await aiRes.json();
-    if (!aiRes.ok) return json({ error: `Claude API ${aiRes.status}: ${JSON.stringify(aiBody).slice(0,300)}` }, 500);
+    if (!aiRes.ok) return json({ error: `Claude API ${aiRes.status}: ${JSON.stringify(aiBody).slice(0,300)}` }, 500, cors);
 
     if (aiBody.stop_reason === "max_tokens")
-      return json({ error: "Response truncated — max_tokens too low. Contact support." }, 500);
+      return json({ error: "Response truncated — max_tokens too low. Contact support." }, 500, cors);
 
     const textBlock = (aiBody.content as { type: string; text?: string }[] ?? []).find((b) => b.type === "text");
     const raw = (textBlock?.text ?? "{}").trim();
@@ -184,7 +180,7 @@ Deno.serve(async (req) => {
 
     let analysis: unknown;
     try { analysis = JSON.parse(cleaned); }
-    catch (pe) { return json({ error: `JSON parse failed: ${pe}. Raw (first 200): ${cleaned.slice(0,200)}` }, 500); }
+    catch (pe) { return json({ error: `JSON parse failed: ${pe}. Raw (first 200): ${cleaned.slice(0,200)}` }, 500, cors); }
 
     const usage = {
       input_tokens:  aiBody.usage?.input_tokens  ?? 0,
@@ -193,9 +189,9 @@ Deno.serve(async (req) => {
       model:         aiBody.model ?? "claude-haiku-4-5-20251001",
     };
 
-    return json({ analysis, usage });
+    return json({ analysis, usage }, 200, cors);
   } catch (e) {
     console.error("generate-credit-summary:", e);
-    return json({ error: String(e) }, 500);
+    return json({ error: String(e) }, 500, cors);
   }
 });

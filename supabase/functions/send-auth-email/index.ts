@@ -1,9 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY")!;
 const FROM = "Rehbar Credit Terminal <onboarding@resend.dev>";
@@ -215,7 +211,7 @@ function verificationEmailHtml(confirmLink: string, fullName?: string, isResend 
       <td style="background:#070707;border-top:1px solid #141414;padding:12px 24px;">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
           <td><span style="color:#252525;font-size:8px;letter-spacing:2px;">REHBAR FINANCIAL SERVICES</span></td>
-          <td align="right"><span style="color:#252525;font-size:8px;letter-spacing:1px;">rehbar.co.in · DO NOT REPLY</span></td>
+          <td align="right"><span style="color:#252525;font-size:8px;letter-spacing:1px;">rehbarfin.com · DO NOT REPLY</span></td>
         </tr></table>
       </td>
     </tr>
@@ -230,12 +226,13 @@ function verificationEmailHtml(confirmLink: string, fullName?: string, isResend 
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  const preflight = handleOptions(req); if (preflight) return preflight;
+  const cors = getCorsHeaders(req);
 
   try {
     const { type, email, password, full_name, redirect_url } = await req.json();
     if (!email) return new Response(JSON.stringify({ error: "Email required" }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
 
     const supabase = createClient(
@@ -244,7 +241,7 @@ Deno.serve(async (req) => {
       { auth: { autoRefreshToken: false, persistSession: false } }
     );
 
-    const siteBase   = Deno.env.get("SITE_URL") ?? "https://rehbar-credit.vercel.app";
+    const siteBase   = Deno.env.get("SITE_URL") ?? "https://credit.rehbarfin.com";
     const redirectTo = redirect_url ?? `${siteBase}/auth`;
 
     if (type === "signup") {
@@ -260,7 +257,7 @@ Deno.serve(async (req) => {
         const msg = createError.message?.toLowerCase() ?? "";
         if (msg.includes("already registered") || msg.includes("already been registered")) {
           return new Response(JSON.stringify({ ok: false, already_exists: true }), {
-            status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: 200, headers: { ...cors, "Content-Type": "application/json" },
           });
         }
         throw createError;
@@ -281,7 +278,7 @@ Deno.serve(async (req) => {
       );
 
       return new Response(JSON.stringify({ ok: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
@@ -300,17 +297,17 @@ Deno.serve(async (req) => {
       );
 
       return new Response(JSON.stringify({ ok: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
     return new Response(JSON.stringify({ error: "Invalid type" }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed";
     return new Response(JSON.stringify({ error: msg }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 });

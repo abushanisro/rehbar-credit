@@ -19,32 +19,48 @@ const AuthContext = createContext<AuthContextValue>({
 });
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [session, setSession] = useState<Session | null>(null);
-  const [role, setRole] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [session, setSession]       = useState<Session | null>(null);
+  const [role, setRole]             = useState<string | null>(null);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [roleReady, setRoleReady]   = useState(false);
+
+  // loading stays true until BOTH session and role are resolved
+  const loading = !sessionReady || (!!session?.user?.id && !roleReady);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
       setSession(s);
-      setLoading(false);
+      if (!s?.user?.id) { setRole(null); setRoleReady(true); }
+      setSessionReady(true);
     });
 
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       setSession(s);
-      setLoading(false);
+      if (!s?.user?.id) { setRole(null); setRoleReady(true); }
+      setSessionReady(true);
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!session?.user?.id) { setRole(null); return; }
+    if (!session?.user?.id) { setRole(null); setRoleReady(true); return; }
+    setRoleReady(false);
     supabase.from("user_roles")
       .select("role")
       .eq("user_id", session.user.id)
       .limit(1)
       .single()
-      .then(({ data }) => setRole(data?.role ?? "analyst"));
+      .then(({ data, error }) => {
+        const VALID_ROLES = ["admin", "analyst", "business_development", "ic_member", "credit_committee", "operations"];
+        if (error || !data || !VALID_ROLES.includes(data.role)) {
+          // Fail-safe to null — never default to a privileged role on error
+          setRole(null);
+        } else {
+          setRole(data.role);
+        }
+        setRoleReady(true);
+      });
   }, [session?.user?.id]);
 
   const signOut = async () => {

@@ -14,7 +14,8 @@ export async function dlExcel(
 export function dlPdf(html: string, title: string) {
   const win = window.open("", "_blank", "width=1000,height=800");
   if (!win) return;
-  win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>
+  const safeTitle = title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  win.document.write(`<!DOCTYPE html><html><head><title>${safeTitle}</title><style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:"Courier New",monospace;font-size:10px;color:#000;background:#fff;padding:24px 32px}
     h1{font-size:14px;font-weight:bold;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:16px;letter-spacing:2px;text-transform:uppercase}
