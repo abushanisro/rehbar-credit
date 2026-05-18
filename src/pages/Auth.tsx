@@ -6,16 +6,14 @@ import { useAuth } from "@/features/auth/AuthProvider";
 import { toast } from "sonner";
 
 const schema = z.object({
-  email: z.string().trim().email("Invalid email").max(255),
+  email:    z.string().trim().email("Invalid email").max(255),
   password: z.string().min(1, "Password required").max(128),
 });
 
 /** Allow only same-origin relative paths — blocks open-redirect attacks. */
 function sanitizeRedirect(raw: string | null): string {
   if (!raw) return "/";
-  // Must start with / and must not be protocol-relative (//evil.com)
   if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
-  // Block javascript: and data: URIs embedded as paths
   if (/^\/[a-z][a-z\d+\-.]*:/i.test(raw)) return "/";
   return raw;
 }
@@ -23,27 +21,27 @@ function sanitizeRedirect(raw: string | null): string {
 // ─── Boot sequences ───────────────────────────────────────────────────────────
 
 const STAFF_LINES = [
-  { text: "CREDIT TERMINAL v1.0.0", color: "text-primary", delay: 0 },
-  { text: "REHBAR FINANCIAL SERVICES · rehbar.co.in", color: "text-muted-foreground", delay: 0 },
-  { text: "", color: "", delay: 150 },
-  { text: "LOADING FINANCIAL RATIO MATRIX............[OK]", color: "text-success", delay: 60 },
+  { text: "CREDIT TERMINAL v1.0.0",                       color: "text-primary",          delay: 0   },
+  { text: "REHBAR FINANCIAL SERVICES",                    color: "text-muted-foreground", delay: 0   },
+  { text: "",                                              color: "",                      delay: 150 },
+  { text: "LOADING FINANCIAL RATIO MATRIX............[OK]",    color: "text-success", delay: 60 },
   { text: "DSCR COMPUTATION MODULE...................[ONLINE]", color: "text-success", delay: 60 },
-  { text: "CLAUDE SONNET 4.6 API....................[READY]", color: "text-success", delay: 60 },
-  { text: "SHARIA COMPLIANCE ENGINE..................[ACTIVE]", color: "text-success", delay: 60 },
-  { text: "", color: "", delay: 200 },
-  { text: "> AWAITING OPERATOR AUTHENTICATION_", color: "text-primary", delay: 0 },
+  { text: "CLAUDE SONNET 4.6 API....................[READY]",   color: "text-success", delay: 60 },
+  { text: "SHARIA COMPLIANCE ENGINE..................[ACTIVE]",  color: "text-success", delay: 60 },
+  { text: "",                                              color: "",                      delay: 200 },
+  { text: "> AWAITING OPERATOR AUTHENTICATION_",           color: "text-primary",          delay: 0   },
 ];
 
 const IC_LINES = [
-  { text: "IC REVIEW PORTAL v1.0.0", color: "text-warning", delay: 0 },
-  { text: "INVESTMENT COMMITTEE · RESTRICTED ACCESS", color: "text-muted-foreground", delay: 0 },
-  { text: "", color: "", delay: 150 },
+  { text: "IC REVIEW PORTAL v1.0.0",                      color: "text-warning",          delay: 0   },
+  { text: "INVESTMENT COMMITTEE · RESTRICTED ACCESS",     color: "text-muted-foreground", delay: 0   },
+  { text: "",                                              color: "",                      delay: 150 },
   { text: "ENCRYPTED IC CHANNEL..................[ESTABLISHED]", color: "text-success", delay: 60 },
-  { text: "CASE QUEUE SYNC.......................[READY]", color: "text-success", delay: 60 },
-  { text: "IC NOTE READER........................[ONLINE]", color: "text-success", delay: 60 },
-  { text: "DECISION ENGINE.......................[ARMED]", color: "text-success", delay: 60 },
-  { text: "", color: "", delay: 200 },
-  { text: "> AWAITING IC MEMBER AUTHENTICATION_", color: "text-warning", delay: 0 },
+  { text: "CASE QUEUE SYNC.......................[READY]",       color: "text-success", delay: 60 },
+  { text: "IC NOTE READER........................[ONLINE]",      color: "text-success", delay: 60 },
+  { text: "DECISION ENGINE.......................[ARMED]",       color: "text-success", delay: 60 },
+  { text: "",                                              color: "",                      delay: 200 },
+  { text: "> AWAITING IC MEMBER AUTHENTICATION_",          color: "text-warning",          delay: 0   },
 ];
 
 // ─── Typewriter hook ──────────────────────────────────────────────────────────
@@ -91,16 +89,97 @@ function useTypewriter(lines: typeof STAFF_LINES) {
   return { completedLines, currentLine, currentColor, done };
 }
 
-// ─── Login panel component ────────────────────────────────────────────────────
-interface LoginPanelProps {
-  variant: "staff" | "ic";
-  redirectTo: string;
+// ─── Portal selection card ────────────────────────────────────────────────────
+function PortalCard({ variant, onClick }: { variant: "staff" | "ic"; onClick: () => void }) {
+  const isIC = variant === "ic";
+
+  const borderCls  = isIC
+    ? "border-warning/30 hover:border-warning/70"
+    : "border-primary/30 hover:border-primary/70";
+  const headerBg   = isIC ? "bg-warning/5 border-warning/20" : "bg-primary/5 border-primary/20";
+  const accentText = isIC ? "text-warning" : "text-primary";
+  const badgeCls   = isIC
+    ? "border-warning/40 text-warning"
+    : "border-primary/40 text-primary";
+  const dotCls     = isIC ? "bg-warning" : "bg-primary";
+  const btnCls     = isIC
+    ? "bg-warning/10 border border-warning/40 text-warning hover:bg-warning/20"
+    : "bg-primary/10 border border-primary/40 text-primary hover:bg-primary/20";
+  const glowCls    = isIC
+    ? "hover:shadow-[0_0_24px_rgba(234,179,8,0.12)]"
+    : "hover:shadow-[0_0_24px_rgba(232,114,28,0.12)]";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex-1 min-w-0 flex flex-col border bg-surface-1 transition-all duration-200 text-left group cursor-pointer ${borderCls} ${glowCls}`}
+    >
+      {/* Card header bar */}
+      <div className={`px-5 py-3 border-b ${headerBg} flex items-center justify-between`}>
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${dotCls} opacity-80`} />
+          <span className={`text-[8px] font-bold tracking-[0.3em] ${accentText} opacity-70`}>
+            {isIC ? "INVESTMENT COMMITTEE" : "CREDIT OPERATIONS"}
+          </span>
+        </div>
+        <div className={`text-[8px] font-bold tracking-widest border px-2 py-0.5 ${badgeCls}`}>
+          {isIC ? "IC / CC" : "STAFF"}
+        </div>
+      </div>
+
+      {/* Card body */}
+      <div className="px-6 py-7 flex flex-col gap-4 flex-1">
+        {/* Icon */}
+        <div className={`text-3xl font-bold ${accentText} opacity-60 select-none`}>
+          {isIC ? "◉" : "▶"}
+        </div>
+
+        {/* Name */}
+        <div>
+          <div className={`text-xl font-bold tracking-wider ${accentText} glow leading-tight`}>
+            {isIC ? "IC REVIEW PORTAL" : "CREDIT TERMINAL"}
+          </div>
+          <div className="text-[10px] text-muted-foreground/60 tracking-widest mt-1">
+            {isIC ? "RESTRICTED · COMMITTEE ACCESS" : "STAFF WORKSPACE"}
+          </div>
+        </div>
+
+        {/* Role list */}
+        <div className="space-y-1">
+          {(isIC
+            ? ["IC MEMBERS", "CREDIT COMMITTEE", "ADMINISTRATORS"]
+            : ["ANALYSTS", "BUSINESS DEVELOPMENT", "OPERATIONS"]
+          ).map(role => (
+            <div key={role} className="flex items-center gap-2">
+              <div className={`w-1 h-1 rounded-full ${dotCls} opacity-40`} />
+              <span className="text-[9px] tracking-widest text-muted-foreground/50">{role}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* CTA */}
+      <div className="px-5 pb-5">
+        <div className={`w-full py-2.5 text-center text-[10px] font-bold tracking-widest transition-colors ${btnCls}`}>
+          {isIC ? "ENTER IC PORTAL →" : "ENTER CREDIT TERMINAL →"}
+        </div>
+      </div>
+    </button>
+  );
 }
 
-const MAX_ATTEMPTS  = 5;
-const BASE_LOCKOUT  = 30_000; // 30 s, doubles each extra attempt
+// ─── Login panel ──────────────────────────────────────────────────────────────
+const MAX_ATTEMPTS = 5;
+const BASE_LOCKOUT = 30_000;
 
-function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
+interface LoginPanelProps {
+  variant:    "staff" | "ic";
+  redirectTo: string;
+  onBack:     () => void;
+}
+
+function LoginPanel({ variant, redirectTo, onBack }: LoginPanelProps) {
   const navigate    = useNavigate();
   const { session } = useAuth();
 
@@ -114,13 +193,12 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
   const lines = variant === "staff" ? STAFF_LINES : IC_LINES;
   const { completedLines, currentLine, currentColor, done } = useTypewriter(lines);
 
-  const isIC     = variant === "ic";
-  const accent   = isIC ? "warning" : "primary";
-  const accentCls = isIC
-    ? "border-warning/60 bg-warning/5"
-    : "border-primary/60 bg-primary/5";
+  const isIC         = variant === "ic";
+  const accentCls    = isIC ? "border-warning/50 bg-warning/5" : "border-primary/50 bg-primary/5";
   const headerAccent = isIC ? "text-warning" : "text-primary";
-  const btnCls = isIC
+  const headerBdr    = isIC ? "border-warning/25 bg-warning/5" : "border-primary/25 bg-primary/5";
+  const footerBdr    = isIC ? "border-warning/15" : "border-primary/15";
+  const btnCls       = isIC
     ? "bg-warning text-black hover:brightness-105"
     : "bg-primary text-primary-foreground hover:brightness-110";
 
@@ -136,13 +214,10 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    // Brute-force lockout check
     if (Date.now() < lockedUntil) {
       toast.error(`Too many attempts. Try again in ${remainingSecs}s`);
       return;
     }
-
     const parsed = schema.safeParse({ email, password });
     if (!parsed.success) { toast.error(parsed.error.issues[0].message); return; }
 
@@ -150,15 +225,13 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
-        // Increment counter and apply exponential backoff after MAX_ATTEMPTS
         const next = attempts + 1;
         setAttempts(next);
         if (next >= MAX_ATTEMPTS) {
           const delay = BASE_LOCKOUT * Math.pow(2, next - MAX_ATTEMPTS);
-          setLockedUntil(Date.now() + Math.min(delay, 10 * 60_000)); // cap 10 min
+          setLockedUntil(Date.now() + Math.min(delay, 10 * 60_000));
           toast.error(`Too many failed attempts. Locked for ${Math.ceil(delay / 1000)}s`);
         } else {
-          // Generic message — never reveal whether email or password was wrong
           toast.error("Invalid email or password");
         }
       } else {
@@ -173,9 +246,18 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
   };
 
   return (
-    <div className={`flex flex-col border ${accentCls} flex-1 min-w-0`}>
-      {/* Panel header stripe */}
-      <div className={`px-5 py-3 border-b ${isIC ? "border-warning/30 bg-warning/5" : "border-primary/30 bg-primary/5"} flex items-center justify-between`}>
+    <div className={`flex flex-col border ${accentCls}`}>
+      {/* Back link */}
+      <button
+        type="button"
+        onClick={onBack}
+        className="px-5 py-2.5 border-b border-border/30 bg-surface-2 text-[9px] tracking-widest text-muted-foreground/50 hover:text-muted-foreground transition-colors text-left"
+      >
+        ← SELECT PORTAL
+      </button>
+
+      {/* Panel header */}
+      <div className={`px-5 py-3 border-b ${headerBdr} flex items-center justify-between`}>
         <div>
           <div className={`text-[9px] tracking-widest font-bold ${headerAccent}`}>
             {isIC ? "◉ INVESTMENT COMMITTEE" : "▶ CREDIT OPERATIONS"}
@@ -189,16 +271,7 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
         </div>
       </div>
 
-      {/* Who is this for */}
-      <div className="px-5 py-2.5 border-b border-border/40 bg-surface-2">
-        <div className="text-[9px] text-muted-foreground tracking-widest">
-          {isIC
-            ? "IC Members · Credit Committee · Administrators"
-            : "Analysts · Business Development · Operations"}
-        </div>
-      </div>
-
-      {/* Typewriter boot */}
+      {/* Typewriter boot log */}
       <div
         ref={scrollRef}
         className="px-4 pt-3 pb-2 h-28 overflow-hidden font-mono text-[9px] leading-relaxed border-b border-border/30 bg-background/60"
@@ -233,8 +306,8 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
             value={email}
             onChange={e => setEmail(e.target.value)}
             required
-            autoFocus={!isIC}
-            placeholder={isIC ? "icmember@rehbar.co.in" : "analyst@rehbar.co.in"}
+            autoFocus
+            placeholder={isIC ? "icmember@rehbarfin.com" : "analyst@rehbarfin.com"}
             className={`w-full bg-input border px-3 py-2 text-sm font-mono focus:outline-none transition-colors ${
               isIC
                 ? "border-border focus:border-warning text-foreground placeholder:text-muted-foreground/30"
@@ -275,8 +348,8 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
       </form>
 
       {/* Panel footer */}
-      <div className={`px-5 py-2 border-t ${isIC ? "border-warning/20" : "border-primary/20"} bg-surface-2`}>
-        <div className="text-[8px] tracking-widest text-muted-foreground/50 text-center">
+      <div className={`px-5 py-2 border-t ${footerBdr} bg-surface-2`}>
+        <div className="text-[8px] tracking-widest text-muted-foreground/40 text-center">
           {isIC ? "RESTRICTED · INVESTMENT COMMITTEE ONLY" : "ENCRYPTED CHANNEL · REHBAR CREDIT TERMINAL"}
         </div>
       </div>
@@ -287,53 +360,62 @@ function LoginPanel({ variant, redirectTo }: LoginPanelProps) {
 // ─── Auth page ────────────────────────────────────────────────────────────────
 const Auth = () => {
   const location   = useLocation();
+  const navigate   = useNavigate();
+  const { session } = useAuth();
   const redirectTo = sanitizeRedirect(new URLSearchParams(location.search).get("redirect"));
+
+  const [view, setView]     = useState<"select" | "login">("select");
+  const [portal, setPortal] = useState<"staff" | "ic" | null>(null);
+
+  useEffect(() => {
+    if (session) navigate(redirectTo, { replace: true });
+  }, [session, navigate, redirectTo]);
+
+  const selectPortal = (v: "staff" | "ic") => { setPortal(v); setView("login"); };
+  const goBack       = () => { setView("select"); setPortal(null); };
 
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 gap-6">
 
-      {/* Logo row */}
+      {/* Logo */}
       <div className="text-center">
         <img
           src="/Rehbar_logo.png"
           alt="Rehbar Financial Services"
           className="h-12 w-auto object-contain mx-auto mb-3"
         />
-        <div className="text-primary text-lg font-bold tracking-[0.25em] glow">REHBAR FINANCIAL SERVICES</div>
+        <div className="text-primary text-lg font-bold tracking-[0.25em] glow">
+          REHBAR FINANCIAL SERVICES
+        </div>
         <div className="text-muted-foreground text-[10px] tracking-[0.4em] mt-1">
-          SECURE TERMINAL ACCESS · SELECT YOUR PORTAL
+          SECURE TERMINAL ACCESS
         </div>
       </div>
 
-      {/* Divider */}
-      <div className="w-full max-w-3xl flex items-center gap-3">
-        <div className="flex-1 h-px bg-border" />
-        <span className="text-[9px] tracking-widest text-muted-foreground/50">SELECT PORTAL</span>
-        <div className="flex-1 h-px bg-border" />
-      </div>
+      {view === "select" ? (
+        <>
+          {/* Divider */}
+          <div className="w-full max-w-2xl flex items-center gap-3">
+            <div className="flex-1 h-px bg-border" />
+            <span className="text-[9px] tracking-widest text-muted-foreground/40">SELECT PORTAL</span>
+            <div className="flex-1 h-px bg-border" />
+          </div>
 
-      {/* Two panels */}
-      <div className="w-full max-w-3xl flex flex-col md:flex-row gap-4">
-        <LoginPanel variant="staff" redirectTo={redirectTo} />
-
-        {/* Vertical divider (desktop) */}
-        <div className="hidden md:flex flex-col items-center gap-2 py-6">
-          <div className="flex-1 w-px bg-border" />
-          <span className="text-[9px] tracking-widest text-muted-foreground/30 rotate-0">OR</span>
-          <div className="flex-1 w-px bg-border" />
+          {/* Portal cards */}
+          <div className="w-full max-w-2xl flex flex-col md:flex-row gap-4">
+            <PortalCard variant="staff" onClick={() => selectPortal("staff")} />
+            <PortalCard variant="ic"    onClick={() => selectPortal("ic")}    />
+          </div>
+        </>
+      ) : (
+        /* Login form — single centered panel */
+        <div className="w-full max-w-md">
+          <LoginPanel variant={portal!} redirectTo={redirectTo} onBack={goBack} />
         </div>
-        {/* Horizontal divider (mobile) */}
-        <div className="flex md:hidden items-center gap-3">
-          <div className="flex-1 h-px bg-border" />
-          <span className="text-[9px] tracking-widest text-muted-foreground/30">OR</span>
-          <div className="flex-1 h-px bg-border" />
-        </div>
+      )}
 
-        <LoginPanel variant="ic" redirectTo={redirectTo} />
-      </div>
-
-      <div className="text-[9px] text-muted-foreground/40 tracking-widest text-center">
-        REHBAR FINANCIAL SERVICES · rehbar.co.in · ALL SESSIONS ENCRYPTED & AUDITED
+      <div className="text-[9px] text-muted-foreground/30 tracking-widest text-center">
+        REHBAR FINANCIAL SERVICES · rehbarfin.com · ALL SESSIONS ENCRYPTED & AUDITED
       </div>
     </div>
   );
