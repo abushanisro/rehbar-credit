@@ -531,8 +531,6 @@ export default function NewCase() {
       website: form.website || null,
       delivery_email: user.email ?? "",
       status: "draft",
-      assigned_to_email: (form.assign_email.trim() && form.assign_email !== "__new__") ? form.assign_email.trim() : null,
-      assigned_to_name:  form.assign_name.trim()  || null,
       ...(form.has_partner ? {
         ic_note: {
           has_partner: true,

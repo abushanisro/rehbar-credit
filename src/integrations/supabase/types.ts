@@ -128,6 +128,56 @@ export type Database = {
         }
         Relationships: []
       }
+      accumn_api_orders: {
+        Row: {
+          id: string
+          case_id: string
+          user_id: string
+          ff_order_id: string | null
+          product_type: "INSIGHTS" | "BSA" | "ITR_GST"
+          order_status: "pending" | "submitting" | "in_progress" | "completed" | "cancelled" | "failed"
+          consent_link: string | null
+          identifier: string | null
+          files_metadata: Json
+          report_data: Json
+          error_message: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          case_id: string
+          user_id: string
+          ff_order_id?: string | null
+          product_type: "INSIGHTS" | "BSA" | "ITR_GST"
+          order_status?: "pending" | "submitting" | "in_progress" | "completed" | "cancelled" | "failed"
+          consent_link?: string | null
+          identifier?: string | null
+          files_metadata?: Json
+          report_data?: Json
+          error_message?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          ff_order_id?: string | null
+          order_status?: "pending" | "submitting" | "in_progress" | "completed" | "cancelled" | "failed"
+          consent_link?: string | null
+          files_metadata?: Json
+          report_data?: Json
+          error_message?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "accumn_api_orders_case_id_fkey"
+            columns: ["case_id"]
+            isOneToOne: false
+            referencedRelation: "credit_cases"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       companies: {
         Row: {
           id: string

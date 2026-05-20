@@ -51,6 +51,40 @@ export type EditFileQueueItem = {
   storagePath?: string;
 };
 
+// ── Accumn API Order types (direct API integration) ───────────────────────────
+export type AccumnProductType = "INSIGHTS" | "BSA" | "ITR_GST";
+export type AccumnOrderStatus =
+  | "pending" | "submitting" | "in_progress"
+  | "completed" | "cancelled" | "failed";
+
+export interface AccumnFileDetail {
+  source: string;
+  file_id: string | number;
+  file_name: string;
+  file_category: "REPORT" | "MRD" | "RAW" | "CAM_REPORT" | "BP_UPLOAD";
+  mime_type: string;
+  file_size_in_bytes?: number;
+  download_url: string;
+  url_expiry_time_epoch_ms?: number;
+  key: string;
+}
+
+export interface AccumnApiOrder {
+  id: string;
+  case_id: string;
+  user_id: string;
+  ff_order_id: string | null;
+  product_type: AccumnProductType;
+  order_status: AccumnOrderStatus;
+  consent_link: string | null;
+  identifier: string | null;
+  files_metadata: AccumnFileDetail[];
+  report_data: Record<string, unknown>;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // ── Accumn GST Analytical Report types ────────────────────────────────────────
 export interface AccumnFlag { flag_name: string; severity: "HIGH" | "MEDIUM" | "LOW"; description: string }
 export interface AccumnSalesSummary { period: string; adjusted_revenue?: number|null; net_revenue?: number|null; sales_return_pct?: number|null; advance_pct?: number|null; gross_margin_pct?: number|null; ebitda_pct?: number|null; pat_pct?: number|null }

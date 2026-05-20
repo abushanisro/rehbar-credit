@@ -33,6 +33,8 @@ import { PartnerAnalysisTab } from "@/tabs/case/PartnerAnalysisTab";
 import type { PartnerEntry } from "@/tabs/case/PartnerAnalysisTab";
 import { ProvisionalTab } from "@/tabs/case/ProvisionalTab";
 import type { ProvPeriod } from "@/tabs/case/ProvisionalTab";
+import { AccumnBsaPanel } from "@/components/case/AccumnBsaPanel";
+import { AccumnApiPanel } from "@/components/case/AccumnApiPanel";
 
 type CaseRow = Tables<"credit_cases">;
 type DocRow = Tables<"financial_documents">;
@@ -395,8 +397,9 @@ function CaseViewInner() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [tab, setTabRaw] = useState<"upload" | "review" | "provisional" | "ratios" | "projections" | "ic_note" | "bank" | "gst">("upload");
+  const [tab, setTabRaw] = useState<"upload" | "review" | "provisional" | "ratios" | "projections" | "ic_note" | "bank" | "gst" | "partner">("upload");
   const [entity, setEntity] = useState<"main" | "partner">("main");
+  const [partnerSubTab, setPartnerSubTab] = useState<"upload" | "review" | "ratios" | "bank" | "gst">("upload");
   const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
   const setTab = (t: typeof tab) => { setTabRaw(t); };
   const [cc, setCc] = useState<CaseRow | null>(null);
@@ -411,6 +414,7 @@ function CaseViewInner() {
   const [bankData, setBankData]             = useState<Tables<"bank_statement_data">[]>([]);
   const [gstData, setGstData]               = useState<Tables<"gst_return_data">[]>([]);
   const [accumnData, setAccumnData]         = useState<AccumnReport | null>(null);
+  const [accumnOrders, setAccumnOrders]     = useState<Tables<"accumn_api_orders">[]>([]);
   const [linkedCompany, setLinkedCompany]   = useState<Record<string, string | null> | null>(null);
   const [linkedDirs, setLinkedDirs]         = useState<Record<string, string | null>[]>([]);
   const [coDetailTab, setCoDetailTab]       = useState<"company" | "directors">("company");
@@ -491,13 +495,14 @@ function CaseViewInner() {
 
   const reload = useCallback(async () => {
     if (!id) return;
-    const [c, d, e, r, bk, gs] = await Promise.all([
+    const [c, d, e, r, bk, gs, ao] = await Promise.all([
       supabase.from("credit_cases").select("*").eq("id", id).single(),
       supabase.from("financial_documents").select("*").eq("case_id", id).order("created_at"),
       supabase.from("extracted_financials").select("*").eq("case_id", id),
       supabase.from("financial_ratios").select("*").eq("case_id", id).order("fiscal_year"),
       supabase.from("bank_statement_data").select("*").eq("case_id", id).order("month"),
       supabase.from("gst_return_data").select("*").eq("case_id", id).order("period"),
+      supabase.from("accumn_api_orders").select("*").eq("case_id", id).order("created_at", { ascending: false }),
     ]);
     if (!c.data) { navigate("/", { replace: true }); return; }
     setCc(c.data);
@@ -506,6 +511,7 @@ function CaseViewInner() {
     setRatios(r.data ?? []);
     setBankData(bk.data ?? []);
     setGstData(gs.data ?? []);
+    setAccumnOrders((ao.data ?? []) as Tables<"accumn_api_orders">[]);
 
     // Load Accumn GST analytical report (not in generated TS types)
     const dbRaw = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
@@ -654,6 +660,7 @@ function CaseViewInner() {
       .on("postgres_changes", { event: "*", schema: "public", table: "financial_documents", filter: `case_id=eq.${id}` }, scheduleReload)
       .on("postgres_changes", { event: "*", schema: "public", table: "extracted_financials", filter: `case_id=eq.${id}` }, scheduleReload)
       .on("postgres_changes", { event: "*", schema: "public", table: "financial_ratios", filter: `case_id=eq.${id}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "accumn_api_orders", filter: `case_id=eq.${id}` }, scheduleReload)
       .subscribe();
     return () => {
       if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current);
@@ -2042,7 +2049,17 @@ function CaseViewInner() {
   const partnerDocs   = docs.filter(d => partnerDocIds.has(d.id));
   const mainExtracted    = hasPartner ? extracted.filter(r => !r.document_id || !partnerDocIds.has(r.document_id)) : extracted;
   const partnerExtracted = hasPartner ? extracted.filter(r => r.document_id !== null && partnerDocIds.has(r.document_id)) : [];
-  const activeExtracted  = (!hasPartner || entity === "main") ? mainExtracted : partnerExtracted;
+  const activeExtracted  = (tab === "partner") ? partnerExtracted
+    : (!hasPartner || entity === "main") ? mainExtracted : partnerExtracted;
+
+  // Entity-isolated bank and GST data (linked via document_id like extracted_financials)
+  const mainBankData    = bankData.filter(b => !b.document_id || !partnerDocIds.has(b.document_id));
+  const partnerBankData = bankData.filter(b => !!b.document_id && partnerDocIds.has(b.document_id));
+  const activeBankData  = tab === "partner" ? partnerBankData : mainBankData;
+
+  const mainGstData    = gstData.filter(g => !g.document_id || !partnerDocIds.has(g.document_id));
+  const partnerGstData = gstData.filter(g => !!g.document_id && partnerDocIds.has(g.document_id));
+  const activeGstData  = tab === "partner" ? partnerGstData : mainGstData;
 
   // Reusable entity selector bar — rendered at top of any tab panel
   const entityBar = hasPartner ? (
@@ -2948,15 +2965,40 @@ function CaseViewInner() {
               className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-border whitespace-nowrap flex items-center gap-1 ${tab === k ? "bg-primary text-primary-foreground" : "text-primary/70 hover:bg-surface"}`}
             >{l}<TabPresenceDots tabKey={k} /></button>
           ))}
+          {hasPartner && (
+            <button
+              onClick={() => setTabRaw("partner")}
+              className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-border whitespace-nowrap flex items-center gap-1 font-bold ${tab === "partner" ? "bg-warning text-black" : "text-warning/70 hover:bg-surface"}`}
+            >◈ PARTNER</button>
+          )}
         </div>
         </div>
+        {/* Partner sub-tab bar — visible only when PARTNER tab is active */}
+        {tab === "partner" && (
+          <div className="overflow-x-auto mb-3">
+            <div className="flex border border-warning/40 bg-warning/5 min-w-max">
+              <div className="px-3 py-2 text-[9px] tracking-widest text-warning font-bold border-r border-warning/30 flex items-center shrink-0 max-w-[180px] truncate">
+                {partnerCompanyName.toUpperCase()}
+              </div>
+              {(["upload", "review", "ratios", "bank", "gst"] as const).map(k => (
+                <button
+                  key={k}
+                  onClick={() => setPartnerSubTab(k)}
+                  className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-warning/20 whitespace-nowrap transition-colors ${
+                    partnerSubTab === k ? "bg-warning text-black font-bold" : "text-warning/60 hover:bg-warning/10"
+                  }`}
+                >{k.toUpperCase()}</button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
-      {tab === "upload" && (() => {
-        const activeDocs = (!hasPartner || entity === "main") ? mainDocs : partnerDocs;
+      {(tab === "upload" || (tab === "partner" && partnerSubTab === "upload")) && (() => {
+        const activeDocs = (tab === "partner") ? partnerDocs : (!hasPartner || entity === "main") ? mainDocs : partnerDocs;
         return (
         <Panel title="UPLOAD FINANCIAL STATEMENTS" ticker="PDF / IMG / XLSX">
-          {hasPartner && entityBar}
+          {hasPartner && tab !== "partner" && entityBar}
           {extractError && (
             <div className="mb-3 border border-destructive/50 bg-destructive/10 px-3 py-2 space-y-1">
             <div className="flex items-center justify-between gap-2 border-b border-destructive/20 pb-1 mb-1.5">
@@ -2979,7 +3021,7 @@ function CaseViewInner() {
         );
       })()}
 
-      {tab === "review" && (
+      {(tab === "review" || (tab === "partner" && partnerSubTab === "review")) && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 sticky top-[168px] z-20 bg-background -mx-3 px-3 pt-1 pb-2 border-b border-border/30">
             <input ref={finExcelInputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFinancialExcel(f); e.target.value = ""; }} />
@@ -3005,12 +3047,12 @@ function CaseViewInner() {
             </div>
           </div>
 
-          {hasPartner && entityBar}
+          {hasPartner && tab !== "partner" && entityBar}
 
           {(() => {
             const viewExtracted = activeExtracted;
 
-            if (hasPartner && entity === "partner" && partnerExtracted.length === 0) {
+            if ((tab === "partner" || (hasPartner && entity === "partner")) && partnerExtracted.length === 0) {
               return (
                 <PartnerAnalysisTab
                   cc={cc}
@@ -4103,11 +4145,135 @@ function CaseViewInner() {
           )}
         </div>
       )}
-      {tab === "bank" && (
-        <BankStatementTab cc={cc} data={bankData} docs={docs} user={user!} onReload={reload} />
+      {tab === "partner" && partnerSubTab === "ratios" && (() => {
+        const pYears = Array.from(new Set(partnerExtracted.map(r => r.fiscal_year))).sort();
+        const getItems = (fy: number, types: string[]) => {
+          const out: LineItem[] = []; const seen = new Set<string>();
+          for (const row of partnerExtracted.filter(r => r.fiscal_year === fy && types.includes(r.statement_type)))
+            for (const it of (row.line_items as unknown as LineItem[]) ?? [])
+              if (!seen.has(it.label)) { out.push(it); seen.add(it.label); }
+          return out;
+        };
+        const gv = (items: LineItem[], ...labels: string[]) => {
+          for (const l of labels) { const it = items.find(i => i.label === l); if (it) return it.override_value ?? it.value; }
+          return null;
+        };
+        type PRatio = { label: string; fmt: (v: number) => string; good: (v: number) => boolean; bench: string };
+        const PRATIOS: PRatio[] = [
+          { label: "Current Ratio",     fmt: v => v.toFixed(2) + "x", good: v => v >= 1.5,  bench: "≥ 1.5x" },
+          { label: "Debt / Equity",     fmt: v => v.toFixed(2) + "x", good: v => v <= 2.0,  bench: "≤ 2.0x" },
+          { label: "Net Profit Margin", fmt: v => v.toFixed(1) + "%", good: v => v >= 8,    bench: "≥ 8%" },
+          { label: "EBITDA Margin",     fmt: v => v.toFixed(1) + "%", good: v => v >= 15,   bench: "≥ 15%" },
+          { label: "Interest Coverage", fmt: v => v.toFixed(2) + "x", good: v => v >= 2.0,  bench: "≥ 2.0x" },
+        ];
+        const data = pYears.map(fy => {
+          const pl = getItems(fy, ["profit_loss", "all_in_one"]);
+          const bs = getItems(fy, ["balance_sheet", "all_in_one"]);
+          const rev  = gv(pl, "Turnover", "Revenue", "Net Revenue", "Total Revenue");
+          const pat  = gv(pl, "PAT", "Net Profit", "Profit After Tax");
+          const ebit = gv(pl, "EBITDA");
+          const intr = gv(pl, "Interest Expense", "Finance Cost");
+          const ca   = gv(bs, "Current Assets", "Total Current Assets");
+          const cl   = gv(bs, "Current Liabilities", "Total Current Liabilities");
+          const debt = gv(bs, "Total Debt", "Total Borrowings");
+          const nw   = gv(bs, "Net Worth", "Networth", "Equity");
+          return {
+            fy,
+            "Current Ratio":     ca != null && cl != null && cl !== 0 ? ca / cl : null,
+            "Debt / Equity":     debt != null && nw != null && nw !== 0 ? debt / nw : null,
+            "Net Profit Margin": rev != null && pat != null && rev !== 0 ? (pat / rev) * 100 : null,
+            "EBITDA Margin":     rev != null && ebit != null && rev !== 0 ? (ebit / rev) * 100 : null,
+            "Interest Coverage": ebit != null && intr != null && intr !== 0 ? ebit / intr : null,
+          };
+        });
+        return (
+          <Panel title={`RATIOS — ${partnerCompanyName.toUpperCase()}`} ticker="COMPUTED FROM FINANCIALS">
+            {partnerExtracted.length === 0 ? (
+              <div className="text-muted-foreground text-xs">Upload and confirm partner financials first to compute ratios.</div>
+            ) : pYears.length === 0 ? (
+              <div className="text-muted-foreground text-xs">No fiscal years found in partner extracted data.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs min-w-[360px]">
+                  <thead className="text-muted-foreground border-b border-border">
+                    <tr>
+                      <th className="text-left py-1">RATIO</th>
+                      {pYears.map(y => <th key={y} className="text-right pr-1">FY{y}</th>)}
+                      <th className="text-right">BENCHMARK</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {PRATIOS.map(({ label, fmt, good, bench }) => (
+                      <tr key={label} className="border-b border-border/30">
+                        <td className="py-1 text-foreground/90">{label}</td>
+                        {pYears.map(y => {
+                          const row = data.find(d => d.fy === y);
+                          const val = row ? (row as Record<string, number | null>)[label] : null;
+                          return (
+                            <td key={y} className="text-right pr-1">
+                              {val == null ? <span className="text-muted-foreground">—</span> : (
+                                <div className="inline-flex items-center gap-1.5 justify-end">
+                                  <span className="tabular-nums">{fmt(val)}</span>
+                                  <span className={`px-1.5 py-0 text-[9px] tracking-widest font-bold leading-5 ${good(val) ? "bg-success/15 text-success" : "bg-destructive/15 text-destructive"}`}>
+                                    {good(val) ? "OK" : "WEAK"}
+                                  </span>
+                                </div>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td className="text-right text-muted-foreground tabular-nums text-[11px]">{bench}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        );
+      })()}
+
+      {(tab === "bank" || (tab === "partner" && partnerSubTab === "bank")) && (
+        <>
+          {tab === "bank" && (
+            <AccumnBsaPanel
+              caseId={cc.id}
+              docs={docs}
+              orders={accumnOrders.filter(o => o.product_type === "BSA")}
+              user={user!}
+              onReload={reload}
+            />
+          )}
+          <BankStatementTab
+            cc={cc}
+            data={activeBankData}
+            docs={tab === "partner" ? partnerDocs : docs}
+            user={user!}
+            onReload={reload}
+          />
+        </>
       )}
-      {tab === "gst" && (
-        <GstTab cc={cc} data={gstData} extracted={extracted} user={user!} onReload={reload} docs={docs} accumnData={accumnData} />
+      {(tab === "gst" || (tab === "partner" && partnerSubTab === "gst")) && (
+        <>
+          {tab === "gst" && (
+            <AccumnApiPanel
+              caseId={cc.id}
+              casePan={(cc as unknown as Record<string, string>).principal_borrower_pan ?? undefined}
+              caseGstin={(cc as unknown as Record<string, string>).gstin ?? undefined}
+              orders={accumnOrders.filter(o => o.product_type !== "BSA")}
+              onReload={reload}
+            />
+          )}
+          <GstTab
+            cc={cc}
+            data={activeGstData}
+            extracted={activeExtracted}
+            user={user!}
+            onReload={reload}
+            docs={tab === "partner" ? partnerDocs : docs}
+            accumnData={tab === "partner" ? null : accumnData}
+          />
+        </>
       )}
 
       {/* ── Text viewer popover ────────────────────────────────────────── */}
