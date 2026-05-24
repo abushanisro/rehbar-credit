@@ -15,6 +15,7 @@ export function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy
 }) {
   const DOC_CLASSES: { value: DocClass; label: string }[] = [
     { value: "all_in_one",     label: "ALL-IN-ONE (BS + P&L + CF + PROJ)" },
+    { value: "provisional",    label: "PROVISIONAL (UNAUDITED / MANAGEMENT)" },
     { value: "bank_statement", label: "BANK STATEMENT" },
     { value: "gst_return",     label: "GST RETURN" },
     { value: "profit_loss",    label: "PROFIT & LOSS" },
@@ -37,6 +38,7 @@ export function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy
     const n = filename.toLowerCase().replace(/[\s_\-\.]/g, "");
     if (/bank|stmt|statement/.test(n))             return "bank_statement";
     if (/gst|gstin|gstr/.test(n))                  return "gst_return";
+    if (/provisional|unaudited|mgmt|prov/.test(n)) return "provisional";
     if (/balancesheet|bsheet|bs\d/.test(n))        return "balance_sheet";
     if (/profitloss|pandl|pnl|incomestat/.test(n)) return "profit_loss";
     if (/cashflow|cfs/.test(n))                    return "cash_flow";

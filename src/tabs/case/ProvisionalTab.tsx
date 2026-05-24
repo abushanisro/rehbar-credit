@@ -240,6 +240,133 @@ function normalizeCFLabel(raw: string): string | null {
   return null;
 }
 
+const BS_LABEL_MAP: Array<[RegExp, string]> = [
+  [/share\s*capital/i,                         "Share Capital"],
+  [/reserves?\s*(and|&)\s*surplus/i,           "Reserves & Surplus"],
+  [/net\s*worth|shareholders?\s*equity/i,       "Net Worth"],
+  [/long.?term\s*borrowings?/i,                "Long Term Borrowings"],
+  [/short.?term\s*borrowings?/i,               "Short Term Borrowings"],
+  [/total\s*debt/i,                            "Total Debt"],
+  [/trade\s*payables?/i,                       "Trade Payables"],
+  [/other\s*current\s*liabilit/i,              "Other Current Liabilities"],
+  [/\bcurrent\s*liabilit/i,                    "Current Liabilities"],
+  [/total\s*liabilit/i,                        "Total Liabilities"],
+  [/property.*plant|fixed\s*assets?|tangible/i,"Fixed Assets (Net)"],
+  [/inventori|stock/i,                         "Inventory"],
+  [/trade\s*receivables?|debtors?/i,           "Trade Receivables"],
+  [/cash\s*(and|&)\s*(bank|cash\s*equiv)/i,    "Cash & Bank"],
+  [/other\s*current\s*assets?/i,               "Other Current Assets"],
+  [/\bcurrent\s*assets?/i,                     "Current Assets"],
+  [/total\s*assets?/i,                         "Total Assets"],
+];
+
+function classifyLabel(raw: string): { section: "pl" | "bs" | "cf"; std: string } | null {
+  const s = raw.trim();
+  const pl = normalizePLLabel(s);
+  if (pl) return { section: "pl", std: pl };
+  const cf = normalizeCFLabel(s);
+  if (cf) return { section: "cf", std: cf };
+  for (const [re, std] of BS_LABEL_MAP) if (re.test(s)) return { section: "bs", std };
+  if (BS_LABELS.includes(s)) return { section: "bs", std: s };
+  return null;
+}
+
+// ── Simple annual parser: columns = fiscal years, rows = any label ──────────
+async function parseSimpleAnnualExcel(
+  file: File,
+  existingPeriods: ProvPeriod[],
+): Promise<ProvPeriod[]> {
+  const XLSX = await import("xlsx");
+  const buf  = await file.arrayBuffer();
+  const wb   = XLSX.read(buf, { type: "array", raw: false, cellText: true });
+
+  let unit = "Lakhs";
+  const periodMap = new Map(existingPeriods.map(p => [p.label, { ...p }]));
+  let parsedAny = false;
+
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    if (!ws) continue;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "", raw: false }) as string[][];
+    if (rows.length < 2) continue;
+
+    // Detect unit from first 8 rows
+    outer: for (const row of rows.slice(0, 8)) {
+      for (const c of row) {
+        if (/amount.*in.*(rs|inr|lakh|crore|thousand)/i.test(String(c))) {
+          const s = String(c).toLowerCase();
+          if (/crore/i.test(s)) unit = "Crores";
+          else if (/thousand/i.test(s)) unit = "Thousands";
+          break outer;
+        }
+      }
+    }
+
+    // Find header row: first row with ≥1 FY-style column header
+    let headerIdx = -1;
+    const fyColumns: { col: number; fy: number }[] = [];
+    for (let i = 0; i < Math.min(rows.length, 12); i++) {
+      const row = rows[i];
+      const found: typeof fyColumns = [];
+      for (let c = 1; c < row.length; c++) {
+        const cell = String(row[c]).trim();
+        const m = cell.match(/(?:fy\s*)?(\d{2,4})(?:\s*[-–]\s*\d{2,4})?/i);
+        if (m) {
+          const yr = parseInt(m[1]);
+          const fy = yr < 100 ? 2000 + yr : yr;
+          if (fy >= 2015 && fy <= 2045) found.push({ col: c, fy });
+        }
+      }
+      if (found.length > 0) { headerIdx = i; fyColumns.push(...found); break; }
+    }
+    if (headerIdx === -1 || fyColumns.length === 0) continue;
+
+    // Ensure a ProvPeriod exists for each detected FY
+    for (const { fy } of fyColumns) {
+      const label = `FY${fy}`;
+      if (!periodMap.has(label)) {
+        periodMap.set(label, {
+          id: crypto.randomUUID(), label, period_type: "annual",
+          fiscal_year: fy, months_covered: 12, unit,
+          pl: blank(PL_LABELS), bs: blank(BS_LABELS), cf: blank(CF_LABELS),
+        });
+      }
+    }
+
+    // Parse data rows
+    let currentSection: "pl" | "bs" | "cf" | null = null;
+    for (let i = headerIdx + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const rawLabel = String(row[0] ?? "").trim();
+      if (!rawLabel || /^(---|\s*)$/.test(rawLabel)) continue;
+
+      // Section header detection
+      const ll = rawLabel.toLowerCase();
+      if (/profit.*loss|p\s*[&]\s*l|income\s*statement/i.test(ll)) { currentSection = "pl"; continue; }
+      if (/balance\s*sheet/i.test(ll)) { currentSection = "bs"; continue; }
+      if (/cash\s*flow/i.test(ll)) { currentSection = "cf"; continue; }
+
+      const classified = classifyLabel(rawLabel);
+      const section = classified?.section ?? currentSection ?? "bs";
+      const std = classified?.std ?? rawLabel;
+
+      for (const { col, fy } of fyColumns) {
+        const val = parseIndianNumber(row[col]);
+        if (val == null) continue;
+        const p = periodMap.get(`FY${fy}`);
+        if (!p) continue;
+        const cur = getv(p[section], std) ?? 0;
+        p[section] = setv(p[section], std, cur + val);
+      }
+    }
+    parsedAny = true;
+    break;
+  }
+
+  if (!parsedAny) throw new Error("No fiscal year columns found. Make sure column headers include a year (e.g. FY24, FY2024, 2024).");
+  return Array.from(periodMap.values());
+}
+
 // ── Monthly-tracking parser: Month | April | May | … | Total ───────────────
 async function parseMonthlyTrackingFormat(
   buf: ArrayBuffer, filename: string, existingPeriods: ProvPeriod[]
@@ -899,14 +1026,16 @@ export function ProvisionalTab({
   const [periods,    setPeriods]  = useState<ProvPeriod[]>(
     initialPeriods.map(p => ({ ...p, cf: p.cf ?? blank(CF_LABELS) }))
   );
-  const [adding,     setAdding]   = useState(false);
-  const [saving,     setSaving]   = useState(false);
-  const [saved,      setSaved]    = useState(false);
-  const [importing,  setImp]      = useState(false);
-  const [showAnn,    setShowAnn]  = useState(true);
-  const [showBS,     setShowBS]   = useState(true);
-  const [selectedFY, setSelectedFY] = useState<number | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [adding,      setAdding]    = useState(false);
+  const [saving,      setSaving]    = useState(false);
+  const [saved,       setSaved]     = useState(false);
+  const [importing,   setImp]       = useState(false);
+  const [directImp,   setDirectImp] = useState(false);
+  const [showAnn,     setShowAnn]   = useState(true);
+  const [showBS,      setShowBS]    = useState(true);
+  const [selectedFY,  setSelectedFY] = useState<number | null>(null);
+  const fileRef       = useRef<HTMLInputElement>(null);
+  const directFileRef = useRef<HTMLInputElement>(null);
 
   // ── Get last audited P&L + BS ──────────────────────────────────────────────
   const auditedPLRows = extracted.filter(r => r.statement_type === "profit_loss" && r.confirmed);
@@ -972,6 +1101,18 @@ export function ProvisionalTab({
     }
   };
 
+  const handleDirectImport = async (file: File) => {
+    setDirectImp(true);
+    try {
+      const next = await parseSimpleAnnualExcel(file, periods);
+      setPeriods(next);
+    } catch (e) {
+      alert("Direct import failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setDirectImp(false);
+    }
+  };
+
   const handleExport = () => exportProvisionalExcel(viewPeriods, `${cc.case_code}_FY${activeFY ?? ""}`);
 
   // ── KPI source: prefer the annual summary period; fall back to latest partial ─
@@ -999,14 +1140,36 @@ export function ProvisionalTab({
       <div className="flex flex-wrap items-center gap-2 sticky top-[168px] z-20 bg-background -mx-3 px-3 pt-1 pb-2 border-b border-border/30">
         <input ref={fileRef} type="file" accept=".xlsx,.xls" className="hidden"
           onChange={e => { const f = e.target.files?.[0]; if (f) handleImport(f); e.target.value = ""; }} />
+        <input ref={directFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden"
+          onChange={e => { const f = e.target.files?.[0]; if (f) handleDirectImport(f); e.target.value = ""; }} />
 
         <button onClick={() => setAdding(a => !a)} disabled={adding}
           className="text-[10px] tracking-widest border border-accent/50 text-accent px-3 py-1.5 hover:bg-accent/10 disabled:opacity-40">
           + ADD PERIOD
         </button>
-        <button onClick={() => fileRef.current?.click()} disabled={importing}
-          className="text-[10px] tracking-widest border border-border text-muted-foreground px-3 py-1.5 hover:text-foreground hover:border-primary/50 disabled:opacity-50">
+        <button onClick={() => directFileRef.current?.click()} disabled={directImp || importing}
+          className="text-[10px] tracking-widest border border-primary/50 text-primary px-3 py-1.5 hover:bg-primary/10 disabled:opacity-50"
+          title="Import annual Excel directly — columns = FY years, rows = line items. No AI, instant.">
+          {directImp ? "IMPORTING…" : "⬆ DIRECT ANNUAL IMPORT"}
+        </button>
+        <button onClick={() => fileRef.current?.click()} disabled={importing || directImp}
+          className="text-[10px] tracking-widest border border-border text-muted-foreground px-3 py-1.5 hover:text-foreground hover:border-primary/50 disabled:opacity-50"
+          title="Import Sch III / monthly tracking / round-trip template Excel">
           {importing ? "IMPORTING…" : "⬆ IMPORT EXCEL"}
+        </button>
+        <button onClick={async () => {
+          const XLSX = await import("xlsx");
+          const wb = XLSX.utils.book_new();
+          const periods = ["Q1 FY25", "Q2 FY25", "H1 FY25", "FY2025"];
+          const hdr = ["Particulars", ...periods];
+          const mkSheet = (labels: string[]) =>
+            XLSX.utils.aoa_to_sheet([hdr, ["// Fill values in same unit (Lakhs/Crores). Add/remove period columns as needed."], ...labels.map(l => [l, "", "", "", ""])]);
+          XLSX.utils.book_append_sheet(wb, mkSheet(PL_LABELS), "P&L");
+          XLSX.utils.book_append_sheet(wb, mkSheet(BS_LABELS), "Balance Sheet");
+          XLSX.utils.book_append_sheet(wb, mkSheet(CF_LABELS), "Cash Flow");
+          XLSX.writeFile(wb, "provisional_template.xlsx");
+        }} className="text-[10px] tracking-widest border border-accent/40 text-accent/80 px-3 py-1.5 hover:text-accent hover:border-accent/60">
+          ⬇ BLANK TEMPLATE
         </button>
         {sorted.length > 0 && (
           <button onClick={handleExport}
@@ -1191,10 +1354,20 @@ export function ProvisionalTab({
         </Panel>
       ) : (
         <Panel title="NO PROVISIONAL DATA" ticker="MONTHLY / QUARTERLY / SCH III">
-          <div className="text-muted-foreground text-xs space-y-1 leading-relaxed">
-            <p>Add provisional periods or import Excel.</p>
-            <p>Supports: Monthly MIS tracking · Sch III (BS + P&L + Cashflow sheets) · Round-trip template</p>
-            <p>Sch III: workbook must have sheets named BS/Balance Sheet, P &amp; L/Profit Loss, and Cashflow — dates auto-detected from column headers like "31st January 2026".</p>
+          <div className="text-muted-foreground text-xs space-y-2 leading-relaxed">
+            <div className="border border-primary/30 bg-primary/5 p-2.5 space-y-1">
+              <div className="text-[9px] text-primary tracking-widest font-bold">⬆ DIRECT ANNUAL IMPORT — QUICKEST</div>
+              <p>Use the <span className="text-primary font-bold">DIRECT ANNUAL IMPORT</span> button above for simple column-based Excel files:</p>
+              <p className="font-mono text-[9px] text-foreground/70">Particulars | FY2024 | FY2025 | FY2026</p>
+              <p className="font-mono text-[9px] text-foreground/70">Turnover    | 1200   | 1450   | 1700</p>
+              <p className="font-mono text-[9px] text-foreground/70">Net Worth   | 320    | 410    | 520</p>
+              <p className="text-[9px] text-muted-foreground/70">Labels auto-mapped · Multiple sheets OK · FY columns auto-detected</p>
+            </div>
+            <div className="space-y-0.5">
+              <div className="text-[9px] text-muted-foreground/60 tracking-widest font-bold">⬆ IMPORT EXCEL — ADVANCED FORMATS</div>
+              <p>Monthly MIS tracking · Sch III (BS + P&amp;L + Cashflow sheets) · Round-trip template</p>
+              <p>Sch III: sheets named BS/Balance Sheet, P&amp;L/Profit Loss, Cashflow — dates from column headers like "31st January 2026".</p>
+            </div>
           </div>
         </Panel>
       )}

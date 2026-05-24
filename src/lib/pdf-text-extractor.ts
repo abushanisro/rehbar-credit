@@ -25,3 +25,44 @@ export async function extractPdfText(file: File): Promise<string> {
     return "";
   }
 }
+
+export type PdfPage = { pageNum: number; text: string };
+
+/** Extract text per page from a PDF File. Returns empty array on failure. */
+export async function extractPdfPages(file: File): Promise<PdfPage[]> {
+  try {
+    const buffer = await file.arrayBuffer();
+    const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
+    const pages: PdfPage[] = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      const text = (content.items as Array<{ str?: string }>)
+        .map(item => item.str ?? "")
+        .join(" ")
+        .trim();
+      pages.push({ pageNum: i, text });
+    }
+    return pages;
+  } catch {
+    return [];
+  }
+}
+
+const FINANCIAL_KEYWORDS = [
+  "balance sheet", "profit & loss", "profit and loss", "p&l", "cash flow",
+  "total assets", "net worth", "turnover", "ebitda", "depreciation",
+  "liabilities", "equity", "revenue", "expenses", "net profit",
+  "shareholders", "reserves", "borrowings", "inventories", "receivables",
+  "fixed assets", "current assets", "total debt", "share capital",
+];
+
+/** Returns page numbers that likely contain financial tables. */
+export function detectFinancialPages(pages: PdfPage[]): number[] {
+  return pages
+    .filter(p => {
+      const lower = p.text.toLowerCase();
+      return FINANCIAL_KEYWORDS.some(kw => lower.includes(kw));
+    })
+    .map(p => p.pageNum);
+}

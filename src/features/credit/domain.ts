@@ -30,7 +30,7 @@ export type CaseStatus =
   | "queries_resubmission";
 
 export type StatementType = "profit_loss" | "balance_sheet" | "cash_flow" | "projections" | "all_in_one";
-export type DocClass = StatementType | "bank_statement" | "gst_return" | "other";
+export type DocClass = StatementType | "bank_statement" | "gst_return" | "provisional" | "other";
 export type ThresholdStatus = "green" | "amber" | "red" | "na";
 
 export interface ProductMeta {

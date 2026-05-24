@@ -1,10 +1,13 @@
 /**
  * Rehbar — Document Analysis Edge Function
- * Downloads uploaded financial documents, sends them to Claude for extraction,
- * and writes structured data to extracted_financials + financial_ratios.
- * Uses EdgeRuntime.waitUntil so the caller gets an immediate response while
- * extraction runs in the background. No Trigger.dev dependency.
- * Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY
+ * Pipeline: client-extracted page texts → chunked text blocks (or vision fallback)
+ *           → multi-pass Claude extraction (one call per statement group)
+ *           → BS validation → ratio computation → DB write → embeddings (async).
+ *
+ * Token savings vs old approach:
+ *   Text-based PDF  → 50–100× fewer input tokens (text vs base64 vision)
+ *   Multi-pass      → smaller focused outputs per call, better completeness
+ *   Scanned PDFs    → unchanged (vision fallback)
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
@@ -44,6 +47,8 @@ type ContentBlock =
   | { type: "image";    source: { type: "base64"; media_type: string; data: string } }
   | { type: "document"; source: { type: "base64"; media_type: "application/pdf"; data: string } };
 
+type PageText = { pageNum: number; text: string };
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const ANTHROPIC_API     = "https://api.anthropic.com/v1";
@@ -60,6 +65,13 @@ const STANDARD_LINE_ITEMS: Record<StatementType, string[]> = {
   cash_flow:     ["Cash from Operations","Cash from Investing","Cash from Financing","Net Change in Cash","Opening Cash","Closing Cash"],
   projections:   ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt"],
 };
+
+// Each pass focuses Claude on one group of statement types → better completeness
+const EXTRACTION_PASSES: { types: StatementType[]; label: string }[] = [
+  { types: ["profit_loss"],              label: "Profit & Loss" },
+  { types: ["balance_sheet"],            label: "Balance Sheet" },
+  { types: ["cash_flow", "projections"], label: "Cash Flow & Projections" },
+];
 
 const RATIO_FORMULAS = [
   { name: "current_ratio",        fn: (v: Record<string, number>) => v["Current Assets"]   / v["Current Liabilities"] },
@@ -101,10 +113,6 @@ async function downloadAsBase64(supabase: any, path: string): Promise<string> {
   return encodeBase64(new Uint8Array(buf));
 }
 
-function buildImageBlock(f: FileRecord, base64: string): ContentBlock {
-  return { type: "image", source: { type: "base64", media_type: imageMime(f.file_name), data: base64 } };
-}
-
 function computeRatiosForYear(stmts: StatementOut[], fy: number): Record<string, number | null> {
   const vals: Record<string, number> = {};
   for (const stmt of stmts) {
@@ -125,6 +133,151 @@ function computeRatiosForYear(stmts: StatementOut[], fy: number): Record<string,
   return result;
 }
 
+/**
+ * Validate balance sheet: Total Assets ≈ Total Liabilities + Net Worth.
+ * If mismatch > 5%, lower confidence of all BS line items to flag for review.
+ * Returns a warning string or null.
+ */
+function validateBalanceSheet(statements: StatementOut[]): string | null {
+  const bsStatements = statements.filter(s => s.statement_type === "balance_sheet");
+  const warnings: string[] = [];
+
+  for (const bs of bsStatements) {
+    const vals: Record<string, number> = {};
+    for (const li of bs.line_items) {
+      if (li.value != null) vals[li.label] = li.value;
+    }
+    const totalAssets = vals["Total Assets"];
+    const totalLiabilities = vals["Total Liabilities"] ?? vals["Current Liabilities"];
+    const netWorth = vals["Net Worth"];
+    if (!totalAssets || (!totalLiabilities && !netWorth)) continue;
+
+    const liabPlusEquity = (totalLiabilities ?? 0) + (netWorth ?? 0);
+    const mismatch = Math.abs(totalAssets - liabPlusEquity) / Math.abs(totalAssets);
+    if (mismatch > 0.05) {
+      // Cap confidence of all BS items to signal human review needed
+      for (const li of bs.line_items) {
+        li.confidence = Math.min(li.confidence, 65);
+      }
+      warnings.push(`FY${bs.fiscal_year}: BS imbalance ${(mismatch * 100).toFixed(1)}%`);
+    }
+  }
+  return warnings.length > 0 ? `Balance sheet imbalance detected — review: ${warnings.join(", ")}` : null;
+}
+
+// ── Single-pass Claude extraction ──────────────────────────────────────────────
+
+async function callClaudeForTypes(
+  targetTypes: StatementType[],
+  contentBlocks: ContentBlock[],
+  docCount: number,
+  anthropicKey: string,
+): Promise<ExtractionResult | null> {
+  const preferredLabels = Array.from(new Set(targetTypes.flatMap(t => STANDARD_LINE_ITEMS[t])));
+  const itemsBlock = targetTypes.map(t =>
+    `### ${t.toUpperCase()}\nPreferred labels: ${STANDARD_LINE_ITEMS[t].join(", ")}`
+  ).join("\n\n");
+
+  const systemPrompt = `You are a senior financial data extraction engine for Rehbar Financial Services (Islamic NBFC).
+You will receive ${docCount} financial document${docCount > 1 ? "s" : ""} (PDFs, images, and Excel files).
+Extract ONLY the following statement types: ${targetTypes.join(", ")}.
+
+EXTRACTION RULES:
+1. Return ONE entry per (statement_type, fiscal_year) pair — never merge years.
+2. Detect and capture EVERY fiscal year present across all documents.
+3. Keep values in the SAME UNIT as the document (Crores / Lakhs / Thousands / USD). State the unit.
+4. Confidence 0–100 per line item (legibility, label match, computational consistency).
+5. Never include PII — no PAN, CIBIL, phone numbers, addresses.
+6. Map each line item to the closest preferred label. If nothing fits, use the document's own label.
+7. If a line item is genuinely absent, omit it — never invent zeros.
+8. Validate computational consistency and lower confidence where discrepancies exist.
+9. Negative figures or values in parentheses must be returned as negative numbers.
+10. When the same fiscal year appears in multiple documents, synthesise — prefer audited over provisional.`;
+
+  const tools = [{
+    name: "submit_extraction",
+    description: `Submit extracted ${targetTypes.join(" and ")} statements. One entry per (statement_type, fiscal_year) pair.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        unit: { type: "string", description: "Unit of all figures: Crores, Lakhs, Thousands, Millions, USD Millions, USD" },
+        statements: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              statement_type: { type: "string", enum: targetTypes },
+              fiscal_year:    { type: "integer" },
+              line_items: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    label:      { type: "string", description: `Preferred: ${preferredLabels.join(", ")}` },
+                    value:      { type: ["number", "null"] },
+                    confidence: { type: "number", minimum: 0, maximum: 100 },
+                    note:       { type: "string" },
+                  },
+                  required: ["label", "value", "confidence"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["statement_type", "fiscal_year", "line_items"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["unit", "statements"],
+      additionalProperties: false,
+    },
+  }];
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(`${ANTHROPIC_API}/messages`, {
+      method: "POST",
+      signal: AbortSignal.timeout(90_000),
+      headers: {
+        "x-api-key":         anthropicKey,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type":      "application/json",
+      },
+      body: JSON.stringify({
+        model:      MODEL,
+        max_tokens: 6000,
+        system:     systemPrompt,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: `Extract ALL fiscal years for:\n\n${itemsBlock}\n\nFor Projections without an explicit FY, use the next FY after the latest historical year.` },
+            ...contentBlocks,
+          ],
+        }],
+        tools,
+        tool_choice: { type: "any" },
+      }),
+    });
+
+    if (res.status === 529 || res.status === 503) {
+      await new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
+      continue;
+    }
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Claude API ${res.status}: ${txt.slice(0, 300)}`);
+    }
+
+    const json = await res.json();
+    if (json.stop_reason === "max_tokens")
+      throw new Error(`Claude output truncated on ${targetTypes.join("/")} pass — increase max_tokens`);
+
+    const toolUse = (json.content as { type: string; input?: unknown }[] ?? [])
+      .find(b => b.type === "tool_use");
+    if (toolUse?.input) return toolUse.input as ExtractionResult;
+  }
+  return null;
+}
+
 // ── Background analysis ───────────────────────────────────────────────────────
 
 async function runAnalysis(
@@ -132,6 +285,7 @@ async function runAnalysis(
   document_ids: string[],
   user_id: string,
   excel_texts: Record<string, string>,
+  page_texts: Record<string, PageText[]>,
   anthropicKey: string,
   supabase: any,
 ): Promise<void> {
@@ -141,16 +295,17 @@ async function runAnalysis(
       .select("id,file_path,file_type,file_name")
       .in("id", document_ids);
 
-    if (docsErr || !docs?.length) {
+    if (docsErr || !docs?.length)
       throw new Error(`Failed to fetch documents: ${docsErr?.message}`);
-    }
 
     const contentBlocks: ContentBlock[] = [];
+    const textChunksForEmbedding: PageText[] = [];
     const skipped: string[] = [];
     let docIndex = 0;
 
     for (const doc of docs as FileRecord[]) {
       docIndex++;
+
       if (doc.file_type === "excel") {
         const text = excel_texts[doc.id];
         if (!text) { skipped.push(doc.id); continue; }
@@ -160,144 +315,72 @@ async function runAnalysis(
         });
         continue;
       }
+
+      // Use client-extracted page texts if available (text-based PDF) — huge token saving
+      const docPages = page_texts[doc.id];
+      const isTextBased = doc.file_type === "pdf"
+        && docPages?.length > 0
+        && docPages.some(p => p.text.length > 50);
+
+      if (isTextBased) {
+        const textContent = docPages!
+          .filter(p => p.text.length > 20)
+          .map(p => `--- Page ${p.pageNum} ---\n${p.text}`)
+          .join("\n\n");
+        contentBlocks.push({
+          type: "text",
+          text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (PDF text) ===\n\n${textContent.slice(0, 200_000)}`,
+        });
+        textChunksForEmbedding.push(...docPages!.filter(p => p.text.length > 50));
+        continue;
+      }
+
+      // Vision fallback: download and send as base64 (scanned PDFs and images)
       try {
         const base64 = await downloadAsBase64(supabase, doc.file_path);
         if (doc.file_type === "image") {
           contentBlocks.push(
             { type: "text", text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (Image) ===` },
-            buildImageBlock(doc, base64),
+            { type: "image", source: { type: "base64", media_type: imageMime(doc.file_name), data: base64 } },
           );
         } else {
-          // PDF — send natively as document block (Claude processes it directly)
           contentBlocks.push(
-            { type: "text", text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (PDF) ===` },
+            { type: "text", text: `=== DOCUMENT ${docIndex}: "${doc.file_name}" (Scanned PDF) ===` },
             { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
           );
         }
       } catch (e) {
-        console.error("Download/OCR failed", doc.id, String(e));
+        console.error("Download failed", doc.id, String(e));
         skipped.push(doc.id);
       }
     }
 
-    if (contentBlocks.length === 0) {
-      throw new Error("No downloadable documents — all failed or are Excel-only without text");
+    if (contentBlocks.length === 0)
+      throw new Error("No processable documents — all failed or Excel without text");
+
+    // Multi-pass: separate focused Claude call per statement group → better completeness
+    const allStatements: StatementOut[] = [];
+    let finalUnit = "Lakhs";
+
+    for (const pass of EXTRACTION_PASSES) {
+      const result = await callClaudeForTypes(pass.types, contentBlocks, docIndex, anthropicKey);
+      if (result) {
+        if (result.unit) finalUnit = result.unit;
+        allStatements.push(...result.statements);
+      }
     }
 
-    const itemsBlock = STATEMENT_TYPES.map(t =>
-      `### ${t.toUpperCase()}\n${STANDARD_LINE_ITEMS[t].map(i => `- ${i}`).join("\n")}`
-    ).join("\n\n");
+    if (allStatements.length === 0)
+      throw new Error("All extraction passes returned no data");
 
-    const systemPrompt = `You are a senior financial data extraction engine for Rehbar Financial Services (Islamic NBFC).
-You will receive ${docIndex} financial document${docIndex > 1 ? "s" : ""} (PDFs, images, and Excel files). Each document is labelled with its filename and type.
-Extract ALL financial statements across ALL fiscal years from ALL documents.
-
-EXTRACTION RULES:
-1. Return ONE entry per (statement_type, fiscal_year) pair — never merge years.
-2. Detect and capture EVERY fiscal year present across all documents.
-3. Keep values in the SAME UNIT as the document. State the unit for the entire set (Crores / Lakhs / Thousands / USD).
-4. Confidence 0–100 per line item (legibility, label match, computational consistency).
-5. Never include PII — no PAN, CIBIL, phone numbers, addresses.
-6. Map each line item to the closest standard label. If nothing fits, use the document's own label verbatim.
-7. If a line item is genuinely absent, omit it — never invent zeros.
-8. Validate computational consistency and lower confidence where discrepancies exist.
-9. Negative figures or values in parentheses must be returned as negative numbers.
-10. When the same fiscal year appears in multiple documents, synthesise — prefer audited over provisional data.`;
-
-    const tools = [{
-      name:        "submit_extraction",
-      description: "Submit all extracted financial statements. One entry per (statement_type, fiscal_year) pair.",
-      input_schema: {
-        type: "object",
-        properties: {
-          unit: { type: "string", description: "Unit of all figures: Crores, Lakhs, Thousands, Millions, USD Millions, USD" },
-          statements: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                statement_type: { type: "string", enum: STATEMENT_TYPES },
-                fiscal_year:    { type: "integer" },
-                line_items: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      label:      { type: "string" },
-                      value:      { type: ["number", "null"] },
-                      confidence: { type: "number", minimum: 0, maximum: 100 },
-                      note:       { type: "string" },
-                    },
-                    required: ["label", "value", "confidence"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["statement_type", "fiscal_year", "line_items"],
-              additionalProperties: false,
-            },
-          },
-        },
-        required: ["unit", "statements"],
-        additionalProperties: false,
-      },
-    }];
-
-    let extracted: ExtractionResult | undefined;
-
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const res = await fetch(`${ANTHROPIC_API}/messages`, {
-        method: "POST",
-        signal: AbortSignal.timeout(120_000),
-        headers: {
-          "x-api-key":         anthropicKey,
-          "anthropic-version": ANTHROPIC_VERSION,
-          "content-type":      "application/json",
-        },
-        body: JSON.stringify({
-          model:      MODEL,
-          max_tokens: 16000,
-          system:     systemPrompt,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "text", text: `Extract the following financial statements for ALL fiscal years:\n\n${itemsBlock}\n\nFor Projections without an explicit FY, use the next fiscal year after the latest historical year.` },
-              ...contentBlocks,
-            ],
-          }],
-          tools,
-          tool_choice: { type: "any" },
-        }),
-      });
-
-      if (res.status === 529 || res.status === 503) {
-        await new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
-        continue;
-      }
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`Claude API ${res.status}: ${txt.slice(0, 300)}`);
-      }
-
-      const json = await res.json();
-      if (json.stop_reason === "max_tokens") throw new Error("Claude output truncated — increase max_tokens");
-
-      const toolUse = (json.content as { type: string; input?: unknown }[] ?? [])
-        .find(b => b.type === "tool_use");
-      if (!toolUse?.input)
-        throw new Error(`No tool_use in Claude response (stop_reason: ${json.stop_reason})`);
-
-      extracted = toolUse.input as ExtractionResult;
-      break;
-    }
-
-    if (!extracted) throw new Error("All Claude attempts failed — no extraction result");
+    // Balance sheet validation — lower confidence if BS doesn't balance
+    const bsWarning = validateBalanceSheet(allStatements);
 
     // ── Write extracted_financials ────────────────────────────────────────────
     let totalRows = 0;
     const primaryDocId = document_ids[0];
 
-    for (const stmt of extracted.statements) {
+    for (const stmt of allStatements) {
       const lineItems = stmt.line_items.map(li => ({
         label: li.label, value: li.value, confidence: li.confidence,
         reviewed: li.confidence >= 90, override_value: null, note: li.note ?? "",
@@ -307,7 +390,7 @@ EXTRACTION RULES:
       const { error } = await supabase.from("extracted_financials").upsert({
         case_id, user_id, document_id: primaryDocId,
         fiscal_year: stmt.fiscal_year, statement_type: stmt.statement_type,
-        line_items: lineItems, confirmed: false, unit: extracted.unit,
+        line_items: lineItems, confirmed: false, unit: finalUnit,
       }, { onConflict: "case_id,fiscal_year,statement_type" } as any);
 
       if (error) {
@@ -318,10 +401,9 @@ EXTRACTION RULES:
     }
 
     // ── Write financial_ratios ────────────────────────────────────────────────
-    const allFiscalYears = [...new Set(extracted.statements.map(s => s.fiscal_year))].sort();
-
+    const allFiscalYears = [...new Set(allStatements.map(s => s.fiscal_year))].sort();
     for (const fy of allFiscalYears) {
-      const ratios = computeRatiosForYear(extracted.statements, fy);
+      const ratios = computeRatiosForYear(allStatements, fy);
       await supabase.from("financial_ratios").upsert(
         { case_id, user_id, fiscal_year: fy, ...ratios },
         { onConflict: "case_id,fiscal_year" } as any,
@@ -332,7 +414,10 @@ EXTRACTION RULES:
     const successIds = document_ids.filter(id => !skipped.includes(id));
     if (successIds.length) {
       await supabase.from("financial_documents")
-        .update({ extraction_status: "extracted", extraction_error: null })
+        .update({
+          extraction_status: "extracted",
+          extraction_error: bsWarning ?? null,
+        })
         .in("id", successIds);
     }
     if (skipped.length) {
@@ -345,7 +430,26 @@ EXTRACTION RULES:
       .update({ status: totalRows > 0 ? "extracted" : "draft" })
       .eq("id", case_id);
 
-    console.log("Analysis complete", { case_id, statements: totalRows, fiscal_years: allFiscalYears });
+    console.log("Analysis complete", {
+      case_id, statements: totalRows, fiscal_years: allFiscalYears, bsWarning,
+    });
+
+    // ── Fire-and-forget: generate vector embeddings for text chunks ───────────
+    if (textChunksForEmbedding.length > 0) {
+      const embeddingUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/generate-embeddings`;
+      fetch(embeddingUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+        },
+        body: JSON.stringify({
+          case_id,
+          document_id: primaryDocId,
+          chunks: textChunksForEmbedding.slice(0, 100),
+        }),
+      }).catch(e => console.warn("Embedding generation failed (non-fatal):", String(e)));
+    }
 
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -381,6 +485,7 @@ Deno.serve(async (req) => {
       document_ids: string[];
       user_id: string;
       excel_texts?: Record<string, string>;
+      page_texts?: Record<string, PageText[]>;
     } = await req.json();
 
     if (!body.case_id || !body.document_ids?.length || !body.user_id) {
@@ -394,15 +499,16 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
-    // Mark as running synchronously before returning, so UI updates immediately
     await supabase.from("financial_documents")
       .update({ extraction_status: "running", extraction_error: null })
       .in("id", body.document_ids);
 
-    // Run the heavy work in background — race against 130 s so our catch block
-    // always fires before Supabase's hard 150 s kill, leaving no stuck "running" docs.
     const analysisWithTimeout = Promise.race([
-      runAnalysis(body.case_id, body.document_ids, body.user_id, body.excel_texts ?? {}, apiKey, supabase),
+      runAnalysis(
+        body.case_id, body.document_ids, body.user_id,
+        body.excel_texts ?? {}, body.page_texts ?? {},
+        apiKey, supabase,
+      ),
       new Promise<void>((_, reject) =>
         setTimeout(() => reject(new Error("Analysis timed out (130 s) — document may be too large; try splitting into smaller files")), 130_000)
       ),

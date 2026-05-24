@@ -9,7 +9,7 @@ import { useAuth } from "@/features/auth/AuthProvider";
 import { TerminalLayout } from "@/components/terminal/TerminalLayout";
 import { Panel } from "@/components/terminal/Panel";
 import {
-  PRODUCTS, CASE_STATUS_META, IC_SECTIONS, RATIO_DISPLAY_NAMES,
+  PRODUCTS, CASE_STATUS_META, IC_SECTIONS, RATIO_DISPLAY_NAMES, STANDARD_LINE_ITEMS,
   formatRatio, AI_DRAFT_BANNER, type StatementType, type DocClass, type ProductType,
 } from "@/features/credit/domain";
 
@@ -379,9 +379,54 @@ async function pollExtractionStatus(docId: string, signal: AbortSignal): Promise
   throw new Error("Analysis timed out — check Supabase Edge Function logs");
 }
 
+// ── Convert provisional extracted_financials rows → ic_note.provisional ──────
+async function convertExtractedToProvisional(caseId: string, documentId: string): Promise<void> {
+  const { data: rows } = await supabase.from("extracted_financials")
+    .select("id, statement_type, fiscal_year, line_items, unit")
+    .eq("document_id", documentId);
+
+  if (!rows?.length) return;
+
+  type ProvData = { pl: LineItem[]; bs: LineItem[]; cf: LineItem[]; unit: string };
+  const fyMap: Record<number, ProvData> = {};
+
+  for (const row of rows) {
+    const fy = row.fiscal_year as number;
+    if (!fyMap[fy]) fyMap[fy] = { pl: [], bs: [], cf: [], unit: (row.unit as string | null) ?? "Lakhs" };
+    const items = (row.line_items as unknown as LineItem[]).filter((i: LineItem) => i.label !== "__provisional");
+    if (row.statement_type === "profit_loss")        fyMap[fy].pl = items;
+    else if (row.statement_type === "balance_sheet") fyMap[fy].bs = items;
+    else if (row.statement_type === "cash_flow")     fyMap[fy].cf = items;
+  }
+
+  const { data: freshCase } = await supabase.from("credit_cases")
+    .select("ic_note").eq("id", caseId).single();
+  const icNote = (freshCase?.ic_note ?? {}) as Record<string, unknown>;
+  const existing = (icNote.provisional ?? []) as ProvPeriod[];
+  const periodMap = new Map(existing.map(p => [p.label, { ...p }]));
+
+  for (const [fyStr, data] of Object.entries(fyMap)) {
+    const fy = Number(fyStr);
+    const label = `FY${fy}`;
+    periodMap.set(label, {
+      id: periodMap.get(label)?.id ?? crypto.randomUUID(),
+      label, period_type: "annual" as const,
+      fiscal_year: fy, months_covered: 12, unit: data.unit,
+      pl: data.pl, bs: data.bs, cf: data.cf,
+    });
+  }
+
+  await supabase.from("credit_cases").update({
+    ic_note: { ...icNote, provisional: Array.from(periodMap.values()) } as unknown as Json,
+  }).eq("id", caseId);
+
+  // Remove from main financial review — provisional data lives in the Provisional tab
+  await supabase.from("extracted_financials").delete().eq("document_id", documentId);
+}
+
 // ── Wrapper: provides the Liveblocks room scoped to this case ─────────────────
-const FINANCIAL_CLASSES_SET = new Set(["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"]);
-const FINANCIAL_CLASSES: DocClass[] = ["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections"];
+const FINANCIAL_CLASSES_SET = new Set(["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections", "provisional"]);
+const FINANCIAL_CLASSES: DocClass[] = ["all_in_one", "profit_loss", "balance_sheet", "cash_flow", "projections", "provisional"];
 
 export default function CaseView() {
   const { id } = useParams<{ id: string }>();
@@ -750,7 +795,14 @@ function CaseViewInner() {
           try { const j = JSON.parse(raw); if (j.error) errMsg = j.error; } catch { /* HTML or empty body */ }
           throw new Error(errMsg);
         }
-        toast.success("Analysis re-queued");
+
+        if (doc.doc_class === "provisional") {
+          await pollExtractionStatus(doc.id, new AbortController().signal);
+          await convertExtractedToProvisional(cc.id, doc.id);
+          toast.success("Provisional re-extraction complete");
+        } else {
+          toast.success("Analysis re-queued");
+        }
       }
 
       await reload();
@@ -1195,8 +1247,10 @@ function CaseViewInner() {
         toast.warning(`File is ${sizeMb} MB — large scanned PDFs may timeout or exceed Claude's limit. Consider compressing to under ${MAX_PDF_MB} MB.`);
       }
 
-      // Stage 1: parse Excel client-side (0 → 15%)
+      // Stage 1: parse file client-side (0 → 15%)
       let excelText: string | undefined;
+      let pageTexts: { pageNum: number; text: string }[] | undefined;
+
       if (isExcel) {
         setProgressLabel("Parsing Excel workbook");
         setProgress(5);
@@ -1208,6 +1262,23 @@ function CaseViewInner() {
           const tsv = XLSX.utils.sheet_to_csv(sheet, { FS: "\t" });
           return `=== SHEET: ${name} ===\n${tsv}`;
         }).join("\n\n");
+        setProgress(15);
+      } else if (fileType === "pdf") {
+        setProgressLabel("Extracting PDF text...");
+        setProgress(5);
+        try {
+          const { extractPdfPages, detectFinancialPages } = await import("../lib/pdf-text-extractor");
+          const allPages = await extractPdfPages(file);
+          const financialPageNums = new Set(detectFinancialPages(allPages));
+          // For short docs include all pages; for long docs filter to financial pages
+          const filtered = allPages.length <= 20
+            ? allPages
+            : allPages.filter(p => financialPageNums.has(p.pageNum));
+          const hasText = filtered.some(p => p.text.length > 50);
+          if (hasText) pageTexts = filtered;
+        } catch {
+          // fall back to vision — no text extracted
+        }
         setProgress(15);
       }
 
@@ -1295,6 +1366,7 @@ function CaseViewInner() {
             body: JSON.stringify({
               case_id: cc.id, document_ids: [doc.id], user_id: user.id,
               ...(excelText ? { excel_texts: { [doc.id]: excelText } } : {}),
+              ...(pageTexts ? { page_texts: { [doc.id]: pageTexts } } : {}),
             }),
           }
         );
@@ -1312,13 +1384,19 @@ function CaseViewInner() {
         } finally {
           clearInterval(tick);
         }
+
+        // Stage 6: for provisional uploads, convert extracted rows → ProvPeriod and save to ic_note
+        if (doc_class === "provisional") {
+          setProgressLabel("Saving to provisional tab...");
+          await convertExtractedToProvisional(cc.id, doc.id);
+        }
       }
 
       setProgress(100);
       setProgressLabel("Complete");
       toast.success("Extraction complete");
       await reload();
-      setTab("review");
+      setTab(doc_class === "provisional" ? "provisional" : "review");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Upload failed";
       if (msg === "cancelled" || msg === "The user aborted a request.") {
@@ -2104,6 +2182,168 @@ function CaseViewInner() {
       await supabase.from("credit_cases").update({ analyst_notes: text ? `${tag}${text}` : stripped || null }).eq("id", cc.id);
     }
     await reload();
+  };
+
+  const handleDirectProjImport = async (data: { fiscal_year: number; line_items: LineItem[]; unit: string }[]) => {
+    if (!user || !cc) return;
+    for (const { fiscal_year, line_items, unit } of data) {
+      const { error } = await supabase.from("extracted_financials").upsert({
+        case_id: cc.id, user_id: user.id, document_id: null,
+        fiscal_year, statement_type: "projections" as never,
+        line_items: line_items as never, confirmed: false, unit,
+      }, { onConflict: "case_id,fiscal_year,statement_type" } as never);
+      if (error) throw new Error(error.message);
+    }
+    await reload();
+  };
+
+  // ── Excel template helpers ────────────────────────────────────────────────
+  const tplCols = (fys: string[]) => ["Particulars", ...fys];
+  const tplRows = (labels: string[], fys: string[]) =>
+    labels.map(l => [l, ...fys.map(() => "")] as (string | number | null)[]);
+
+  const downloadFinancialTemplate = async () => {
+    const fys = ["FY2022", "FY2023", "FY2024", "FY2025"];
+    const hdr = tplCols(fys);
+    const blank = (label: string) => [label, ...fys.map(() => "")] as (string | number | null)[];
+
+    const plRows: (string | number | null)[][] = [
+      blank("── INCOME ──"),
+      blank("Revenue from Operations"),
+      blank("Other Income"),
+      blank("Total Income"),
+      blank("── EXPENSES ──"),
+      blank("Raw Material / Cost of Goods Sold"),
+      blank("Change in Stock / WIP"),
+      blank("Employee Benefit Expenses"),
+      blank("Manufacturing Expenses"),
+      blank("Selling & Distribution Expenses"),
+      blank("Administrative & General Expenses"),
+      blank("Other Expenses"),
+      blank("Total Operating Expenses"),
+      blank("── KEY METRICS ──"),
+      blank("Gross Profit"),
+      blank("EBITDA"),
+      blank("Depreciation & Amortization"),
+      blank("EBIT"),
+      blank("Interest & Finance Charges"),
+      blank("Other Non-Operating Income / Expense"),
+      blank("Profit Before Tax"),
+      blank("Tax (Current + Deferred)"),
+      blank("PAT (Net Profit After Tax)"),
+      blank("Dividend Paid"),
+      blank("Retained Profit"),
+    ];
+
+    const bsRows: (string | number | null)[][] = [
+      blank("── EQUITY & LIABILITIES ──"),
+      blank("Share Capital"),
+      blank("Reserves & Surplus"),
+      blank("Net Worth (Shareholders Equity)"),
+      blank("── LONG-TERM LIABILITIES ──"),
+      blank("Long Term Borrowings (Secured)"),
+      blank("Long Term Borrowings (Unsecured)"),
+      blank("Deferred Tax Liability"),
+      blank("Long Term Provisions"),
+      blank("Other Long Term Liabilities"),
+      blank("── CURRENT LIABILITIES ──"),
+      blank("Short Term Borrowings (CC / OD / WCDL)"),
+      blank("Current Maturities of LT Debt"),
+      blank("Trade Payables"),
+      blank("Advance from Customers"),
+      blank("Other Current Liabilities"),
+      blank("Short Term Provisions"),
+      blank("Current Liabilities"),
+      blank("Total Liabilities (Equity + Liab)"),
+      blank("── NON-CURRENT ASSETS ──"),
+      blank("Gross Block (Tangible Fixed Assets)"),
+      blank("Accumulated Depreciation"),
+      blank("Fixed Assets (Net Block)"),
+      blank("Capital Work in Progress (CWIP)"),
+      blank("Intangible Assets (Net)"),
+      blank("Non-Current Investments"),
+      blank("Long Term Loans & Advances"),
+      blank("Other Non-Current Assets"),
+      blank("── CURRENT ASSETS ──"),
+      blank("Inventory (Stock-in-Trade + WIP)"),
+      blank("Trade Receivables"),
+      blank("Cash & Bank Balances"),
+      blank("Short Term Loans & Advances"),
+      blank("Other Current Assets"),
+      blank("Current Assets"),
+      blank("Total Assets"),
+      blank("── DERIVED ──"),
+      blank("Capital Employed"),
+      blank("Working Capital"),
+      blank("Tangible Net Worth"),
+    ];
+
+    const cfRows: (string | number | null)[][] = [
+      blank("── OPERATING ACTIVITIES ──"),
+      blank("Net Profit (PAT)"),
+      blank("Add: Depreciation & Amortization"),
+      blank("Add: Interest Expenses"),
+      blank("Changes in Inventories"),
+      blank("Changes in Trade Receivables"),
+      blank("Changes in Trade Payables"),
+      blank("Changes in Other Working Capital"),
+      blank("Income Tax Paid"),
+      blank("Cash from Operations"),
+      blank("── INVESTING ACTIVITIES ──"),
+      blank("Capital Expenditure (Gross)"),
+      blank("Proceeds from Sale of Fixed Assets"),
+      blank("Investments Made"),
+      blank("Investments Realised"),
+      blank("Other Investing Cash Flows"),
+      blank("Cash from Investing"),
+      blank("── FINANCING ACTIVITIES ──"),
+      blank("Proceeds from Long Term Borrowings"),
+      blank("Repayment of Long Term Borrowings"),
+      blank("Net Change in Short Term Borrowings"),
+      blank("Interest Paid"),
+      blank("Dividend Paid"),
+      blank("Share Capital Raised"),
+      blank("Cash from Financing"),
+      blank("── NET CASH POSITION ──"),
+      blank("Net Change in Cash"),
+      blank("Opening Cash"),
+      blank("Closing Cash"),
+    ];
+
+    await dlExcel([
+      { name: "Profit & Loss",   rows: [["Profit & Loss Statement (Amount in Lakhs)"], hdr, ...plRows] },
+      { name: "Balance Sheet",   rows: [["Balance Sheet (Amount in Lakhs)"], hdr, ...bsRows] },
+      { name: "Cash Flow",       rows: [["Cash Flow Statement (Amount in Lakhs)"], hdr, ...cfRows] },
+    ], `${cc.case_code}_financial_template.xlsx`);
+  };
+
+  const downloadProjectionsTemplate = async () => {
+    const fys = ["FY2025", "FY2026", "FY2027"];
+    const labels = [
+      "Projected Turnover", "Projected EBITDA", "Projected PAT",
+      "Projected Net Worth", "Projected Total Debt",
+      "Projected Gross Profit", "Projected EBIT", "Projected Depreciation",
+      "Projected Interest Expense", "Projected Operating Expenses", "Projected Total Assets",
+    ];
+    await dlExcel([
+      { name: "Projections", rows: [tplCols(fys), ["// Same unit as historical data — import via DIRECT EXCEL IMPORT in Projections tab"], ...tplRows(labels, fys)] },
+    ], `${cc.case_code}_projections_template.xlsx`);
+  };
+
+  const downloadBankTemplate = async () => {
+    const months = ["Apr 2024","May 2024","Jun 2024","Jul 2024","Aug 2024","Sep 2024","Oct 2024","Nov 2024","Dec 2024","Jan 2025","Feb 2025","Mar 2025"];
+    const hdr = ["Month","Bank Name","Account Number","Opening Balance","Closing Balance","Total Credits","Total Debits","Credit Count","Debit Count","Avg Balance","Min Balance","Max Balance","Inward Bounces","Outward Bounces","EMI Outflows","Remarks"];
+    const note = ["// Month format: 'Apr 2024'. Balances in INR. Leave blank if unknown."];
+    const rows = months.map(m => [m, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    await dlExcel([{ name: "Bank Statement", rows: [hdr as (string|number|null)[], note as (string|number|null)[], ...rows] }], `${cc.case_code}_bank_template.xlsx`);
+  };
+
+  const downloadGstTemplate = async () => {
+    const periods = ["Apr 2024","May 2024","Jun 2024","Jul 2024","Aug 2024","Sep 2024","Oct 2024","Nov 2024","Dec 2024","Jan 2025","Feb 2025","Mar 2025"];
+    const hdr = ["Period","Return Type","GSTIN","Taxable Turnover","Exempt Turnover","Total Turnover","Output Tax","ITC Claimed","Net Tax Paid","Filing Date","Filing Status"];
+    const note = ["// Period: 'Apr 2024'. Return Type: GSTR-3B / GSTR-1 / GSTR-9. Turnover in INR."];
+    const rows = periods.map(p => [p, "GSTR-3B", "", "", "", "", "", "", "", "", "Filed"]);
+    await dlExcel([{ name: "GST Returns", rows: [hdr as (string|number|null)[], note as (string|number|null)[], ...rows] }], `${cc.case_code}_gst_template.xlsx`);
   };
 
   const handleProjectionUpload = async (file: File, fiscalYear: number | null) => {
@@ -3030,6 +3270,10 @@ function CaseViewInner() {
               disabled={importingFinExcel}
               className="text-[10px] tracking-widest border border-primary/40 text-primary/70 hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5"
             >{importingFinExcel ? "IMPORTING…" : "⬆ IMPORT FINANCIAL EXCEL"}</button>
+            <button
+              onClick={downloadFinancialTemplate}
+              className="text-[10px] tracking-widest border border-accent/50 text-accent px-3 py-1.5 hover:bg-accent/10 flex items-center gap-1"
+            >⬇ TEMPLATE</button>
             <span className="text-[9px] text-muted-foreground/50 tracking-wide">Supports Balance Sheet · P&L · Cash Flow sheets</span>
             <div className="ml-auto flex items-center gap-1">
               <button
@@ -3642,8 +3886,8 @@ function CaseViewInner() {
             </div>
           )}
 
-          {extracted.length > 0 && (
-            <DownloadBar onExcel={async () => {
+          {extracted.length > 0 ? (
+            <DownloadBar onTemplate={downloadFinancialTemplate} onExcel={async () => {
               const stmtTypes = Array.from(new Set(extracted.map(r => r.statement_type)));
               const sheets = stmtTypes.map(type => {
                 const rows: (string | number | null)[][] = [["FY", "Unit", "Line Item", "Extracted Value", "Override Value", "Confidence", "Reviewed"]];
@@ -3656,6 +3900,8 @@ function CaseViewInner() {
               });
               await dlExcel(sheets, `${cc.case_code}_extraction.xlsx`);
             }} />
+          ) : (
+            <DownloadBar onTemplate={downloadFinancialTemplate} />
           )}
         </div>
       )}
@@ -3920,9 +4166,10 @@ function CaseViewInner() {
             }
             onSaveComment={saveProjectionsComment}
             onUpload={handleProjectionUpload}
+            onDirectImport={handleDirectProjImport}
           />
-          {extracted.some(r => r.statement_type === "projections") && (
-            <DownloadBar onExcel={async () => {
+          {extracted.some(r => r.statement_type === "projections") ? (
+            <DownloadBar onTemplate={downloadProjectionsTemplate} onExcel={async () => {
               const projRows = extracted.filter(r => r.statement_type === "projections");
               const histRows = extracted.filter(r => r.statement_type !== "projections");
               const projYears = Array.from(new Set(projRows.map(r => r.fiscal_year))).sort();
@@ -3935,6 +4182,8 @@ function CaseViewInner() {
               const unit = extracted.find(r=>r.unit)?.unit ?? "";
               await dlExcel([{ name: "Projections", rows }, { name: "Meta", rows: [["Unit", unit], ["Case", cc.case_code], ["Client", cc.client_name]] }], `${cc.case_code}_projections.xlsx`);
             }} />
+          ) : (
+            <DownloadBar onTemplate={downloadProjectionsTemplate} />
           )}
         </div>
       )}
@@ -3997,7 +4246,31 @@ function CaseViewInner() {
             </div>
           </Panel>
           {(!ic || !ic.sections) ? (
-            <Panel title="NO IC NOTE"><div className="text-muted-foreground text-xs">Compute ratios first, then generate the IC narrative — or import a PDF above.</div></Panel>
+            <Panel title="NO IC NOTE">
+              <div className="space-y-3">
+                <div className="text-muted-foreground text-xs">No IC note generated yet. Compute ratios first, then click generate below.</div>
+                {ratios.length === 0 && (
+                  <div className="text-[10px] text-warning/80 border border-warning/30 bg-warning/5 px-3 py-2">
+                    ⚠ No ratios found — run ratio analysis first (RATIOS tab) before generating the IC note.
+                  </div>
+                )}
+                <button
+                  onClick={runNarrative}
+                  disabled={busy || ratios.length === 0}
+                  className="bg-primary text-primary-foreground px-4 py-2 text-xs tracking-widest font-bold disabled:opacity-50"
+                >
+                  {busy ? `${progressLabel || "GENERATING…"} ${progress}%` : "[GENERATE 12-SECTION IC NOTE →]"}
+                </button>
+                {busy && (
+                  <div className="space-y-1">
+                    <div className="h-1.5 bg-border rounded-full overflow-hidden">
+                      <div className="h-full bg-primary transition-all duration-500" style={{ width: `${progress}%` }} />
+                    </div>
+                    <div className="text-[10px] text-muted-foreground tracking-widest">{progressLabel}</div>
+                  </div>
+                )}
+              </div>
+            </Panel>
           ) : (
             <>
               <div className="border border-warning bg-warning/10 px-3 py-2 text-warning text-xs tracking-widest">
@@ -4251,6 +4524,7 @@ function CaseViewInner() {
             user={user!}
             onReload={reload}
           />
+          {tab === "bank" && <DownloadBar onTemplate={downloadBankTemplate} />}
         </>
       )}
       {(tab === "gst" || (tab === "partner" && partnerSubTab === "gst")) && (
@@ -4273,6 +4547,7 @@ function CaseViewInner() {
             docs={tab === "partner" ? partnerDocs : docs}
             accumnData={tab === "partner" ? null : accumnData}
           />
+          {tab === "gst" && <DownloadBar onTemplate={downloadGstTemplate} />}
         </>
       )}
 

@@ -541,7 +541,7 @@ export default function CompanyView() {
 
               {company.notes && (
                 <div className="sm:col-span-2 lg:col-span-3">
-                  <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">NOTES</div>
+                  <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">ABOUT COMPANY</div>
                   <div className="text-primary whitespace-pre-wrap text-xs">{company.notes}</div>
                 </div>
               )}
@@ -598,8 +598,8 @@ export default function CompanyView() {
                   </div>
                 )}
                 <div className="lg:col-span-3">
-                  <label className={labelCls}>Notes</label>
-                  <textarea className={inputCls} rows={2} value={form.notes} onChange={set("notes")} />
+                  <label className={labelCls}>About Company</label>
+                  <textarea className={inputCls} rows={3} placeholder="Company overview, business description, AI summary…" value={form.notes} onChange={set("notes")} />
                 </div>
               </div>
               <div className="flex gap-2">

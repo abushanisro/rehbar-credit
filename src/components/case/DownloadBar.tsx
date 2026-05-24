@@ -44,7 +44,11 @@ export function dlPdf(html: string, title: string) {
   setTimeout(() => win.print(), 400);
 }
 
-export function DownloadBar({ onExcel, onPdf }: { onExcel?: () => void; onPdf?: () => void }) {
+export function DownloadBar({ onExcel, onPdf, onTemplate }: {
+  onExcel?: () => void;
+  onPdf?: () => void;
+  onTemplate?: () => void;
+}) {
   return (
     <div className="flex items-center gap-2 pt-3 mt-1 border-t border-border/40">
       <span className="text-[10px] text-muted-foreground tracking-widest">↓ DOWNLOAD</span>
@@ -56,6 +60,11 @@ export function DownloadBar({ onExcel, onPdf }: { onExcel?: () => void; onPdf?: 
       {onPdf && (
         <button onClick={onPdf} className="text-[10px] border border-border text-primary px-3 py-1 hover:bg-primary/10 tracking-widest font-bold">
           [PDF]
+        </button>
+      )}
+      {onTemplate && (
+        <button onClick={onTemplate} className="text-[10px] border border-accent/50 text-accent px-3 py-1 hover:bg-accent/10 tracking-widest font-bold">
+          [TEMPLATE]
         </button>
       )}
     </div>

@@ -384,6 +384,117 @@ const SEV_CLS: Record<Severity, string> = {
 // COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Direct Excel import parser ────────────────────────────────────────────────
+const PROJ_LABEL_MAP: Array<[RegExp, string]> = [
+  [/turn.*over|revenue|net\s*sales?/i,          "Projected Turnover"],
+  [/\bebitda\b/i,                               "Projected EBITDA"],
+  [/profit\s*after\s*tax|^pat$|\bnet\s*profit\b/i, "Projected PAT"],
+  [/profit\s*before\s*tax|^pbt$/i,              "Projected Profit Before Tax"],
+  [/\bebit\b/i,                                 "Projected EBIT"],
+  [/gross\s*profit/i,                           "Projected Gross Profit"],
+  [/net\s*worth|shareholders?\s*equity|equity\s*capital/i, "Projected Net Worth"],
+  [/total\s*debt|borrowing/i,                   "Projected Total Debt"],
+  [/depreciation/i,                             "Projected Depreciation"],
+  [/interest|finance\s*cost/i,                  "Projected Interest Expense"],
+  [/cogs|cost\s*of\s*goods/i,                   "Projected COGS"],
+  [/total\s*assets?/i,                          "Projected Total Assets"],
+  [/operating\s*exp/i,                          "Projected Operating Expenses"],
+];
+
+function mapProjLabel(raw: string): string {
+  const s = raw.trim().replace(/^\s*projected\s*/i, "");
+  for (const [re, mapped] of PROJ_LABEL_MAP) if (re.test(s)) return mapped;
+  // Keep as-is but prefix with "Projected" if it doesn't already have it
+  return /^projected/i.test(raw.trim()) ? raw.trim() : `Projected ${raw.trim()}`;
+}
+
+function parseIndianNum(raw: unknown): number | null {
+  if (raw == null || raw === "") return null;
+  const s = String(raw).replace(/,/g, "").trim();
+  if (!s || s === "-" || s === "—") return null;
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+
+async function parseProjectionExcel(
+  file: File,
+): Promise<{ fiscal_year: number; line_items: LineItem[]; unit: string }[]> {
+  const XLSX = await import("xlsx");
+  const buf  = await file.arrayBuffer();
+  const wb   = XLSX.read(buf, { type: "array", raw: false, cellText: true });
+
+  // Try each sheet; use the first one that has year-column headers
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    if (!ws) continue;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "", raw: false }) as string[][];
+    if (rows.length < 2) continue;
+
+    // Detect unit from any cell in first 8 rows
+    let unit = "Lakhs";
+    for (const row of rows.slice(0, 8)) {
+      const found = row.find(c => /amount\s*in\s*(rs|inr|lakh|crore|thousands?)/i.test(String(c)));
+      if (found) {
+        const s = String(found).toLowerCase();
+        if (/crore/i.test(s)) unit = "Crores";
+        else if (/thousand/i.test(s)) unit = "Thousands";
+        break;
+      }
+    }
+
+    // Find header row: first row where ≥1 column matches a year pattern
+    let headerIdx = -1;
+    const fyColumns: { col: number; fy: number }[] = [];
+
+    for (let i = 0; i < Math.min(rows.length, 12); i++) {
+      const row = rows[i];
+      const found: typeof fyColumns = [];
+      for (let c = 1; c < row.length; c++) {
+        const cell = String(row[c]).trim();
+        // FY25, FY2025, FY25-26, FY2025-26, 2025, 2025-26
+        const m = cell.match(/(?:fy\s*)?(\d{2,4})(?:\s*[-–]\s*\d{2,4})?/i);
+        if (m) {
+          const yr = parseInt(m[1]);
+          const fy = yr < 100 ? 2000 + yr : yr;
+          if (fy >= 2015 && fy <= 2045) found.push({ col: c, fy });
+        }
+      }
+      if (found.length > 0) { headerIdx = i; fyColumns.push(...found); break; }
+    }
+
+    if (headerIdx === -1 || fyColumns.length === 0) continue;
+
+    // Collect line items per FY
+    const fyItems: Record<number, LineItem[]> = {};
+    for (const { fy } of fyColumns) fyItems[fy] = [];
+
+    for (let i = headerIdx + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const rawLabel = String(row[0] ?? "").trim();
+      if (!rawLabel || /^(total|sub.?total|---|\s*sr\.?\s*no\.?)$/i.test(rawLabel)) continue;
+
+      const label = mapProjLabel(rawLabel);
+      for (const { col, fy } of fyColumns) {
+        const val = parseIndianNum(row[col]);
+        if (val == null) continue;
+        // deduplicate — if label already added, overwrite
+        const arr = fyItems[fy];
+        const idx = arr.findIndex(it => it.label === label);
+        if (idx === -1) arr.push({ label, value: val, confidence: 90, reviewed: false });
+        else arr[idx] = { ...arr[idx], value: val };
+      }
+    }
+
+    const result = Object.entries(fyItems)
+      .filter(([, items]) => items.length > 0)
+      .map(([fyStr, items]) => ({ fiscal_year: Number(fyStr), line_items: items, unit }));
+
+    if (result.length > 0) return result;
+  }
+
+  throw new Error("No fiscal year columns found in the Excel. Make sure column headers include a year (e.g. FY26, FY2026, 2026).");
+}
+
 export function ProjectionsTab({
   extracted,
   cc,
@@ -394,6 +505,7 @@ export function ProjectionsTab({
   projComment = "",
   onSaveComment,
   onUpload,
+  onDirectImport,
 }: {
   extracted: ExtractedRow[];
   cc: CaseRow;
@@ -404,6 +516,7 @@ export function ProjectionsTab({
   projComment?: string;
   onSaveComment?: (text: string) => Promise<void>;
   onUpload?: (file: File, fiscalYear: number | null) => Promise<void>;
+  onDirectImport?: (data: { fiscal_year: number; line_items: LineItem[]; unit: string }[]) => Promise<void>;
 }) {
   const projRows = extracted.filter(r => r.statement_type === "projections");
   const histPL   = extracted.filter(r => r.statement_type === "profit_loss");
@@ -424,11 +537,13 @@ export function ProjectionsTab({
 
   const model = useMemo(() => buildModel(histPL, histBS, nForward), [histPL, histBS, nForward]);
 
-  const [comment, setComment]   = useState(projComment);
-  const [saving,  setSaving]    = useState(false);
-  const [saved,   setSaved]     = useState(false);
+  const [comment, setComment]       = useState(projComment);
+  const [saving,  setSaving]        = useState(false);
+  const [saved,   setSaved]         = useState(false);
   const [importBusy, setImportBusy] = useState(false);
-  const importFileRef = useRef<HTMLInputElement>(null);
+  const [directBusy, setDirectBusy] = useState(false);
+  const importFileRef      = useRef<HTMLInputElement>(null);
+  const directImportFileRef = useRef<HTMLInputElement>(null);
   useEffect(() => { setComment(projComment); }, [projComment]);
 
   const handleSave = async () => {
@@ -438,6 +553,22 @@ export function ProjectionsTab({
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleDirectImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !onDirectImport) return;
+    setDirectBusy(true);
+    try {
+      const data = await parseProjectionExcel(file);
+      await onDirectImport(data);
+      toast.success(`Imported projections for ${data.length} year${data.length !== 1 ? "s" : ""} — no AI used`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setDirectBusy(false);
+    }
   };
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -454,35 +585,73 @@ export function ProjectionsTab({
     }
   };
 
-  const importPanel = onUpload ? (
+  const importPanel = (onUpload || onDirectImport) ? (
     <Panel title="IMPORT PROJECTION DOCUMENT" ticker="PDF · EXCEL · IMAGE">
-      <input
-        ref={importFileRef}
-        type="file"
-        className="hidden"
-        accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp"
-        onChange={handleImportFile}
-      />
-      <div className="space-y-3">
-        <div className="text-[9px] text-muted-foreground/70 leading-relaxed">
-          Upload management projection documents. Supports PDF, Excel, or image.
-          The AI automatically detects fiscal years and extracts Projected Turnover, EBITDA, PAT, Net Worth, and Total Debt.
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <button
-            onClick={() => importFileRef.current?.click()}
-            disabled={importBusy || busy}
-            className="bg-primary text-primary-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
-          >
-            {importBusy ? "UPLOADING…" : "[ CHOOSE FILE → ]"}
-          </button>
-          {importBusy && (
-            <span className="text-[9px] text-primary tracking-widest animate-pulse">▸ Extracting with AI…</span>
-          )}
-          {busy && !importBusy && (
-            <span className="text-[9px] text-muted-foreground/50">▸ Another operation in progress…</span>
-          )}
-        </div>
+      <input ref={importFileRef} type="file" className="hidden"
+        accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp" onChange={handleImportFile} />
+      <input ref={directImportFileRef} type="file" className="hidden"
+        accept=".xlsx,.xls,.csv" onChange={handleDirectImportFile} />
+      <button onClick={async () => {
+        const XLSX = await import("xlsx");
+        const wb = XLSX.utils.book_new();
+        const fys = ["FY2025", "FY2026", "FY2027"];
+        const labels = ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt","Projected Gross Profit","Projected EBIT","Projected Depreciation","Projected Interest Expense","Projected Operating Expenses","Projected Total Assets"];
+        const rows = [["Particulars", ...fys], ["// Same unit as historical data. Import via DIRECT EXCEL IMPORT above."], ...labels.map(l => [l, "", "", ""])];
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "Projections");
+        XLSX.writeFile(wb, "projections_template.xlsx");
+      }} className="text-[10px] tracking-widest border border-accent/40 text-accent/80 px-3 py-1.5 hover:text-accent hover:border-accent/60 disabled:opacity-40">
+        ⬇ TEMPLATE
+      </button>
+
+      <div className="space-y-4">
+        {/* ── Direct Excel import (instant, no AI) ── */}
+        {onDirectImport && (
+          <div className="border border-accent/30 bg-accent/5 p-3 space-y-2">
+            <div className="text-[9px] text-accent tracking-widest font-bold">DIRECT EXCEL IMPORT · INSTANT · NO AI</div>
+            <div className="text-[9px] text-muted-foreground/70 leading-relaxed">
+              Import a structured Excel file directly — no AI, no token cost, instant.
+              First column = line item labels. Remaining columns = fiscal years (e.g. FY26, FY2026, 2026).
+              Labels are auto-mapped to standard projection items.
+            </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <button
+                onClick={() => directImportFileRef.current?.click()}
+                disabled={directBusy || busy}
+                className="bg-accent text-accent-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
+              >
+                {directBusy ? "IMPORTING…" : "[ ⬆ IMPORT EXCEL DIRECTLY ]"}
+              </button>
+              {directBusy && (
+                <span className="text-[9px] text-accent tracking-widest animate-pulse">▸ Parsing…</span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── AI extraction (PDF / image / Excel via AI) ── */}
+        {onUpload && (
+          <div className="space-y-2">
+            <div className="text-[9px] text-muted-foreground/60 tracking-widest font-bold">AI EXTRACTION · PDF / IMAGE / EXCEL</div>
+            <div className="text-[9px] text-muted-foreground/70 leading-relaxed">
+              Use AI to extract from PDF, image, or unstructured Excel. AI detects fiscal years and maps all projection line items automatically.
+            </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <button
+                onClick={() => importFileRef.current?.click()}
+                disabled={importBusy || busy}
+                className="bg-primary text-primary-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
+              >
+                {importBusy ? "UPLOADING…" : "[ CHOOSE FILE → ]"}
+              </button>
+              {importBusy && (
+                <span className="text-[9px] text-primary tracking-widest animate-pulse">▸ Extracting with AI…</span>
+              )}
+              {busy && !importBusy && (
+                <span className="text-[9px] text-muted-foreground/50">▸ Another operation in progress…</span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </Panel>
   ) : null;

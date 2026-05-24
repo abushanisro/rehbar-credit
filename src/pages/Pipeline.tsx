@@ -90,6 +90,17 @@ const STAGE_MAP: Partial<Record<CaseStatus, { current: number; completed: number
   queries_resubmission:   { current: 10, completed: [1, 2, 4, 5, 6] },
 };
 
+// Maps intermediate doc-processing statuses to their visible pipeline column
+const PIPELINE_COL_OVERRIDE: Partial<Record<CaseStatus, CaseStatus>> = {
+  uploading:  "docs_received",
+  extracting: "docs_received",
+  extracted:  "docs_received",
+  narrative:  "analysis",
+};
+function getPipelineCol(status: CaseStatus): CaseStatus {
+  return PIPELINE_COL_OVERRIDE[status] ?? status;
+}
+
 export default function Pipeline() {
   const { user } = useAuth();
   const [cases, setCases] = useState<CaseRow[]>([]);
@@ -170,6 +181,17 @@ export default function Pipeline() {
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, []);
+
+  // ── Case removal ─────────────────────────────────────────────────────────
+  const removeCase = async (e: React.MouseEvent, id: string, name: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm(`Delete case "${name}"?\nThis cannot be undone.`)) return;
+    setCases(prev => prev.filter(c => c.id !== id));
+    const { error } = await supabase.from("credit_cases").delete().eq("id", id);
+    if (error) { toast.error("Failed to delete case"); load(); }
+    else toast.success(`Deleted ${name}`);
+  };
 
   // ── Note handlers ────────────────────────────────────────────────────────
   const startEditNote = (e: React.MouseEvent, c: CaseRow) => {
@@ -368,7 +390,7 @@ export default function Pipeline() {
             <div className="flex">
               {COLUMNS.map((col, colIdx) => {
                 const meta     = CASE_STATUS_META[col];
-                const colCases = getSortedColCases(col, visibleCases.filter(c => c.status === col));
+                const colCases = getSortedColCases(col, visibleCases.filter(c => getPipelineCol(c.status) === col));
                 const isOver   = dragOverCol === col;
                 const accent   = COL_ACCENT[col] ?? "#6b7280";
 
@@ -586,9 +608,20 @@ export default function Pipeline() {
                         );
                       })}
                       <td className="py-2 px-3" onClick={e => e.stopPropagation()}>
-                        {c.analyst_notes
-                          ? <span className="text-foreground/60 text-[9px] line-clamp-2 whitespace-pre-wrap">{c.analyst_notes}</span>
-                          : <span className="text-muted-foreground/20 text-[9px] italic">—</span>}
+                        <div className="flex items-start justify-between gap-2 group/row">
+                          <div className="flex-1 min-w-0">
+                            {c.analyst_notes
+                              ? <span className="text-foreground/60 text-[9px] line-clamp-2 whitespace-pre-wrap">{c.analyst_notes}</span>
+                              : <span className="text-muted-foreground/20 text-[9px] italic">—</span>}
+                          </div>
+                          <button
+                            onClick={e => removeCase(e, c.id, c.client_name)}
+                            title="Delete case"
+                            className="opacity-0 group-hover/row:opacity-100 text-muted-foreground/40 hover:text-destructive transition-all text-[11px] leading-none shrink-0 mt-0.5"
+                          >
+                            ×
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

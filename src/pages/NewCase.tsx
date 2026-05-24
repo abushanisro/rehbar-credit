@@ -47,6 +47,7 @@ type FormState = {
   collateral_summary: string;
   promoter_details: string;
   website: string;
+  about: string;
   has_partner: boolean;
   partner_company_name: string;
   assign_name: string;
@@ -98,6 +99,7 @@ const SCANNABLE_FIELDS: { key: keyof ScanResult; label: string }[] = [
   { key: "collateral_summary", label: "Collateral" },
   { key: "strategic_rationale",label: "Strategic Rationale" },
   { key: "website",            label: "Website" },
+  { key: "summary",            label: "About Company" },
 ];
 
 interface CompanySuggestion {
@@ -141,6 +143,7 @@ export default function NewCase() {
     collateral_summary: "",
     promoter_details: "",
     website: "",
+    about: "",
     has_partner: false,
     partner_company_name: "",
     assign_name: "",
@@ -274,6 +277,7 @@ export default function NewCase() {
       if (scanResult.collateral_summary) next.collateral_summary = scanResult.collateral_summary;
       if (scanResult.strategic_rationale)next.strategic_rationale= scanResult.strategic_rationale;
       if (scanResult.website)            next.website            = scanResult.website;
+      if (scanResult.summary)            next.about              = scanResult.summary;
 
       // industry: match against list or set "Other"
       if (scanResult.industry) {
@@ -496,19 +500,29 @@ export default function NewCase() {
     const resolvedIndustry =
       form.industry === "Other" ? form.industry_custom : form.industry;
 
-    // If MCA data imported but no company selected, auto-create a company
+    // Always auto-create a company if not already linked (web search, MCA import, or manual entry)
     let companyId = selectedCompanyId || null;
-    if (mcaProfile && !companyId && form.client_name.trim()) {
+    if (!companyId && form.client_name.trim()) {
       const { data: newCo, error: coErr } = await supabase.from("companies").insert({
         name: form.client_name.trim(),
         legal_constitution: form.legal_constitution || null,
         industry: resolvedIndustry || null,
         year_established: form.year_established ? Number(form.year_established) : null,
         website: form.website || null,
-        registered_address: mcaProfile.raw_address || null,
+        promoter_details: form.promoter_details || null,
+        notes: form.about || null,
+        registered_address: mcaProfile?.raw_address || null,
         created_by: user.id,
       }).select("id").single();
       if (!coErr && newCo?.id) companyId = newCo.id;
+    } else if (companyId && (form.about || form.promoter_details || form.website)) {
+      // Update existing linked company with any enriched data from web search
+      await supabase.from("companies").update({
+        ...(form.website         ? { website:          form.website }         : {}),
+        ...(form.promoter_details? { promoter_details: form.promoter_details } : {}),
+        ...(form.about           ? { notes:            form.about }            : {}),
+        ...(form.year_established? { year_established: Number(form.year_established) } : {}),
+      }).eq("id", companyId);
     }
 
     const { data, error } = await supabase.from("credit_cases").insert({
@@ -778,6 +792,16 @@ export default function NewCase() {
             <div>
               <label className={labelCls}>Collateral Summary</label>
               <textarea className={inputCls} rows={2} value={form.collateral_summary} onChange={set("collateral_summary")} />
+            </div>
+            <div>
+              <label className={labelCls}>About Company</label>
+              <textarea
+                className={inputCls}
+                rows={3}
+                placeholder="AI-generated or manual company overview — saved to company profile"
+                value={form.about}
+                onChange={set("about")}
+              />
             </div>
 
             {/* Partner Company Toggle */}

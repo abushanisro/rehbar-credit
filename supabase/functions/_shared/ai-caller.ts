@@ -10,7 +10,7 @@ declare const Deno: { env: { get(key: string): string | undefined } };
 
 const ANTHROPIC_API     = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION = "2023-06-01";
-const MODEL             = "claude-haiku-4-5-20251001";
+const MODEL             = "claude-sonnet-4-6";
 
 // ── File content types ────────────────────────────────────────────────────────
 
