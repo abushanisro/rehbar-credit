@@ -451,7 +451,7 @@ export default function Pipeline() {
                               onClick={e => { if (isDragging) e.preventDefault(); }}
                             >
                               {/* Client name */}
-                              <div className="text-primary font-bold text-[11px] leading-snug pr-4 truncate">
+                              <div className="text-primary font-bold text-[11px] leading-snug pr-4 break-words">
                                 {c.client_name}
                               </div>
                               {/* Code + badges */}
@@ -585,7 +585,7 @@ export default function Pipeline() {
                       onClick={() => window.location.href = `/case/${c.id}`}
                     >
                       <td className="py-2 pr-4 sticky left-0 bg-card z-10 border-r border-border/20">
-                        <div className="text-primary font-bold text-[11px] truncate" style={{ maxWidth: "185px" }}>{c.client_name}</div>
+                        <div className="text-primary font-bold text-[11px] break-words">{c.client_name}</div>
                         <div className="text-muted-foreground text-[9px] mt-0.5 flex items-center gap-1.5">
                           <span>{c.case_code}</span>
                           <span className="text-accent">{PRODUCTS[c.product_type].short}</span>

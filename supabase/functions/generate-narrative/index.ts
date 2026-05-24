@@ -353,7 +353,8 @@ Use the pre-built tables above for all numeric references. Do not invent figures
       },
       toolRequired: ["sections","risks","conditions_precedent","swot"],
       maxTokens: 8000,
-      retries: 1,
+      retries: 0,        // no retry — each attempt can take 60–90s; 2× would exceed Supabase's 150s wall-clock limit
+      timeoutMs: 120_000,
     });
 
     // Safety net: if Claude didn't copy the pre-built tables, inject them

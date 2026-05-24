@@ -83,17 +83,28 @@ Deno.serve(async (req) => {
     let siteUrl = (website ?? "").trim();
     if (siteUrl && !siteUrl.match(/^https?:\/\//)) siteUrl = "https://" + siteUrl;
 
+    // Extract bare domain for searching (e.g. "example.com" from "https://www.example.com/page")
+    let domainHint = "";
+    try { domainHint = new URL(siteUrl || "https://x").hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+
     // Fetch web context in parallel
-    const [siteText, ddgGeneral, ddgPromoters] = await Promise.all([
+    // — When only company_name: also search for their official website URL
+    // — When only website: also run DDG on the domain to surface company name + info
+    const [siteText, ddgGeneral, ddgPromoters, ddgWebsite, ddgDomain] = await Promise.all([
       siteUrl      ? fetchSitePages(siteUrl) : Promise.resolve(""),
       company_name ? duckDuckGo(`${company_name} company India business profile`) : Promise.resolve(""),
       company_name ? duckDuckGo(`${company_name} directors founders promoters India`) : Promise.resolve(""),
+      company_name && !siteUrl ? duckDuckGo(`${company_name} official website India`) : Promise.resolve(""),
+      !company_name && domainHint ? duckDuckGo(`${domainHint} company India business`) : Promise.resolve(""),
     ]);
 
+    // If only website given and we got no company name yet, also try fetching DDG with the domain
     const contextParts: string[] = [];
     if (siteText)       contextParts.push(`=== COMPANY WEBSITE ===\n${siteText}`);
     if (ddgGeneral)     contextParts.push(`=== WEB SEARCH: General ===\n${ddgGeneral}`);
     if (ddgPromoters)   contextParts.push(`=== WEB SEARCH: Promoters/Directors ===\n${ddgPromoters}`);
+    if (ddgWebsite)     contextParts.push(`=== WEB SEARCH: Official Website ===\n${ddgWebsite}`);
+    if (ddgDomain)      contextParts.push(`=== WEB SEARCH: Domain Lookup ===\n${ddgDomain}`);
     if (!contextParts.length)
       contextParts.push(`Company: ${company_name ?? ""}\nWebsite: ${website ?? ""}`);
 
@@ -108,6 +119,8 @@ LEGAL CONSTITUTION (exact strings only): Pvt Ltd, Public Ltd, Partnership, LLP, 
 INDUSTRY (pick closest match): Agriculture & Food Processing, Automotive, Chemicals & Petrochemicals, Construction & Infrastructure, Education, Energy & Utilities, Financial Services, Healthcare & Pharmaceuticals, Hospitality & Tourism, IT & Technology, Logistics & Transportation, Manufacturing, Media & Entertainment, Real Estate, Retail & E-commerce, Telecom, Textile & Apparel, Trading, Other
 
 Rules:
+- client_name: ALWAYS return the full legal company name — derive from website title/footer/about page if not directly given
+- website: ALWAYS return the official website URL if you can find or infer it from any source — include https://
 - promoter_details: full names, designation, founding story, shareholding % where available — be comprehensive
 - year_established: integer year the company was founded/incorporated
 - end_use: what the company would typically use financing for (machinery, working capital, expansion, etc.)

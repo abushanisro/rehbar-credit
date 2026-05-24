@@ -521,6 +521,7 @@ function CaseViewInner() {
     deal_amount: "", tenure_months: "", expected_irr: "",
     end_use: "", collateral_summary: "", analyst_notes: "", strategic_rationale: "",
     assign_email: "", assign_name: "", assign_role: "analyst",
+    has_partner: false, partner_company_name: "",
   });
   type TeamMember = { id: string; email: string; full_name: string | null; role: string | null };
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
@@ -890,6 +891,7 @@ function CaseViewInner() {
     const assigneeEmail = (cc as Record<string, unknown>).assigned_to_email as string | null ?? "";
     const assigneeName  = (cc as Record<string, unknown>).assigned_to_name  as string | null ?? "";
 
+    const icNote = (cc.ic_note ?? {}) as Record<string, unknown>;
     setHd({
       client_name: cc.client_name,
       product_type: cc.product_type,
@@ -911,6 +913,8 @@ function CaseViewInner() {
       assign_email: assigneeEmail,
       assign_name:  assigneeName,
       assign_role:  "analyst",
+      has_partner: (icNote.has_partner as boolean) ?? false,
+      partner_company_name: (icNote.partner_company_name as string) ?? "",
     });
     setEditingHeader(true);
   };
@@ -996,6 +1000,16 @@ function CaseViewInner() {
       setEditMcaProfile(null);
     }
 
+    // Persist has_partner / partner_company_name into ic_note without overwriting other keys
+    const baseIcNote = (cc.ic_note ?? {}) as Record<string, unknown>;
+    await supabase.from("credit_cases").update({
+      ic_note: {
+        ...baseIcNote,
+        has_partner: hd.has_partner,
+        partner_company_name: hd.has_partner ? (hd.partner_company_name.trim() || null) : null,
+      } as unknown as Json,
+    }).eq("id", cc.id);
+
     setEditingHeader(false);
     await reload();
   };
@@ -1031,7 +1045,9 @@ function CaseViewInner() {
     if (!editScanResult) return;
     setHd(f => {
       const next = { ...f };
-      if (editScanResult.client_name)         next.client_name         = editScanResult.client_name;
+      // Fill client_name / website only when the field was blank (user typed the other one as the search seed)
+      if (editScanResult.client_name && !f.client_name.trim()) next.client_name = editScanResult.client_name;
+      if (editScanResult.website     && !f.website.trim())     next.website     = editScanResult.website;
       if (editScanResult.product_type)        next.product_type        = editScanResult.product_type;
       if (editScanResult.product_type_custom) next.product_type_custom = editScanResult.product_type_custom!;
       if (editScanResult.legal_constitution)  next.legal_constitution  = editScanResult.legal_constitution;
@@ -1043,7 +1059,6 @@ function CaseViewInner() {
       if (editScanResult.end_use)             next.end_use             = editScanResult.end_use;
       if (editScanResult.collateral_summary)  next.collateral_summary  = editScanResult.collateral_summary;
       if (editScanResult.strategic_rationale) next.strategic_rationale = editScanResult.strategic_rationale;
-      if (editScanResult.website)             next.website             = editScanResult.website;
       if (editScanResult.industry) {
         const match = CASE_INDUSTRIES.find(i => i.toLowerCase() === editScanResult.industry!.toLowerCase());
         if (match) {
@@ -2578,6 +2593,35 @@ function CaseViewInner() {
               <div>
                 <label className={labelCls}>Analyst Notes</label>
                 <textarea className={inputCls} rows={2} value={hd.analyst_notes} onChange={sHd("analyst_notes")} />
+              </div>
+
+              {/* ── Partner / Group Company ───────────────────────────── */}
+              <div className="border border-border bg-surface/40 px-3 py-2.5 space-y-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">▶ PARTNER / GROUP COMPANY</div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setHd(h => ({ ...h, has_partner: !h.has_partner, partner_company_name: h.has_partner ? "" : h.partner_company_name }))}
+                    className={`w-10 h-5 rounded-full transition-colors relative flex-shrink-0 ${hd.has_partner ? "bg-primary" : "bg-border"}`}
+                  >
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${hd.has_partner ? "left-[22px]" : "left-0.5"}`} />
+                  </button>
+                  <span className="text-xs tracking-widest font-bold text-foreground/80">DOES THIS DEAL INVOLVE A PARTNER / GROUP COMPANY?</span>
+                </div>
+                {hd.has_partner && (
+                  <div>
+                    <label className={labelCls}>Partner Company Name</label>
+                    <input
+                      className={inputCls}
+                      placeholder="e.g. ABC Holdings Pvt Ltd"
+                      value={hd.partner_company_name}
+                      onChange={sHd("partner_company_name")}
+                    />
+                    <p className="text-[10px] text-muted-foreground mt-1 tracking-wide">
+                      Partner financials and analysis are available in the PARTNER tab.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* ── Assign To ─────────────────────────────────────────── */}
