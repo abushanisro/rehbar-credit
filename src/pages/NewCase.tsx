@@ -165,6 +165,12 @@ export default function NewCase() {
   const [mcaProfile, setMcaProfile] = useState<McaProfile | null>(null);
   const [mcaImporting, setMcaImporting] = useState(false);
 
+  // ── PAN / CIN live lookup ─────────────────────────────────────────────────
+  const [panCinType, setPanCinType] = useState<"PAN" | "CIN">("PAN");
+  const [panCinValue, setPanCinValue] = useState("");
+  const [panCinLoading, setPanCinLoading] = useState(false);
+  const [panCinError, setPanCinError] = useState("");
+
   const product = PRODUCTS[form.product_type];
 
   // ── Company search ────────────────────────────────────────────────────────
@@ -204,6 +210,118 @@ export default function NewCase() {
       setTimeout(() => { setWebEnriching(false); setWebEnrichPct(0); }, 400);
     }
   }, [form.client_name, form.website]);
+
+  const applyMcaProfile = useCallback((p: {
+    company_name?: string; cin?: string; pan?: string; lei?: string;
+    year_established?: string; legal_constitution?: string;
+    category?: string; sub_category?: string; mca_type?: string; mca_status?: string;
+    sector?: string; nse_sector?: string; products_services?: string;
+    email?: string; telephone?: string; website?: string; about?: string;
+    date_of_incorporation?: string; date_of_last_bs?: string; date_of_last_agm?: string;
+    registered_address?: string; authorized_capital?: string; paid_up_capital?: string;
+    directors?: import("@/lib/mca-parser").Director[];
+  }) => {
+    const profile: McaProfile = {
+      __type: "mca",
+      cin:                   p.cin,
+      pan:                   p.pan,
+      lei:                   p.lei,
+      category:              p.category,
+      sub_category:          p.sub_category,
+      mca_type:              p.mca_type,
+      mca_status:            p.mca_status,
+      nse_sector:            p.nse_sector,
+      sector:                p.sector,
+      products_services:     p.products_services,
+      email:                 p.email,
+      telephone:             p.telephone,
+      date_of_incorporation: p.date_of_incorporation,
+      date_of_last_bs:       p.date_of_last_bs,
+      date_of_last_agm:      p.date_of_last_agm,
+      raw_address:           p.registered_address,
+      about:                 p.about,
+      authorized_capital:    p.authorized_capital,
+      paid_up_capital:       p.paid_up_capital,
+      directors:             p.directors ?? [],
+    };
+    setMcaProfile(profile);
+    setForm(f => {
+      const next = { ...f };
+      if (p.company_name)      next.client_name       = p.company_name;
+      if (p.website)           next.website           = p.website;
+      if (p.about)             next.about             = p.about;
+      if (p.year_established)  next.year_established  = p.year_established;
+      if (p.legal_constitution &&
+        ["Pvt Ltd","Public Ltd","Partnership","LLP","Proprietorship","Individual"].includes(p.legal_constitution))
+        next.legal_constitution = p.legal_constitution;
+      if (p.sector) {
+        const mapped = _mapIndustry(p.sector);
+        if (mapped && INDUSTRIES.includes(mapped as typeof INDUSTRIES[number])) next.industry = mapped;
+      }
+      return next;
+    });
+    toast.success(`MCA data loaded — ${p.directors?.length ?? 0} director(s) found`);
+  }, []);
+
+  const lookupCompany = useCallback(async () => {
+    const val = panCinValue.trim().toUpperCase();
+    if (!val) return;
+    setPanCinLoading(true);
+    setPanCinError("");
+
+    const callFn = async (body: Record<string, string>) => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/accumn-company-lookup`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${session?.access_token ?? ""}`,
+            "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+          },
+          body: JSON.stringify(body),
+        },
+      );
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      return json as Record<string, unknown>;
+    };
+
+    try {
+      // Phase 1 — create order
+      const d1 = await callFn({ identifier_type: panCinType, identifier_value: val });
+      if (d1.error) { setPanCinError(String(d1.error)); return; }
+      if (d1.status === "done" && d1.profile) { applyMcaProfile(d1.profile as Parameters<typeof applyMcaProfile>[0]); return; }
+
+      const ffOrderId = String(d1.ff_order_id ?? "");
+      if (!ffOrderId) { setPanCinError("No order ID returned from Accumn"); return; }
+
+      toast.info("Order submitted — fetching MCA data (30–90 sec)…");
+
+      // Phase 2 — poll every 10s for up to 2 minutes
+      for (let i = 0; i < 12; i++) {
+        await new Promise(r => setTimeout(r, 10_000));
+        const d2 = await callFn({ ff_order_id: ffOrderId });
+        if (d2.status === "cancelled") {
+          setPanCinError(String(d2.error ?? "Order cancelled — check the identifier"));
+          return;
+        }
+        if (d2.status === "done") {
+          if (d2.profile) applyMcaProfile(d2.profile as Parameters<typeof applyMcaProfile>[0]);
+          else setPanCinError("Order complete but no profile data returned");
+          return;
+        }
+        // still pending — keep polling
+      }
+
+      setPanCinError("Timed out — Accumn is still processing. Try again in 1 minute.");
+    } catch (e) {
+      setPanCinError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setPanCinLoading(false);
+    }
+  }, [panCinType, panCinValue, applyMcaProfile]);
 
   const onClientNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -602,6 +720,52 @@ export default function NewCase() {
         {/* ── LEFT: case form ─────────────────────────────────────────────── */}
         <Panel title="NEW CREDIT CASE — CLIENT & DEAL INFO" ticker="REHBAR/NEW" className="xl:col-span-8">
           <form onSubmit={submit} className="space-y-3">
+
+            {/* ── PAN / CIN Lookup ─────────────────────────────────────────── */}
+            <div className="border border-primary/30 bg-primary/5 px-3 py-2.5 space-y-2">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-primary mb-1">▶ MCA LOOKUP — FETCH COMPANY PROFILE BY PAN / CIN</div>
+              <div className="flex gap-2">
+                <select
+                  className="bg-input border border-border px-2 py-1.5 text-xs text-primary focus:outline-none focus:border-primary w-20 shrink-0"
+                  value={panCinType}
+                  onChange={e => setPanCinType(e.target.value as "PAN" | "CIN")}
+                  disabled={panCinLoading}
+                >
+                  <option value="PAN">PAN</option>
+                  <option value="CIN">CIN</option>
+                </select>
+                <input
+                  className="flex-1 bg-input border border-border px-2 py-1.5 text-sm text-primary focus:outline-none focus:border-primary uppercase placeholder:normal-case placeholder:text-muted-foreground"
+                  placeholder={panCinType === "PAN" ? "e.g. AABCS1234C" : "e.g. U74999MH2010PTC123456"}
+                  value={panCinValue}
+                  onChange={e => { setPanCinValue(e.target.value); setPanCinError(""); }}
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); lookupCompany(); } }}
+                  disabled={panCinLoading}
+                  maxLength={21}
+                />
+                <button
+                  type="button"
+                  onClick={lookupCompany}
+                  disabled={panCinLoading || !panCinValue.trim()}
+                  className="border border-primary bg-primary/10 text-primary px-3 py-1.5 text-xs tracking-widest font-bold hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+                >
+                  {panCinLoading ? "FETCHING…" : "FETCH MCA"}
+                </button>
+              </div>
+              {panCinLoading && (
+                <div className="flex items-center gap-2 text-[10px] text-primary/70">
+                  <span className="animate-pulse">●</span>
+                  <span>Contacting Accumn / MCA — typically 30–90 seconds…</span>
+                </div>
+              )}
+              {panCinError && (
+                <p className="text-[10px] text-destructive tracking-wide">{panCinError}</p>
+              )}
+              <p className="text-[10px] text-muted-foreground tracking-wide">
+                Fetches company name, constitution, industry, directors &amp; MCA data automatically.
+              </p>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
 
               <div>

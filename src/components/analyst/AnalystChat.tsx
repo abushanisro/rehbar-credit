@@ -6,6 +6,73 @@ import { Textarea } from "@/components/ui/textarea";
 
 interface Message { role: "user" | "assistant"; content: string }
 
+function clean(text: string): string {
+  return text
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")   // strip *** ** *
+    .replace(/^#{1,6}\s+/gm, "")                 // strip # headings
+    .replace(/^-{3,}$/gm, "")                    // strip --- rules
+    .replace(/\n{3,}/g, "\n\n")                  // collapse excess blanks
+    .trim();
+}
+
+function AnalystMessage({ content }: { content: string }) {
+  const lines = clean(content).split("\n");
+  return (
+    <div className="space-y-0.5 text-[13px] leading-snug text-[#d0d0d0]">
+      {lines.map((line, i) => {
+        const trimmed = line.trimEnd();
+        if (trimmed === "") return <div key={i} className="h-2" />;
+
+        // Section header: ALL CAPS ending with colon
+        if (/^[A-Z][A-Z\s\/&\-]{2,}:$/.test(trimmed)) {
+          return (
+            <p key={i} className="text-[11px] font-bold tracking-widest text-[#E8721C] mt-2 mb-0.5 uppercase">
+              {trimmed}
+            </p>
+          );
+        }
+
+        // Bullet: starts with · or  · (sub-bullet)
+        const bulletMatch = trimmed.match(/^(\s*)[·•\-]\s+(.*)/);
+        if (bulletMatch) {
+          const indent = bulletMatch[1].length > 0;
+          const text = bulletMatch[2];
+          // Highlight "Label: Value" pairs inside bullet
+          const parts = text.split(/(\w[\w\s\/&()%]+:\s*[\d.,x%₹\-—]+(?:\s*\([^)]+\))?)/g);
+          return (
+            <div key={i} className={`flex gap-1.5 ${indent ? "pl-4" : ""}`}>
+              <span className="text-[#E8721C] mt-[1px] shrink-0 text-[10px]">·</span>
+              <span>
+                {parts.map((part, j) =>
+                  /:\s*[\d.,x%₹\-—]+/.test(part)
+                    ? <span key={j} className="text-white font-mono text-[12px]">{part}</span>
+                    : <span key={j}>{part}</span>
+                )}
+              </span>
+            </div>
+          );
+        }
+
+        // Inline metric line: "Label: Value" (no bullet)
+        if (/^[A-Za-z][\w\s\/&()%]+:\s*[\d.,x%₹\-—]/.test(trimmed)) {
+          const colonIdx = trimmed.indexOf(":");
+          const label = trimmed.slice(0, colonIdx);
+          const value = trimmed.slice(colonIdx + 1).trim();
+          return (
+            <div key={i} className="flex items-baseline gap-1.5 font-mono text-[12px]">
+              <span className="text-[#888] shrink-0">{label}:</span>
+              <span className="text-white">{value}</span>
+            </div>
+          );
+        }
+
+        // Plain line
+        return <p key={i} className="text-[#c0c0c0]">{trimmed}</p>;
+      })}
+    </div>
+  );
+}
+
 const STARTERS_CASE = [
   "What are the key risks in this deal?",
   "Summarise the DSCR trend across years",
@@ -250,7 +317,7 @@ export function AnalystChat() {
           </div>
 
           <div className="ml-auto flex items-center gap-3 flex-shrink-0">
-            <span className="text-[10px] text-[#444] font-mono">claude-sonnet-4-6</span>
+            <span className="text-[10px] text-[#444] font-mono">haiku-4-5</span>
             {messages.length > 0 && (
               <button
                 onPointerDown={e => e.stopPropagation()}
@@ -300,13 +367,16 @@ export function AnalystChat() {
           {messages.map((m, i) => (
             <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
               <div
-                className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap leading-relaxed ${
+                className={`max-w-[88%] rounded px-3 py-2 ${
                   m.role === "user"
-                    ? "bg-[#E8721C] text-white"
-                    : "bg-[#1a1a1a] text-[#d0d0d0] border border-[#2a2a2a]"
+                    ? "bg-[#E8721C] text-white text-[13px] leading-snug"
+                    : "bg-[#141414] border border-[#252525]"
                 }`}
               >
-                {m.content}
+                {m.role === "assistant"
+                  ? <AnalystMessage content={m.content} />
+                  : m.content
+                }
               </div>
             </div>
           ))}

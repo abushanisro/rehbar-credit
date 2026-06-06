@@ -486,6 +486,8 @@ function CaseViewInner() {
   const [redoStack, setRedoStack] = useState<Record<string, LineItem[]>[]>([]);
   const [ratiosOutdated, setRatiosOutdated] = useState(false);
   const [importingFinExcel, setImportingFinExcel] = useState(false);
+  const [aiAlert, setAiAlert] = useState<string | null>(null);
+  const autoCheckDoneRef = useRef(false);
   const finExcelInputRef = useRef<HTMLInputElement>(null);
   const reviewHeaderScrollRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const reviewBodyScrollRefs   = useRef<Record<string, HTMLDivElement | null>>({});
@@ -583,7 +585,34 @@ function CaseViewInner() {
     }
   }, [id, navigate]);
 
-  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => {
+    reload().then(() => {
+      // Fire proactive AI check once per page session, in the background
+      if (autoCheckDoneRef.current) return;
+      autoCheckDoneRef.current = true;
+      const dismissed = sessionStorage.getItem(`ai-alert-dismissed-${id}`);
+      if (dismissed) return;
+      (async () => {
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          const res = await fetch(
+            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyst-chat`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${session?.access_token ?? ""}`,
+                "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+              },
+              body: JSON.stringify({ case_id: id, auto_check: true }),
+            },
+          );
+          const json = await res.json();
+          if (json.alert) setAiAlert(json.alert as string);
+        } catch { /* silent */ }
+      })();
+    });
+  }, [reload]);
 
   const openEditCo = () => {
     if (!linkedCompany) return;
@@ -3225,6 +3254,24 @@ function CaseViewInner() {
               </div>
             )}
           </Panel>
+        </div>
+      )}
+
+      {/* AI proactive alert banner */}
+      {aiAlert && (
+        <div className="flex items-start gap-3 bg-warning/8 border border-warning/30 px-3 py-2 mb-2 text-[11px] font-mono">
+          <span className="text-warning font-bold shrink-0 mt-px">◈ AI NOTICE</span>
+          <span className="text-warning/90 flex-1 leading-snug">{aiAlert}</span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => { window.dispatchEvent(new CustomEvent("toggle-analyst-chat")); }}
+              className="text-[10px] tracking-widest border border-warning/40 text-warning px-2 py-0.5 hover:bg-warning/10 transition-colors"
+            >→ ASK AI</button>
+            <button
+              onClick={() => { setAiAlert(null); sessionStorage.setItem(`ai-alert-dismissed-${id}`, "1"); }}
+              className="text-warning/40 hover:text-warning transition-colors text-sm leading-none px-1"
+            >✕</button>
+          </div>
         </div>
       )}
 

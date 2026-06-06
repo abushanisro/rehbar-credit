@@ -148,15 +148,26 @@ function buildEmiContext(
 
 // ── System prompt builders ────────────────────────────────────────────────────
 
-const ANALYST_RULES = `You are Rehbar — a senior credit analyst AI embedded in Rehbar Financial Services' credit appraisal platform.
-You speak directly to analysts. Be concise, precise, and analytical — like a senior colleague, not a chatbot.
+const ANALYST_RULES = `You are Rehbar — a senior credit analyst AI at Rehbar Financial Services (Islamic NBFC, India).
+You respond directly to credit analysts. Write like a sharp senior colleague briefing a junior analyst — concise, precise, no waffle.
 
-RULES:
-- Never recommend Approve / Decline / Defer. Your role is analysis and insight only.
-- Flag anomalies, trends, and risks proactively when relevant.
-- Keep answers short. Use bullets where helpful. No filler phrases.
-- Always state the unit (Lakhs / Crores) when quoting financial figures.
-- You know what page the analyst is currently viewing — use that context.`;
+FORMATTING RULES (STRICT):
+- NEVER use *, **, ***, #, ##, ---, or any markdown syntax whatsoever.
+- NEVER start a line with asterisks or hashes.
+- Use plain text only.
+- For bullet lists use "· " (middle dot + space) at the start of each item.
+- For sub-items use "  · " (two spaces + middle dot).
+- For key metrics inline: write  Label: Value  with a colon, e.g. "DSCR: 1.24x (PASS)"
+- Section labels (if needed): write them in ALL CAPS followed by a colon, e.g. "RISK FACTORS:"
+- Separate sections with a blank line. No horizontal rules.
+
+CONTENT RULES:
+- Never recommend Approve / Decline / Defer.
+- Flag anomalies, trends, and risks proactively when the data shows them.
+- Lead with the most important finding. Put numbers first, context second.
+- Always state the unit (Lakhs / Crores) when quoting figures.
+- Maximum 6 bullets per answer. If more is needed, group them under labelled sections.
+- No filler phrases ("Great question", "Certainly", "Please note that", etc.).`;
 
 async function buildCaseSystemPrompt(
   sb: SupabaseClient,
@@ -221,13 +232,18 @@ async function buildGlobalSystemPrompt(
   pageName: string,
   currentPath: string,
 ): Promise<string> {
-  const [casesRes, companiesRes] = await Promise.all([
+  const [casesRes, companiesRes, ratiosRes] = await Promise.all([
     sb.from("credit_cases").select("id,case_code,client_name,product_type,product_type_custom,industry,status,deal_amount,tenure_months,expected_irr,created_at").order("created_at", { ascending: false }),
     sb.from("companies").select("id,name,industry,website,created_at").order("created_at", { ascending: false }).limit(100),
+    sb.from("financial_ratios").select("case_id,ratio_name,ratio_value,threshold_status,fiscal_year").eq("threshold_status", "red"),
   ]);
 
   const cases     = (casesRes.data as CaseRecord[])    ?? [];
   const companies = (companiesRes.data as CompanyRecord[]) ?? [];
+  const redRatios = (ratiosRes.data as { case_id: string; ratio_name: string; ratio_value: number | null; threshold_status: string; fiscal_year: number }[]) ?? [];
+
+  // Map case_id → case_code + client_name for ratio alerts
+  const caseMap = new Map(cases.map(c => [c.id, c]));
 
   // Aggregate pipeline stats
   const statusCounts: Record<string, number> = {};
@@ -249,6 +265,19 @@ async function buildGlobalSystemPrompt(
     `  ${c.name} | ${c.industry ?? "—"} | ${c.website ?? "—"}`
   ).join("\n");
 
+  // Red-ratio alerts grouped by case
+  const redByCaseId = new Map<string, typeof redRatios>();
+  for (const r of redRatios) {
+    if (!redByCaseId.has(r.case_id)) redByCaseId.set(r.case_id, []);
+    redByCaseId.get(r.case_id)!.push(r);
+  }
+  const ratioAlerts = [...redByCaseId.entries()].map(([cid, rows]) => {
+    const c = caseMap.get(cid);
+    const label = c ? `${c.case_code} (${c.client_name})` : cid;
+    const ratioStr = rows.map(r => `${r.ratio_name}=${fmtRatio(r.ratio_name, r.ratio_value)} FY${r.fiscal_year}`).join(", ");
+    return `  ⚠ ${label}: ${ratioStr}`;
+  }).join("\n");
+
   return `${ANALYST_RULES}
 
 CURRENT PAGE: ${pageName} (${currentPath})
@@ -259,6 +288,9 @@ Total deal value: ₹${fmt(totalDeal)} Lakhs
 
 Pipeline by status:
 ${pipelineSummary || "  No cases yet."}
+
+━━━ RED-FLAG RATIO ALERTS (cases with RED ratios) ━━━
+${ratioAlerts || "  No red-flag ratios across pipeline."}
 
 ━━━ ALL CASES (most recent first) ━━━
 ${caseList || "  No cases yet."}
@@ -284,10 +316,35 @@ Deno.serve(async (req) => {
       case_id?: string | null;
       page_name?: string;
       current_path?: string;
-      messages: ChatMessage[];
+      messages?: ChatMessage[];
+      auto_check?: boolean;
     };
 
-    const { case_id, page_name = "Unknown", current_path = "/", messages } = body;
+    const { case_id, page_name = "Unknown", current_path = "/", messages = [], auto_check = false } = body;
+
+    // ── Auto-check mode: scan case data, return single-sentence alert or null ──
+    if (auto_check && case_id) {
+      const systemPrompt = await buildCaseSystemPrompt(sb, case_id, "background_check");
+      const key = Deno.env.get("ANTHROPIC_API_KEY");
+      if (!key) throw new Error("ANTHROPIC_API_KEY not set");
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 80,
+          system: systemPrompt,
+          messages: [{
+            role: "user",
+            content: "Scan this case for the single most critical issue or red flag. Reply with ONE sentence (max 15 words) naming the issue type in capitals first (e.g. 'DSCR CONCERN: below 1x in FY2024' or 'MISSING DATA: no balance sheet extracted' or 'HIGH BOUNCES: 8 inward bounces in last 3 months'). If no notable issues, reply exactly: CLEAR",
+          }],
+        }),
+      });
+      const json = await res.json();
+      const text = ((json.content as { type: string; text?: string }[] ?? []).find(b => b.type === "text")?.text ?? "").trim();
+      const alert = (text === "CLEAR" || !text) ? null : text;
+      return new Response(JSON.stringify({ alert }), { headers: { ...cors, "Content-Type": "application/json" } });
+    }
 
     if (!messages?.length) return new Response(JSON.stringify({ error: "messages required" }), {
       status: 400, headers: { ...cors, "Content-Type": "application/json" },
