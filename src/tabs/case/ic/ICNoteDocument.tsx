@@ -166,10 +166,11 @@ function SectionPanel({
   extracted: ExtractedRow[];
   ratios: RatioRow[];
 }) {
+  const provisional = ((cc.ic_note as Record<string, unknown> | null)?.provisional ?? []) as Array<{ fiscal_year: number; months_covered?: number; pl?: Array<{ label: string; value: number | null; override_value?: number | null }>; bs?: Array<{ label: string; value: number | null; override_value?: number | null }> }>;
   switch (sectionId) {
     case "executive_summary":      return <ICSummaryPanel cc={cc} ratios={ratios} />;
-    case "historical_financial":   return <ICHistoricalTables extracted={extracted} />;
-    case "projections":            return <ICProjectionsTable extracted={extracted} />;
+    case "historical_financial":   return <ICHistoricalTables extracted={extracted} provisional={provisional} />;
+    case "projections":            return <ICProjectionsTable extracted={extracted} provisional={provisional} />;
     case "key_ratios":             return <ICRatioTable ratios={ratios} />;
     case "client_promoter":        return <ICClientProfile cc={cc} />;
     case "investment_structure":   return <ICInvestmentStructure cc={cc} />;

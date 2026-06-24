@@ -15,6 +15,9 @@ export function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear
 
   const fmt = (v: number | null | undefined) =>
     v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  // Accumn stores monetary values in raw Rupees; display converts to Lakhs
+  const fmtL = (v: number | null | undefined) =>
+    v == null ? "—" : (v / 1e5).toLocaleString("en-IN", { maximumFractionDigits: 2 });
   const pct = (v: number | null | undefined) => v == null ? "—" : `${Number(v).toFixed(1)}%`;
   const avgMon = (revenue: number | null | undefined, period: string): string => {
     if (revenue == null) return "—";
@@ -27,7 +30,7 @@ export function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear
         if (mn) months = mn >= 4 ? mn - 3 : mn + 9;
       }
     }
-    return (revenue / months).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+    return ((revenue / 1e5) / months).toLocaleString("en-IN", { maximumFractionDigits: 2 });
   };
   const sevCls = (s: string) =>
     s === "HIGH" ? "text-destructive border-destructive/30 bg-destructive/5"
@@ -122,9 +125,9 @@ export function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear
                 </thead>
                 <tbody>
                   {([
-                    { label: "Adjusted Revenue (Total)", getValue: (r: AccumnSalesSummary) => fmt(r.adjusted_revenue), bold: true },
+                    { label: "Adjusted Revenue (Total)", getValue: (r: AccumnSalesSummary) => fmtL(r.adjusted_revenue), bold: true },
                     { label: "Adjusted Revenue Per Month", getValue: (r: AccumnSalesSummary) => avgMon(r.adjusted_revenue, r.period), bold: true },
-                    { label: "Net Revenue", getValue: (r: AccumnSalesSummary) => fmt(r.net_revenue) },
+                    { label: "Net Revenue", getValue: (r: AccumnSalesSummary) => fmtL(r.net_revenue) },
                     { label: "Sales Return %", getValue: (r: AccumnSalesSummary) => pct(r.sales_return_pct), muted: true },
                     { label: "Gross Margin %", getValue: (r: AccumnSalesSummary) => pct(r.gross_margin_pct) },
                     { label: "EBITDA %", getValue: (r: AccumnSalesSummary) => pct(r.ebitda_pct), muted: true },
@@ -149,14 +152,14 @@ export function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
                     <XAxis dataKey="period" tick={{ fill: "#6b7280", fontSize: 9 }} />
                     <YAxis yAxisId="rev" tick={{ fill: "#6b7280", fontSize: 9 }} width={58}
-                      tickFormatter={v => Math.abs(v) >= 100 ? `${(v/100).toFixed(0)}Cr` : `${v}L`} />
+                      tickFormatter={v => Math.abs(v) >= 1e7 ? `${(v/1e7).toFixed(1)}Cr` : `${(v/1e5).toFixed(1)}L`} />
                     <YAxis yAxisId="pct" orientation="right" tick={{ fill: "#6b7280", fontSize: 9 }} width={44}
                       tickFormatter={v => `${v}%`} />
                     <RTooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937", fontSize: 11 }} />
                     <Legend wrapperStyle={{ fontSize: 10, color: "#9ca3af" }} />
                     <Bar yAxisId="rev" dataKey="adjusted_revenue" name="Adj. Revenue" fill="#14b8a6" opacity={0.85} radius={[2,2,0,0]}>
                       <LabelList dataKey="adjusted_revenue" position="top" style={{ fontSize: 9, fill: "#9ca3af" }}
-                        formatter={(v: number) => v != null ? (Math.abs(v) >= 100 ? `${(v/100).toFixed(2)}Cr` : `${Number(v).toFixed(2)}L`) : ""} />
+                        formatter={(v: number) => v != null ? (Math.abs(v) >= 1e7 ? `${(v/1e7).toFixed(2)}Cr` : `${(v/1e5).toFixed(2)}L`) : ""} />
                     </Bar>
                     <Line yAxisId="pct" type="monotone" dataKey="gross_margin_pct" name="Gross Mgn%" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3, fill: "#0f172a", strokeWidth: 2 }}>
                       <LabelList dataKey="gross_margin_pct" position="top" style={{ fontSize: 9, fill: "#f59e0b" }}

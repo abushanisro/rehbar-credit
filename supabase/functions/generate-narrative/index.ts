@@ -178,7 +178,7 @@ function mdTable(headers: string[], rows: string[][]): string {
   ].join("\n");
 }
 
-function buildTables(financials: FinRow[], ratios: RatioRow[]) {
+function buildTables(financials: FinRow[], ratios: RatioRow[], provisional?: ProvPeriod[]) {
   const unit = financials.find(f => f.unit)?.unit ?? "Lakhs";
   const ul   = `₹ ${unit}`;
 
@@ -205,17 +205,24 @@ function buildTables(financials: FinRow[], ratios: RatioRow[]) {
   // Section V — P&L + Balance Sheet summary
   let sectionV = "";
   if (histYears.length > 0) {
-    const plRows = ["Turnover","Gross Profit","EBITDA","PAT"].map(lb =>
-      [lb, ...histYears.map(y => lv(fyMap.get(y)!, lb))]);
+    const plRows = [
+      "Turnover","Cost of Goods Sold","Gross Profit","Operating Expenses",
+      "EBITDA","Depreciation","Interest Expense","Profit Before Tax","PAT",
+    ].map(lb => [lb, ...histYears.map(y => lv(fyMap.get(y)!, lb))])
+      .filter(r => r.slice(1).some(v => v !== "—")); // skip empty rows
     sectionV  = `**P&L Summary (${ul})**\n${mdTable(["Item",...histYears.map(y=>`FY${y}`)], plRows)}\n\n`;
-    const bsRows = ["Net Worth","Total Debt","Current Assets","Fixed Assets (Net)","Total Assets"].map(lb =>
-      [lb, ...histYears.map(y => lv(fyMap.get(y)!, lb))]);
+    const bsRows = [
+      "Net Worth","Long Term Borrowings","Short Term Borrowings","Total Debt",
+      "Current Assets","Fixed Assets (Net)","Total Assets",
+    ].map(lb => [lb, ...histYears.map(y => lv(fyMap.get(y)!, lb))])
+      .filter(r => r.slice(1).some(v => v !== "—"));
     sectionV += `**Balance Sheet (${ul})**\n${mdTable(["Item",...histYears.map(y=>`FY${y}`)], bsRows)}`;
   }
 
-  // Section VI — Historical vs Projected
+  // Section VI — Historical vs Projected (includes provisional periods if available)
   let sectionVI = "";
-  if (projYears.length > 0) {
+  const provPeriods = (provisional ?? []).filter(p => (p.months_covered ?? 12) >= 12);
+  if (projYears.length > 0 || provPeriods.length > 0) {
     const pairs: [string, string][] = [
       ["Turnover",   "Projected Turnover"],
       ["EBITDA",     "Projected EBITDA"],
@@ -223,18 +230,24 @@ function buildTables(financials: FinRow[], ratios: RatioRow[]) {
       ["Net Worth",  "Projected Net Worth"],
       ["Total Debt", "Projected Total Debt"],
     ];
-    const actCols = histYears.slice(-2).map(y => ({ y, p: false }));
-    const prjCols = projYears.map(y => ({ y, p: true }));
-    const allCols = [...actCols, ...prjCols];
+    const actCols  = histYears.slice(-2).map(y => ({ y, tag: "A" as const, provPeriod: null as ProvPeriod | null }));
+    const provCols = provPeriods.map(p => ({ y: p.fiscal_year, tag: "Prov" as const, provPeriod: p }));
+    const prjCols  = projYears.map(y => ({ y, tag: "P" as const, provPeriod: null as ProvPeriod | null }));
+    const allCols  = [...actCols, ...provCols, ...prjCols];
     const rows = pairs.map(([hl, pl]) => [
       hl,
-      ...allCols.map(c =>
-        c.p
-          ? lvFirst(projMap.get(c.y) ?? [], ...(PROJ_ALIAS[pl] ?? [pl]))
-          : lv(fyMap.get(c.y) ?? [], hl)
-      ),
+      ...allCols.map(c => {
+        if (c.tag === "Prov" && c.provPeriod) {
+          const items = c.provPeriod.pl ?? [];
+          const it = items.find(i => i.label === hl);
+          return it?.value != null ? String(Number(it.value).toLocaleString("en-IN", { maximumFractionDigits: 2 })) : "—";
+        }
+        if (c.tag === "P") return lvFirst(projMap.get(c.y) ?? [], ...(PROJ_ALIAS[pl] ?? [pl]));
+        return lv(fyMap.get(c.y) ?? [], hl);
+      }),
     ]);
-    sectionVI = `**Historical vs Projected (${ul}) — A=Actual P=Projected**\n${mdTable(["Metric",...allCols.map(c=>`FY${c.y}${c.p?" (P)":" (A)"}`)], rows)}`;
+    const colHeaders = allCols.map(c => `FY${c.y} (${c.tag})`);
+    sectionVI = `**Historical vs Projected (${ul}) — A=Actual P=Projected Prov=Provisional**\n${mdTable(["Metric",...colHeaders], rows)}`;
   }
 
   // Section VII — Ratio matrix
@@ -595,9 +608,9 @@ function buildCompanyContext(company: CompanyRow | null, directors: DirectorRow[
   if (company?.mca_date_last_agm)     lines.push(`- Last AGM: ${company.mca_date_last_agm}`);
   if (company?.registered_address || company?.mca_email)
     lines.push(`- Contact: ${[company?.mca_email, company?.registered_address].filter(Boolean).join(" | ")}`);
-  if (company?.mca_about) lines.push(`\n**Company Overview:**\n${company.mca_about.slice(0, 600)}`);
-  if (cc["group_summary"]) lines.push(`\n**Group Summary:**\n${String(cc["group_summary"]).slice(0, 400)}`);
-  if (cc["promoter_details"]) lines.push(`\n**Promoter Details:**\n${String(cc["promoter_details"]).slice(0, 300)}`);
+  if (company?.mca_about) lines.push(`\n**Company Overview:**\n${company.mca_about.slice(0, 1500)}`);
+  if (cc["group_summary"]) lines.push(`\n**Group Summary:**\n${String(cc["group_summary"]).slice(0, 600)}`);
+  if (cc["promoter_details"]) lines.push(`\n**Promoter Details:**\n${String(cc["promoter_details"]).slice(0, 500)}`);
   if (directors?.length) {
     lines.push("\n**Board of Directors / Partners:**");
     lines.push("| Name | Designation | DIN | Shareholding % | Appointed |");
@@ -621,7 +634,12 @@ Deno.serve(async (req) => {
     });
 
     const body = await req.json();
-    const { case_id, analyst_notes_for_ic } = body as { case_id: string; analyst_notes_for_ic?: string };
+    const { case_id, analyst_notes_for_ic, phase, prior_sections } = body as {
+      case_id: string;
+      analyst_notes_for_ic?: string;
+      phase?: 1 | 2;
+      prior_sections?: Record<string, { markdown: string }>;
+    };
     if (!case_id) return new Response(JSON.stringify({ error: "case_id required" }), {
       status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
@@ -729,7 +747,12 @@ Deno.serve(async (req) => {
       cc as Record<string, unknown>,
     );
 
-    const tables     = buildTables((financials ?? []) as FinRow[], (ratios ?? []) as RatioRow[]);
+    // Provisional data lives in ic_note.provisional on the case, not in extracted_financials
+    const icNoteJson = (cc.ic_note ?? {}) as Record<string, unknown>;
+    const provisionalPeriods = (icNoteJson["provisional"] ?? []) as ProvPeriod[];
+    const provisionalBlock = buildProvisionalSection(provisionalPeriods).slice(0, 1_400);
+
+    const tables     = buildTables((financials ?? []) as FinRow[], (ratios ?? []) as RatioRow[], provisionalPeriods);
     const bankTable  = buildBankSection((bankStatements ?? []) as BankRow[]).slice(0, 2_000);
     const gstTable   = buildGstSection((gstReturns ?? []) as GstRow[]).slice(0, 1_800);
     const accumnReport = (accumnRows as AccumnReportRow[] | null | undefined)?.[0]?.report_data ?? null;
@@ -737,11 +760,6 @@ Deno.serve(async (req) => {
     const cibilBlock   = buildCibilSection((cibilRows as CibilReportRow[] | null | undefined) ?? []);
     const triBlock     = buildTriangulationSection((triRows as TriangulationReportRow[] | null | undefined)?.[0]).slice(0, 1_400);
     const projBlock    = buildProjectionCredibility((financials ?? []) as FinRow[]);
-
-    // Provisional data lives in ic_note.provisional on the case, not in extracted_financials
-    const icNoteJson = (cc.ic_note ?? {}) as Record<string, unknown>;
-    const provisionalPeriods = (icNoteJson["provisional"] ?? []) as ProvPeriod[];
-    const provisionalBlock = buildProvisionalSection(provisionalPeriods).slice(0, 1_400);
 
     // Bank trend analysis — detect sharp credit decline
     const bankRows = (bankStatements ?? []) as BankRow[];
@@ -757,113 +775,120 @@ Deno.serve(async (req) => {
       }
     }
 
-    const args = await callAI({
-      systemPrompt: `You are a Senior Credit Analyst at Rehbar Financial Services with 15+ years of NBFC credit appraisal experience. You are drafting a formal Investment Committee (IC) Credit Appraisal Note that will be presented to experienced IC members for a credit decision.
+    // ── Phase split ───────────────────────────────────────────────────────────
+    // Phase 1: sections I–VI (client/financials). No DB save. Returns partial_sections.
+    // Phase 2: sections VII–XII + risks + CPs + SWOT. Merges with prior_sections, saves.
+    // Each phase targets ~2,500 tokens → ~40s at 60 tok/s → safe inside 115s.
 
-ABOUT REHBAR FINANCIAL SERVICES:
-Rehbar is a Sharia-compliant NBFC. Its primary product is the Operating Lease (OL) where the asset is purchased and owned exclusively by RERL. Monthly OL rentals attract GST. Proforma invoices on Day 1–2; NACH mandates on 10th/15th; e-invoice post-payment.
-- Finance Lease (FL): Structured as Term Loan. EMI split interest/principal. No GST on EMI.
-- PLS (Profit & Loss Sharing): Fixed EMI; profit/interest split determined monthly from client P&L.
-- Project Finance / Trade Finance: Structured as Inter-Corporate Loan.
-- Home Loan: LTV ≤ 60%, FOIR ≤ 50%.
+    const PHASE1_IDS = ["executive_summary","client_promoter","investment_structure","rehbar_funding_history","historical_financial","projections"];
+    const PHASE2_IDS = ["key_ratios","cash_flow","due_diligence","risk_assessment","visit_reference","product_specifics"];
 
-PROJECTION RULES (Rehbar SOP §XII):
-- OL/FL: Projections NOT mandatory if cumulative deal < ₹100L OR if current-year DSCR covers proposed deal. State the waiver reason explicitly.
-- PF/TF: Projections NOT required. PF: project working sheets + timelines mandatory. TF: repayment source justification mandatory.
-- PLS/HL: Projections required.
+    const activeIds = (phase === 2) ? PHASE2_IDS : PHASE1_IDS;
 
-WRITING STYLE — SENIOR ANALYST, CONCISE:
-- BREVITY IS MANDATORY. Each section: exactly 2–3 analytical bullet points. Never write paragraphs. Never repeat data — write insights.
-- Target 150–200 tokens per section. Risks: one row per risk, 8 risks max. CPs: one line each, 6 max. SWOT: 3 items per quadrant.
-- If data is missing, write "Not provided — analyst to confirm". NEVER write <UNKNOWN>.
-- NEVER fabricate numbers. ONLY use figures from data provided.
-- NEVER include a credit recommendation (APPROVE / DECLINE / DEFER).
-- Sections V, VI, VII: UI renders tables — write OBSERVATIONS ONLY, no tables in markdown.`,
+    const SECTION_DESC: Record<string, string> = {
+      executive_summary:     "Lead with company overview from MCA/Corpository profile (sector, incorporation date, registered address, about). Then: product/amount sought, reason for funds, key ratios snapshot (DSCR/CR/D:E/EBITDA%/ROE), collateral, strategic rationale, policy exceptions, 2–3 sentence assessment.",
+      client_promoter:       "Legal name, CIN, PAN, constitution, incorporation date. Directors table (name/DIN/designation/shareholding%). Group companies. CIBIL per promoter (score, active/overdue accounts, 24M inquiries, DPD flag). Auditor and registered address if available in analyst notes.",
+      investment_structure:  "End use validation, product SOP implications (OL: RERL-owned/GST/Proforma; FL: EMI split; PLS: profit-share), tenure, monthly amount, IRR, collateral, repayment justification.",
+      rehbar_funding_history:"All prior Rehbar facilities (amount/product/IRR/repayment). If new client: state new relationship and credit references.",
+      historical_financial:  "UI renders tables — observations only. 2–3 bullets: revenue trajectory, margin trends (gross/EBITDA/net), debt quality, working capital. Add 'Current Year (Provisional)' subsection if provisional data provided.",
+      projections:           "UI renders table — observations only. Credibility per year: >100% = AGGRESSIVE; >1000% = NOT CREDIBLE. Projection waiver with SOP §XII basis if applicable.",
+      key_ratios:            "UI renders table — observations only. 2–3 bullets: liquidity trend, leverage vs Rehbar thresholds, DSCR adequacy for proposed facility, R' Score interpretation.",
+      cash_flow:             "Avg monthly credits vs proposed rental (coverage ratio), ABB adequacy, bounce signal, visible EMI lenders. Flag: >50% credit decline = REVENUE CONTRACTION; <40% banking vs GST = ROUTING RISK.",
+      due_diligence:         "GST compliance: turnover vs P&L variance, late filings, ITC utilisation. Accumn: top customers/suppliers (name/%), circular transactions. Triangulation cross-check if available.",
+      risk_assessment:       "Risk table: | Category | Risk | Observation | Mitigant | Severity |. Min 6 risks: business, financial, transaction. Severity: HIGH/MEDIUM/LOW.",
+      visit_reference:       "Site visit summary, reference checks (banker/vendor/customer). Management observations. Use 'Not provided — analyst to confirm' for missing fields.",
+      product_specifics:     "SOP rules for this product type — confirmed or excepted. Projection waiver with SOP §XII basis. Policy exceptions with justification.",
+    };
 
-      userText: `Draft the IC Appraisal Note for this case following the Rehbar SOP exactly.
-${analyst_notes_for_ic ? `
-━━━ ANALYST INSTRUCTIONS / FEEDBACK (HIGHEST PRIORITY — incorporate these directly into the note) ━━━
-${analyst_notes_for_ic}
-━━━ END ANALYST INSTRUCTIONS ━━━
-` : ""}
-━━━ DEAL & CLIENT DATA ━━━
+    const systemPrompt = `You are a Senior Credit Analyst at Rehbar Financial Services. Drafting an IC Credit Appraisal Note for experienced IC members.
+
+ABOUT REHBAR:
+Rehbar is a Sharia-compliant NBFC. OL: asset owned by RERL, rentals attract GST, Proforma D1-D2, NACH 10/15, e-invoice post-payment. FL: EMI = interest+principal, no GST. PLS: fixed EMI, profit-share monthly. PF/TF: inter-corporate loan. HL: LTV ≤ 60%, FOIR ≤ 50%.
+
+PROJECTION RULES (SOP §XII): OL/FL — waive if deal < ₹100L or DSCR covers it (state waiver). PF/TF — not required. PLS/HL — required.
+
+WRITING: STRICT TOKEN BUDGET — each section markdown ≤ 400 tokens. 2 bullets maximum per section. No paragraphs. Insights only — never repeat raw numbers. Missing data = "Not provided — analyst to confirm". No fabrication. No recommendation (APPROVE/DECLINE/DEFER). Sections V/VI/VII: UI renders tables, write observations only — no tables in markdown.`;
+
+    const userText = `Draft sections ${activeIds.map(id => id.replace(/_/g," ")).join(", ")} of the IC Appraisal Note.
+${analyst_notes_for_ic ? `\nANALYST NOTES (highest priority): ${analyst_notes_for_ic}\n` : ""}
+━━━ CASE DATA ━━━
 ${JSON.stringify(safeCase, null, 2)}${buildRagBlock("executive_summary")}
 
-━━━ MCA / COMPANY PROFILE & DIRECTORS ━━━
-${companyContext || "No linked company profile. Use case data above."}${buildRagBlock("client_promoter")}
+━━━ MCA / COMPANY PROFILE ━━━
+${companyContext || "No linked company profile."}${buildRagBlock("client_promoter")}
 
-━━━ FINANCIAL DATA FOR REFERENCE — DO NOT REPRODUCE TABLES IN MARKDOWN ━━━
-The tables below are already rendered by the UI. Use the numbers to write observations only.
+━━━ FINANCIAL REFERENCE (UI renders these tables — observations only) ━━━
+[Financials] ${tables.sectionV || "No financial data."}${buildRagBlock("historical_financial")}
+[Projections] ${tables.sectionVI || "No projections. State OL/FL waiver per SOP §XII if applicable."}${buildRagBlock("projections")}
+${projBlock ? `[Projection Credibility] ${projBlock}` : ""}
+[Ratios] ${tables.sectionVII || "No ratio data."}${buildRagBlock("key_ratios")}
 
-[SECTION V REFERENCE — Historical Financials]
-${tables.sectionV || "No historical financial data extracted yet."}${buildRagBlock("historical_financial")}
+━━━ PROVISIONAL DATA ━━━
+${provisionalBlock || "None."}
 
-[SECTION VI REFERENCE — Projections]
-${tables.sectionVI || "No projection data. If product is OL/FL and deal < ₹100L or DSCR covers the deal, state waiver per SOP §XII explicitly."}${buildRagBlock("projections")}
-
-${projBlock ? `━━━ PROJECTION CREDIBILITY ANALYSIS (MANDATORY — incorporate into Section VI observations) ━━━
-${projBlock}
-` : ""}
-[SECTION VII REFERENCE — Key Ratios]
-${tables.sectionVII || "No ratio data computed yet."}${buildRagBlock("key_ratios")}
-
-━━━ PROVISIONAL / MIS FINANCIAL DATA — MOST RECENT UNAUDITED PERIOD (Section V supplementary) ━━━
-${provisionalBlock || "No provisional financial data uploaded."}
-
-━━━ BANK STATEMENT DATA (Section VIII) ━━━
-${bankTable || "No bank statement data submitted. Note this in Section VIII and flag as a CP."}
+━━━ BANK STATEMENT ━━━
+${bankTable || "No bank statement. Flag as CP."}
 ${bankTrendNote}${buildRagBlock("cash_flow")}
 
-━━━ GST RETURN DATA (Section IX) ━━━
-${gstTable || "No GST return data available."}
+━━━ GST RETURNS ━━━
+${gstTable || "No GST data."}
 
-━━━ ACCUMN GST ANALYTICAL REPORT (Section IX) ━━━
-${accumnBlock || "No Accumn report available."}
+━━━ ACCUMN REPORT ━━━
+${accumnBlock || "No Accumn data."}${buildRagBlock("due_diligence")}
 
-━━━ CIBIL / CRIF REPORTS — ALL PROMOTERS (Section II & X) ━━━
-${cibilBlock || "No CIBIL data available."}
+━━━ CIBIL / CRIF ━━━
+${cibilBlock || "No CIBIL data."}
 
-━━━ PERFIOS TRIANGULATION REPORT (Section IX) ━━━
-${triBlock || "No triangulation report available."}${buildRagBlock("due_diligence")}
+━━━ TRIANGULATION ━━━
+${triBlock || "No triangulation data."}
 
-━━━ INVESTMENT STRUCTURE & PRODUCT CONTEXT ━━━${buildRagBlock("investment_structure")}${buildRagBlock("product_specifics")}${buildRagBlock("risk_assessment")}
+━━━ PRODUCT CONTEXT ━━━${buildRagBlock("investment_structure")}${buildRagBlock("product_specifics")}${buildRagBlock("risk_assessment")}
 
-Write observations that demonstrate genuine credit analyst insight — not just data repetition. Flag all risks prominently. Use "Not provided — analyst to confirm" for missing fields. NEVER write <UNKNOWN>.`,
-      toolName: "submit_ic_note",
-      toolDescription: "Submit the complete IC Credit Appraisal Note. Each section must contain detailed analytical observations per Rehbar SOP. For sections V, VI, and VII the data tables are rendered by the UI — write only analytical observations in markdown (bullet points and prose, no tables). All other sections: full narrative with tables where needed.",
+Write insights, not data repetition. Use "Not provided — analyst to confirm" for missing fields.`;
+
+    const sectionSchema = {
+      type: "object",
+      properties: Object.fromEntries(activeIds.map(id => [id, {
+        type: "object",
+        properties: { markdown: { type: "string", description: SECTION_DESC[id] ?? "2–3 analytical observations." } },
+        required: ["markdown"],
+        additionalProperties: false,
+      }])),
+      required: activeIds,
+      additionalProperties: false,
+    };
+
+    // Phase 1: sections I–VI only
+    if (phase !== 2) {
+      const args = await callAI({
+        systemPrompt,
+        userText,
+        toolName: "submit_ic_sections_phase1",
+        toolDescription: "Submit IC note sections I–VI: executive summary, client profile, investment structure, Rehbar history, financials, projections.",
+        toolSchema: { sections: sectionSchema },
+        toolRequired: ["sections"],
+        model: "claude-sonnet-4-6",
+        maxTokens: 4000,   // 6 sections × ~500 tok avg = 3000 content + 1000 headroom; at 55 tok/s = 73s ✓
+        retries: 0,
+        timeoutMs: 110_000,
+      });
+
+      return new Response(JSON.stringify({ partial_sections: (args.sections as Record<string, unknown>) ?? {} }), {
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+
+    // Phase 2: sections VII–XII + risks + CPs + SWOT
+    const args2 = await callAI({
+      systemPrompt,
+      userText,
+      toolName: "submit_ic_sections_phase2",
+      toolDescription: "Submit IC note sections VII–XII plus risk register, conditions precedent, and SWOT analysis.",
       toolSchema: {
-        sections: {
-          type: "object",
-          properties: Object.fromEntries(SECTION_IDS.map(id => [id, {
-            type: "object",
-            properties: {
-              markdown: {
-                type: "string",
-                description:
-                  id === "executive_summary"      ? "Company overview, product/amount sought, reason for funds, key ratios snapshot (DSCR/CR/D:E/EBITDA%/ROE), collateral, strategic rationale (Sharia/multi-lender/last-resort), policy exceptions, 2–3 sentence analyst assessment." :
-                  id === "client_promoter"         ? "Legal name, constitution, directors table (DIN/designation/shareholding from MCA), group companies, CRIF/CIBIL for EACH promoter (score/rank, active/overdue accounts, 24M inquiries, DPD flag), promoter background." :
-                  id === "investment_structure"    ? "End use with validation, product SOP implications (OL: RERL-owned/GST on rentals/Proforma D1-D2/NACH; FL: EMI split; PLS: profit-share), tenure, monthly amount, IRR, collateral, repayment justification." :
-                  id === "rehbar_funding_history"  ? "All prior Rehbar facilities (amount/product/expected IRR/actual IRR/repayment conduct). If new client: state new relationship and any credit references." :
-                  id === "historical_financial"    ? "UI renders the tables — observations only. 4–6 bullets: revenue trajectory, margin trends (gross/EBITDA/net), debt quality (LT vs ST), working capital, capex intensity, balance sheet restructuring. Add 'Current Year (Provisional)' subsection if provisional data provided." :
-                  id === "projections"             ? "UI renders the table — observations only. Credibility per year: >100% growth = AGGRESSIVE/JUSTIFICATION NEEDED; >1000% = NOT CREDIBLE. Conservative/moderate/aggressive classification. Projection waiver with SOP basis if applicable. DSCR coverage commentary." :
-                  id === "key_ratios"              ? "UI renders the table — observations only. 4–6 bullets: liquidity trend, leverage vs Rehbar thresholds, efficiency ratios (debtor/creditor days, inventory), profitability sustainability, DSCR adequacy for proposed facility, R' Score interpretation." :
-                  id === "cash_flow"               ? "Avg monthly credits vs proposed rental (coverage ratio), ABB adequacy for entity scale, bounce count and liquidity signal, visible EMI lenders from debit data. Flag: credits fell >50% first-to-second-half = CRITICAL REVENUE CONTRACTION; banking credits <40% of GST revenue = ROUTING RISK." :
-                  id === "due_diligence"           ? "GST compliance: turnover vs P&L variance, late/not-filed pattern, ITC utilisation. Accumn: top 5 customers (name/%), top 5 suppliers, circular transactions with amounts. Triangulation: GST vs ITR vs banking cross-check, profile mismatches. Any other DD findings." :
-                  id === "risk_assessment"         ? "Risk table | Category | Risk | Observation | Mitigant | Severity |. Min 8 risks covering business (concentration/entity age), financial (liquidity/leverage/R-score), transaction (circular/mismatches/missing docs), industry/macro. Severity: HIGH/MEDIUM/LOW." :
-                  id === "visit_reference"         ? "Site visit: location, facilities, operations, headcount. Reference checks: banker/vendor/customer inputs. Executive team observations. Use 'Not provided — analyst to confirm' for any missing field." :
-                  id === "product_specifics"       ? "All SOP rules for this product type (OL/FL/PLS/PF/TF/HL) — confirmed or excepted. Projection waiver with SOP §XII basis. Policy exceptions with justification. Product-specific compliance notes." :
-                  "3–5 analytical observations per Rehbar SOP. Use 'Not provided — analyst to confirm' for missing data. Never write <UNKNOWN>.",
-              },
-            },
-            required: ["markdown"],
-            additionalProperties: false,
-          }])),
-          required: SECTION_IDS,
-          additionalProperties: false,
-        },
+        sections: sectionSchema,
         risks: {
           type: "array",
-          description: "Risk register — minimum 8 risks covering business, financial, transaction, and industry categories",
+          description: "Risk register — 6–8 risks: business, financial, transaction categories. Severity: high/medium/low.",
           items: {
             type: "object",
             properties: {
@@ -878,12 +903,12 @@ Write observations that demonstrate genuine credit analyst insight — not just 
         },
         conditions_precedent: {
           type: "array",
-          description: "Conditions Precedent — minimum 5. Each should be a specific, actionable CP relevant to this deal (documentation, compliance, security creation, insurance, etc.).",
+          description: "Conditions Precedent — 5–6 specific, actionable CPs for this deal.",
           items: { type: "string" },
         },
         swot: {
           type: "object",
-          description: "SWOT analysis — 4–6 items per quadrant. Each item should be specific and data-driven (not generic).",
+          description: "SWOT — 3 items per quadrant, specific and data-driven.",
           properties: {
             strengths:     { type: "array", items: { type: "string" } },
             weaknesses:    { type: "array", items: { type: "string" } },
@@ -896,18 +921,19 @@ Write observations that demonstrate genuine credit analyst insight — not just 
       },
       toolRequired: ["sections","risks","conditions_precedent","swot"],
       model: "claude-sonnet-4-6",
-      maxTokens: 5000,
-      retries: 0,        // no retry — each attempt can take 60–90s; 2× would exceed Supabase's 150s wall-clock limit
-      timeoutMs: 115_000, // 5000 tok ÷ 60 tok/s (typical) = 83s + 10s overhead = 93s; fits under 115s
+      maxTokens: 4500,   // 6 sections ~3000 + risks/CPs/SWOT ~1000 + headroom 500; at 55 tok/s = 82s ✓
+      retries: 0,
+      timeoutMs: 110_000,
     });
 
-    const icNote = { ...args, generated_at: new Date().toISOString(), draft: true };
+    // Merge phase 1 sections (passed from frontend) with phase 2 sections
+    const mergedSections = { ...(prior_sections ?? {}), ...(args2.sections as Record<string, unknown>) };
+    // Spread existing ic_note first so provisional (and any other manually saved keys) survive regeneration
+    const icNote = { ...icNoteJson, ...args2, sections: mergedSections, generated_at: new Date().toISOString(), draft: true };
 
-    // Save ic_note first — this is what matters
     const { error: noteErr } = await supabase.from("credit_cases").update({ ic_note: icNote }).eq("id", case_id);
     if (noteErr) throw new Error(`IC note save failed: ${noteErr.message}`);
 
-    // Update status separately — ignore failure (status column has an enum trigger incompatible with REST)
     await supabase.from("credit_cases").update({ status: "ic_review" as never }).eq("id", case_id).then(
       ({ error }) => { if (error) console.warn("Status update skipped:", error.message); }
     );

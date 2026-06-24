@@ -252,11 +252,23 @@ export function FV({ v, abbr, calc }: { v: number | null | undefined; abbr: stri
   );
 }
 
-export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] }) {
+// ── Provisional data types (shared by ICHistoricalTables + ICProjectionsTable) ──
+type ProvLineItem = { label: string; value: number | null; override_value?: number | null };
+type ProvPeriodShape = { fiscal_year: number; months_covered?: number; pl?: ProvLineItem[]; bs?: ProvLineItem[] };
+
+function provLiVal(items: ProvLineItem[] | undefined, label: string): number | null {
+  const it = items?.find(i => i.label === label);
+  if (!it) return null;
+  const v = it.override_value !== undefined && it.override_value !== null ? it.override_value : it.value;
+  return v !== null && Number.isFinite(Number(v)) ? Number(v) : null;
+}
+
+export function ICHistoricalTables({ extracted, provisional }: { extracted: ExtractedRow[]; provisional?: ProvPeriodShape[] }) {
   const years = Array.from(new Set(
     extracted.filter(r => r.statement_type !== "projections").map(r => r.fiscal_year)
   )).sort();
-  if (years.length === 0) return <div className="text-muted-foreground text-sm">No historical data extracted.</div>;
+  const annualProv = (provisional ?? []).filter(p => (p.months_covered ?? 12) >= 12);
+  if (years.length === 0 && annualProv.length === 0) return <div className="text-muted-foreground text-sm">No historical data extracted.</div>;
 
   const unit = extracted.find(r => r.unit)?.unit;
   const unitLabel = unit ? `₹ ${unit}` : "₹";
@@ -270,9 +282,10 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
   const bsLabels = ["Share Capital", "Reserves & Surplus", "Net Worth", "Long Term Borrowings", "Short Term Borrowings", "Total Debt", "Trade Payables", "Other Current Liabilities", "Current Liabilities", "Inventory", "Trade Receivables", "Cash & Bank", "Other Current Assets", "Current Assets", "Fixed Assets (Net)", "Total Assets", "Capital Employed", "Working Capital"];
   const cfLabels = ["Cash from Operations", "Cash from Investing", "Cash from Financing", "Net Change in Cash", "Opening Cash", "Closing Cash"];
 
-  const renderTable = (allLabels: string[], title: string) => {
+  const renderTable = (allLabels: string[], title: string, provKey?: "pl" | "bs") => {
     const activeLabels = allLabels.filter(label =>
       fyItems.some(items => icLiVal(items, label) !== null)
+      || (provKey && annualProv.some(p => provLiVal(p[provKey], label) !== null))
     );
     if (activeLabels.length === 0) return null;
     return (
@@ -283,6 +296,9 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
             <tr>
               <th className="text-left py-1.5 font-medium">Item</th>
               {years.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
+              {annualProv.map(p => (
+                <th key={`pv-${p.fiscal_year}`} className="text-right font-medium text-amber-600">FY{p.fiscal_year} (Prov)</th>
+              ))}
               {years.length >= 2 && <th className="text-right font-medium text-primary/70">YoY %</th>}
             </tr>
           </thead>
@@ -306,6 +322,11 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
                       <FV v={v} abbr={abbr} calc={calcFlags[i]} />
                     </td>
                   ))}
+                  {provKey && annualProv.map((p, i) => (
+                    <td key={`pv-${i}`} className="text-right tabular-nums text-amber-600">
+                      <FV v={provLiVal(p[provKey], label)} abbr={abbr} />
+                    </td>
+                  ))}
                   {years.length >= 2 && (
                     <td className={`text-right tabular-nums text-[11px] ${yoyPct !== null ? (yoyPct > 0 ? "text-green-600" : yoyPct < 0 ? "text-red-600" : "text-muted-foreground") : "text-muted-foreground"}`}>
                       {yoyPct !== null ? (yoyPct > 0 ? "+" : "") + yoyPct.toFixed(1) + "%" : "—"}
@@ -324,9 +345,14 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
 
   return (
     <div className="space-y-5">
-      {renderTable(plLabels, "P&L Summary")}
-      {renderTable(bsLabels, "Balance Sheet")}
+      {renderTable(plLabels, "P&L Summary", "pl")}
+      {renderTable(bsLabels, "Balance Sheet", "bs")}
       {hasCF && renderTable(cfLabels, "Cash Flow Statement")}
+      {annualProv.length > 0 && (
+        <p className="text-[10px] text-amber-600">
+          Columns marked <span className="font-semibold">(Prov)</span> are provisional/MIS data — unaudited.
+        </p>
+      )}
       <p className="text-[10px] text-muted-foreground">
         Values marked <span className="text-amber-500">(calc)</span> are auto-derived from available data. All other values were extracted directly from source documents.
       </p>
@@ -334,9 +360,11 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
   );
 }
 
-export function ICProjectionsTable({ extracted }: { extracted: ExtractedRow[] }) {
+export function ICProjectionsTable({ extracted, provisional }: { extracted: ExtractedRow[]; provisional?: ProvPeriodShape[] }) {
   const projRows = extracted.filter(r => r.statement_type === "projections");
-  if (projRows.length === 0) return <div className="text-muted-foreground text-sm">No projection data extracted.</div>;
+  const annualProv = (provisional ?? []).filter(p => (p.months_covered ?? 12) >= 12);
+  if (projRows.length === 0 && annualProv.length === 0)
+    return <div className="text-muted-foreground text-sm">No projection or provisional data available.</div>;
 
   const unit = extracted.find(r => r.unit)?.unit;
   const unitLabel = unit ? `₹ ${unit}` : "₹";
@@ -345,6 +373,7 @@ export function ICProjectionsTable({ extracted }: { extracted: ExtractedRow[] })
     extracted.filter(r => r.statement_type !== "projections").map(r => r.fiscal_year)
   )).sort();
   const projYears = Array.from(new Set(projRows.map(r => r.fiscal_year))).sort();
+  const provYears = annualProv.map(p => p.fiscal_year);
   const pairs: [string, string][] = [
     ["Turnover", "Projected Turnover"],
     ["EBITDA", "Projected EBITDA"],
@@ -352,16 +381,28 @@ export function ICProjectionsTable({ extracted }: { extracted: ExtractedRow[] })
     ["Net Worth", "Projected Net Worth"],
     ["Total Debt", "Projected Total Debt"],
   ];
+  const PROJ_ALIAS: Record<string, string[]> = {
+    "Projected Turnover":   ["Projected Turnover", "Revenue", "Total Income", "Turnover"],
+    "Projected EBITDA":     ["Projected EBITDA", "EBITDA", "Gross Profit"],
+    "Projected PAT":        ["Projected PAT", "PAT", "PBT"],
+    "Projected Net Worth":  ["Projected Net Worth", "Net Worth"],
+    "Projected Total Debt": ["Projected Total Debt", "Total Debt"],
+  };
+  function projLiVal(items: LineItem[], ...labels: string[]): number | null {
+    for (const lb of labels) { const v = icLiVal(items, lb); if (v !== null) return v; }
+    return null;
+  }
 
   return (
     <div>
-      <p className="text-xs text-muted-foreground mb-2">{unitLabel} · Actual (A) vs Projected (P)</p>
+      <p className="text-xs text-muted-foreground mb-2">{unitLabel} · A=Actual · Prov=Provisional · P=Projected</p>
       <table className="w-full text-xs">
         <thead className="text-muted-foreground border-b border-border">
           <tr>
             <th className="text-left py-1.5 font-medium">Metric</th>
-            {histYears.map(y => <th key={y} className="text-right font-medium">FY{y} (A)</th>)}
-            {projYears.map(y => <th key={y} className="text-right font-medium text-primary/70">FY{y} (P)</th>)}
+            {histYears.map(y => <th key={`a-${y}`} className="text-right font-medium">FY{y} (A)</th>)}
+            {provYears.map(y => <th key={`pv-${y}`} className="text-right font-medium text-amber-600">FY{y} (Prov)</th>)}
+            {projYears.map(y => <th key={`p-${y}`} className="text-right font-medium text-primary/70">FY{y} (P)</th>)}
           </tr>
         </thead>
         <tbody>
@@ -369,9 +410,14 @@ export function ICProjectionsTable({ extracted }: { extracted: ExtractedRow[] })
             <tr key={histLabel} className="border-b border-border/30">
               <td className="py-1.5 text-foreground">{histLabel}</td>
               {histYears.map(y => <td key={y} className="text-right tabular-nums"><FV v={icLiVal(icGetItems(extracted, y), histLabel)} abbr={abbr} /></td>)}
+              {annualProv.map((p, i) => (
+                <td key={i} className="text-right tabular-nums text-amber-600">
+                  <FV v={provLiVal(p.pl, histLabel)} abbr={abbr} />
+                </td>
+              ))}
               {projYears.map(y => {
                 const items = (projRows.find(r => r.fiscal_year === y)?.line_items ?? []) as unknown as LineItem[];
-                return <td key={y} className="text-right tabular-nums"><FV v={icLiVal(items, projLabel)} abbr={abbr} /></td>;
+                return <td key={y} className="text-right tabular-nums"><FV v={projLiVal(items, ...(PROJ_ALIAS[projLabel] ?? [projLabel]))} abbr={abbr} /></td>;
               })}
             </tr>
           ))}

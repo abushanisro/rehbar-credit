@@ -2133,20 +2133,15 @@ function CaseViewInner() {
     ];
     let p = 0;
     const tick = setInterval(() => {
-      p = Math.min(p + 1, 92);
+      p = Math.min(p + 1, 44);   // Phase 1 progress cap — phase 2 takes over at 50
       setProgress(p);
       setProgressLabel(LABELS[Math.min(Math.floor(p / 20), LABELS.length - 1)]);
-    }, 600);
-    try {
-      window.dispatchEvent(new CustomEvent("ai-token-usage", {
-        detail: { status: "loading", label: "IC Note", max_tokens: 8192 },
-      }));
-      // Re-index structured data into pgvector so RAG has fresh embeddings
-      supabase.functions.invoke("vectorize-case-data", { body: { case_id: cc.id } }).catch(() => {});
-      const { data: narData, error } = await supabase.functions.invoke("generate-narrative", {
-        body: { case_id: cc.id, ...(analystNotes ? { analyst_notes_for_ic: analystNotes } : {}) },
+    }, 700);
+
+    const invokePhase = async (phase: 1 | 2, extra?: Record<string, unknown>) => {
+      const { data, error } = await supabase.functions.invoke("generate-narrative", {
+        body: { case_id: cc.id, phase, ...(analystNotes ? { analyst_notes_for_ic: analystNotes } : {}), ...extra },
       });
-      clearInterval(tick);
       if (error) {
         const ctx = (error as { context?: unknown }).context;
         if (ctx instanceof Response) {
@@ -2159,6 +2154,31 @@ function CaseViewInner() {
         }
         throw error;
       }
+      return data as Record<string, unknown>;
+    };
+
+    try {
+      window.dispatchEvent(new CustomEvent("ai-token-usage", {
+        detail: { status: "loading", label: "IC Note", max_tokens: 6000 },
+      }));
+      supabase.functions.invoke("vectorize-case-data", { body: { case_id: cc.id } }).catch(() => {});
+
+      // Phase 1 — sections I–VI
+      setProgressLabel("Drafting executive summary, client profile & financials…");
+      const p1 = await invokePhase(1);
+      clearInterval(tick);
+
+      // Phase 2 — sections VII–XII + risks + CPs + SWOT
+      setProgress(50);
+      setProgressLabel("Drafting ratios, cash flow, DD, risks & conditions…");
+      let p2 = 50;
+      const tick2 = setInterval(() => {
+        p2 = Math.min(p2 + 1, 92);
+        setProgress(p2);
+      }, 700);
+      const narData = await invokePhase(2, { prior_sections: p1.partial_sections ?? {} });
+      clearInterval(tick2);
+
       setProgress(100);
       setProgressLabel("Complete");
       if (narData?.usage) {
@@ -2196,7 +2216,7 @@ function CaseViewInner() {
     } finally {
       setTimeout(() => { setBusy(false); setProgress(0); setProgressLabel(""); }, 800);
     }
-  };
+  }; // end runNarrative
 
   const patchIcSection = async (sectionId: string, markdown: string) => {
     if (!cc) return;
