@@ -12,7 +12,7 @@
  * Storage: ic_note.provisional (JSON array of ProvPeriod).
  */
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Panel } from "@/components/terminal/Panel";
 import type { CaseRow, ExtractedRow, LineItem } from "@/features/case/types";
 import { unitAbbr, fmtUnit } from "@/features/case/utils";
@@ -1034,8 +1034,23 @@ export function ProvisionalTab({
   const [showAnn,     setShowAnn]   = useState(true);
   const [showBS,      setShowBS]    = useState(true);
   const [selectedFY,  setSelectedFY] = useState<number | null>(null);
-  const fileRef       = useRef<HTMLInputElement>(null);
-  const directFileRef = useRef<HTMLInputElement>(null);
+  const fileRef        = useRef<HTMLInputElement>(null);
+  const directFileRef  = useRef<HTMLInputElement>(null);
+  const saveTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isFirstRender  = useRef(true);
+
+  // Auto-save 800ms after any periods change (skip initial mount)
+  useEffect(() => {
+    if (isFirstRender.current) { isFirstRender.current = false; return; }
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    setSaving(true); setSaved(false);
+    saveTimerRef.current = setTimeout(async () => {
+      await onSave(periods);
+      setSaving(false); setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    }, 800);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, [periods]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Get last audited P&L + BS ──────────────────────────────────────────────
   const auditedPLRows = extracted.filter(r => r.statement_type === "profit_loss" && r.confirmed);
@@ -1080,13 +1095,6 @@ export function ProvisionalTab({
   const handleRemove = (id: string) => {
     if (!window.confirm("Remove this period?")) return;
     setPeriods(prev => prev.filter(p => p.id !== id));
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    await onSave(periods);
-    setSaving(false); setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
   };
 
   const handleImport = async (file: File) => {
@@ -1207,10 +1215,9 @@ export function ProvisionalTab({
             </button>
           ))}
         </div>
-        <button onClick={handleSave} disabled={saving}
-          className="text-[10px] tracking-widest bg-primary text-primary-foreground px-3 py-1.5 disabled:opacity-50">
-          {saving ? "SAVING..." : saved ? "✓ SAVED" : "[SAVE →]"}
-        </button>
+        <span className={`text-[9px] tracking-widest transition-opacity ${saving || saved ? "opacity-100" : "opacity-0"} ${saved ? "text-success" : "text-muted-foreground"}`}>
+          {saving ? "SAVING…" : "✓ SAVED"}
+        </span>
       </div>
 
       <div className="text-[9px] text-muted-foreground/60 tracking-wider">

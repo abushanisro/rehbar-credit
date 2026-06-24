@@ -45,6 +45,7 @@ import { parseBsaExcel, isBsaExcel, type BsaParseResult } from "@/lib/bsa-excel-
 import { UploadGrid as CompactUploadGrid } from "@/components/case/UploadGrid";
 import { ICNoteDocument } from "@/tabs/case/ic/ICNoteDocument";
 import type { IcNoteShape } from "@/tabs/case/ic/ICNoteDocument";
+import { annotationsToSvgString } from "@/tabs/case/ic/ICAnnotationLayer";
 import { buildIcNoteHtml as buildIcNoteHtmlFull, buildIcNotePrintCss } from "@/tabs/case/ic/buildIcNoteHtml";
 import { TriangulationTab } from "@/tabs/case/TriangulationTab";
 import type { TriangulationData } from "@/lib/triangulation-excel-parser";
@@ -2254,6 +2255,38 @@ function CaseViewInner() {
       ...current,
       comments: existing.map(c => c.id === commentId ? { ...c, resolved: true } : c),
     };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const saveAnnotations = async (annotations: unknown[]) => {
+    if (!cc) return;
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const next = { ...current, annotations };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const saveCellEdit = async (tableKey: string, rowLabel: string, fy: number, val: number | null) => {
+    if (!cc) return;
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const edits = (current.cell_edits as Record<string, Record<string, Record<number, number | null>>>) ?? {};
+    const next = {
+      ...current,
+      cell_edits: {
+        ...edits,
+        [tableKey]: { ...(edits[tableKey] ?? {}), [rowLabel]: { ...((edits[tableKey]?.[rowLabel]) ?? {}), [fy]: val } },
+      },
+    };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const saveCustomRow = async (tableKey: string, label: string) => {
+    if (!cc) return;
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const rows = (current.custom_rows as Record<string, string[]>) ?? {};
+    const next = { ...current, custom_rows: { ...rows, [tableKey]: [...(rows[tableKey] ?? []), label] } };
     await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
     setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
   };
@@ -4854,13 +4887,20 @@ function CaseViewInner() {
             onPatchSection={patchIcSection}
             onAddComment={addIcComment}
             onResolveComment={resolveIcComment}
+            onAnnotationsChange={saveAnnotations}
+            onCellEdit={saveCellEdit}
+            onAddRow={saveCustomRow}
           />
 
           {/* PDF download (only when note exists) */}
           {ic?.sections && (
             <>
               <ICFinalRecommendation cc={cc} ratios={ratios} extracted={extracted} ic={ic!} />
-              <DownloadBar onPdf={() => dlPdfIc(buildIcNoteHtmlFull(cc, extracted, ratios, ic!), `${cc.case_code} IC Note`)} />
+              <DownloadBar onPdf={() => {
+                const icNote = ic as IcNoteShape;
+                const annSvg = annotationsToSvgString(icNote.annotations ?? [], 1200, 20000);
+                dlPdfIc(buildIcNoteHtmlFull(cc, extracted, ratios, ic!, annSvg), `${cc.case_code} IC Note`);
+              }} />
             </>
           )}
         </div>

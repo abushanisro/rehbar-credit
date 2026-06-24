@@ -139,6 +139,7 @@ export function buildIcNoteHtml(
     conditions_precedent: string[];
     swot?: { strengths: string[]; weaknesses: string[]; opportunities: string[]; threats: string[] };
   },
+  annotationsSvg?: string,
 ): string {
   const product     = PRODUCTS[cc.product_type];
   const fyYears     = Array.from(new Set(ratios.map(r => r.fiscal_year))).sort();
@@ -509,6 +510,11 @@ export function buildIcNoteHtml(
         ).join("")}
       </div>
     `);
+  }
+
+  // ── Annotation SVG overlay ────────────────────────────────────────────────
+  if (annotationsSvg) {
+    h = `<div style="position:relative">${h}<div style="position:absolute;top:0;left:0;width:100%;pointer-events:none;z-index:100">${annotationsSvg}</div></div>`;
   }
 
   return h;

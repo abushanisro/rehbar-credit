@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   PRODUCTS, RATIO_DISPLAY_NAMES, formatRatio,
 } from "@/features/credit/domain";
@@ -263,7 +264,23 @@ function provLiVal(items: ProvLineItem[] | undefined, label: string): number | n
   return v !== null && Number.isFinite(Number(v)) ? Number(v) : null;
 }
 
-export function ICHistoricalTables({ extracted, provisional }: { extracted: ExtractedRow[]; provisional?: ProvPeriodShape[] }) {
+export function ICHistoricalTables({
+  extracted,
+  provisional,
+  cellEdits,
+  customRows,
+  onCellEdit,
+  onAddRow,
+}: {
+  extracted: ExtractedRow[];
+  provisional?: ProvPeriodShape[];
+  cellEdits?: Record<string, Record<number, number>>;
+  customRows?: string[];
+  onCellEdit?: (rowLabel: string, fy: number, val: number | null) => void;
+  onAddRow?: (label: string) => void;
+}) {
+  const [editCell, setEditCell] = useState<{ label: string; fy: number; val: string } | null>(null);
+
   const years = Array.from(new Set(
     extracted.filter(r => r.statement_type !== "projections").map(r => r.fiscal_year)
   )).sort();
@@ -282,12 +299,22 @@ export function ICHistoricalTables({ extracted, provisional }: { extracted: Extr
   const bsLabels = ["Share Capital", "Reserves & Surplus", "Net Worth", "Long Term Borrowings", "Short Term Borrowings", "Total Debt", "Trade Payables", "Other Current Liabilities", "Current Liabilities", "Inventory", "Trade Receivables", "Cash & Bank", "Other Current Assets", "Current Assets", "Fixed Assets (Net)", "Total Assets", "Capital Employed", "Working Capital"];
   const cfLabels = ["Cash from Operations", "Cash from Investing", "Cash from Financing", "Net Change in Cash", "Opening Cash", "Closing Cash"];
 
+  const commitEdit = () => {
+    if (!editCell) return;
+    const val = parseFloat(editCell.val);
+    onCellEdit?.(editCell.label, editCell.fy, Number.isFinite(val) ? val : null);
+    setEditCell(null);
+  };
+
   const renderTable = (allLabels: string[], title: string, provKey?: "pl" | "bs") => {
+    const extraLabels = (customRows ?? []).filter(l => !allLabels.includes(l));
     const activeLabels = allLabels.filter(label =>
       fyItems.some(items => icLiVal(items, label) !== null)
       || (provKey && annualProv.some(p => provLiVal(p[provKey], label) !== null))
+      || (cellEdits?.[label] && Object.keys(cellEdits[label]).length > 0)
     );
-    if (activeLabels.length === 0) return null;
+    const displayLabels = [...activeLabels, ...extraLabels];
+    if (displayLabels.length === 0) return null;
     return (
       <div>
         <SectionLabel>{title} · {unitLabel}</SectionLabel>
@@ -303,25 +330,51 @@ export function ICHistoricalTables({ extracted, provisional }: { extracted: Extr
             </tr>
           </thead>
           <tbody>
-            {activeLabels.map(label => {
-              const vals = fyItems.map(items => icLiVal(items, label));
+            {displayLabels.map(label => {
+              const isCustom = extraLabels.includes(label);
+              const rawVals = fyItems.map(items => icLiVal(items, label));
+              const vals = rawVals.map((v, i) => {
+                const override = cellEdits?.[label]?.[years[i]];
+                return override !== undefined ? override : v;
+              });
               const calcFlags = fyItems.map(items => isCalc(items, label));
               const last = vals[vals.length - 1];
               const prev = vals.length >= 2 ? vals[vals.length - 2] : null;
               const yoyPct = (last !== null && prev !== null && prev !== 0)
                 ? ((last - prev) / Math.abs(prev)) * 100 : null;
-              const anyCalc = calcFlags.some(Boolean);
+              const anyCalc = !isCustom && calcFlags.some(Boolean);
               return (
                 <tr key={label} className="border-b border-border/30">
                   <td className="py-1.5">
-                    <span className={anyCalc ? "text-amber-600" : "text-foreground"}>{label}</span>
+                    <span className={isCustom ? "text-blue-600" : anyCalc ? "text-amber-600" : "text-foreground"}>{label}</span>
                     {anyCalc && <span className="ml-1.5 text-[10px] text-amber-500">(calc)</span>}
+                    {isCustom && <span className="ml-1.5 text-[10px] text-blue-400">(custom)</span>}
                   </td>
-                  {vals.map((v, i) => (
-                    <td key={i} className="text-right tabular-nums">
-                      <FV v={v} abbr={abbr} calc={calcFlags[i]} />
-                    </td>
-                  ))}
+                  {vals.map((v, i) => {
+                    const fy = years[i];
+                    const isEditing = editCell?.label === label && editCell?.fy === fy;
+                    return (
+                      <td
+                        key={i}
+                        className="text-right tabular-nums cursor-pointer"
+                        onClick={() => setEditCell({ label, fy, val: v !== null ? String(v) : "" })}
+                      >
+                        {isEditing ? (
+                          <input
+                            autoFocus
+                            type="number"
+                            style={{ width: "100%", textAlign: "right", background: "rgba(139,105,20,0.08)", border: "1px solid #C4A04A", outline: "none", fontFamily: "inherit", fontSize: "inherit" }}
+                            value={editCell!.val}
+                            onChange={e => setEditCell(prev => prev ? { ...prev, val: e.target.value } : null)}
+                            onBlur={commitEdit}
+                            onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditCell(null); }}
+                          />
+                        ) : (
+                          <FV v={v} abbr={abbr} calc={!isCustom && calcFlags[i]} />
+                        )}
+                      </td>
+                    );
+                  })}
                   {provKey && annualProv.map((p, i) => (
                     <td key={`pv-${i}`} className="text-right tabular-nums text-amber-600">
                       <FV v={provLiVal(p[provKey], label)} abbr={abbr} />
@@ -337,6 +390,14 @@ export function ICHistoricalTables({ extracted, provisional }: { extracted: Extr
             })}
           </tbody>
         </table>
+        {onAddRow && (
+          <button
+            onClick={() => { const l = prompt("Row label:"); if (l?.trim()) onAddRow(l.trim()); }}
+            style={{ fontSize: 9, marginTop: 4, padding: "2px 8px", border: "1px dashed rgba(139,105,20,0.3)", background: "transparent", color: "rgba(139,105,20,0.6)", cursor: "pointer", borderRadius: 3 }}
+          >
+            + Row
+          </button>
+        )}
       </div>
     );
   };
@@ -360,10 +421,26 @@ export function ICHistoricalTables({ extracted, provisional }: { extracted: Extr
   );
 }
 
-export function ICProjectionsTable({ extracted, provisional }: { extracted: ExtractedRow[]; provisional?: ProvPeriodShape[] }) {
+export function ICProjectionsTable({
+  extracted,
+  provisional,
+  cellEdits,
+  customRows,
+  onCellEdit,
+  onAddRow,
+}: {
+  extracted: ExtractedRow[];
+  provisional?: ProvPeriodShape[];
+  cellEdits?: Record<string, Record<number, number>>;
+  customRows?: string[];
+  onCellEdit?: (rowLabel: string, fy: number, val: number | null) => void;
+  onAddRow?: (label: string) => void;
+}) {
+  const [editCell, setEditCell] = useState<{ label: string; fy: number; val: string } | null>(null);
+
   const projRows = extracted.filter(r => r.statement_type === "projections");
   const annualProv = (provisional ?? []).filter(p => (p.months_covered ?? 12) >= 12);
-  if (projRows.length === 0 && annualProv.length === 0)
+  if (projRows.length === 0 && annualProv.length === 0 && (customRows ?? []).length === 0)
     return <div className="text-muted-foreground text-sm">No projection or provisional data available.</div>;
 
   const unit = extracted.find(r => r.unit)?.unit;
@@ -374,13 +451,16 @@ export function ICProjectionsTable({ extracted, provisional }: { extracted: Extr
   )).sort();
   const projYears = Array.from(new Set(projRows.map(r => r.fiscal_year))).sort();
   const provYears = annualProv.map(p => p.fiscal_year);
-  const pairs: [string, string][] = [
+  const basePairs: [string, string][] = [
     ["Turnover", "Projected Turnover"],
     ["EBITDA", "Projected EBITDA"],
     ["PAT", "Projected PAT"],
     ["Net Worth", "Projected Net Worth"],
     ["Total Debt", "Projected Total Debt"],
   ];
+  const extraPairs: [string, string][] = (customRows ?? []).map(l => [l, l]);
+  const pairs = [...basePairs, ...extraPairs];
+
   const PROJ_ALIAS: Record<string, string[]> = {
     "Projected Turnover":   ["Projected Turnover", "Revenue", "Total Income", "Turnover"],
     "Projected EBITDA":     ["Projected EBITDA", "EBITDA", "Gross Profit"],
@@ -392,6 +472,15 @@ export function ICProjectionsTable({ extracted, provisional }: { extracted: Extr
     for (const lb of labels) { const v = icLiVal(items, lb); if (v !== null) return v; }
     return null;
   }
+
+  const commitEdit = () => {
+    if (!editCell) return;
+    const val = parseFloat(editCell.val);
+    onCellEdit?.(editCell.label, editCell.fy, Number.isFinite(val) ? val : null);
+    setEditCell(null);
+  };
+
+  const allYears = [...histYears, ...provYears, ...projYears];
 
   return (
     <div>
@@ -406,23 +495,90 @@ export function ICProjectionsTable({ extracted, provisional }: { extracted: Extr
           </tr>
         </thead>
         <tbody>
-          {pairs.map(([histLabel, projLabel]) => (
-            <tr key={histLabel} className="border-b border-border/30">
-              <td className="py-1.5 text-foreground">{histLabel}</td>
-              {histYears.map(y => <td key={y} className="text-right tabular-nums"><FV v={icLiVal(icGetItems(extracted, y), histLabel)} abbr={abbr} /></td>)}
-              {annualProv.map((p, i) => (
-                <td key={i} className="text-right tabular-nums text-amber-600">
-                  <FV v={provLiVal(p.pl, histLabel)} abbr={abbr} />
+          {pairs.map(([histLabel, projLabel]) => {
+            const isCustom = extraPairs.some(([l]) => l === histLabel);
+            return (
+              <tr key={histLabel} className="border-b border-border/30">
+                <td className="py-1.5">
+                  <span className={isCustom ? "text-blue-600" : "text-foreground"}>{histLabel}</span>
+                  {isCustom && <span className="ml-1.5 text-[10px] text-blue-400">(custom)</span>}
                 </td>
-              ))}
-              {projYears.map(y => {
-                const items = (projRows.find(r => r.fiscal_year === y)?.line_items ?? []) as unknown as LineItem[];
-                return <td key={y} className="text-right tabular-nums"><FV v={projLiVal(items, ...(PROJ_ALIAS[projLabel] ?? [projLabel]))} abbr={abbr} /></td>;
-              })}
-            </tr>
-          ))}
+                {histYears.map(y => {
+                  const rawV = icLiVal(icGetItems(extracted, y), histLabel);
+                  const override = cellEdits?.[histLabel]?.[y];
+                  const v = override !== undefined ? override : rawV;
+                  const isEditing = editCell?.label === histLabel && editCell?.fy === y;
+                  return (
+                    <td key={y} className="text-right tabular-nums cursor-pointer" onClick={() => setEditCell({ label: histLabel, fy: y, val: v !== null ? String(v) : "" })}>
+                      {isEditing ? (
+                        <input
+                          autoFocus type="number"
+                          style={{ width: "100%", textAlign: "right", background: "rgba(139,105,20,0.08)", border: "1px solid #C4A04A", outline: "none", fontFamily: "inherit", fontSize: "inherit" }}
+                          value={editCell!.val}
+                          onChange={e => setEditCell(prev => prev ? { ...prev, val: e.target.value } : null)}
+                          onBlur={commitEdit}
+                          onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditCell(null); }}
+                        />
+                      ) : <FV v={v} abbr={abbr} />}
+                    </td>
+                  );
+                })}
+                {annualProv.map((p, i) => {
+                  const rawV = provLiVal(p.pl, histLabel);
+                  const override = cellEdits?.[histLabel]?.[provYears[i]];
+                  const v = override !== undefined ? override : rawV;
+                  const isEditing = editCell?.label === histLabel && editCell?.fy === provYears[i];
+                  return (
+                    <td key={i} className="text-right tabular-nums text-amber-600 cursor-pointer" onClick={() => setEditCell({ label: histLabel, fy: provYears[i], val: v !== null ? String(v) : "" })}>
+                      {isEditing ? (
+                        <input
+                          autoFocus type="number"
+                          style={{ width: "100%", textAlign: "right", background: "rgba(139,105,20,0.08)", border: "1px solid #C4A04A", outline: "none", fontFamily: "inherit", fontSize: "inherit" }}
+                          value={editCell!.val}
+                          onChange={e => setEditCell(prev => prev ? { ...prev, val: e.target.value } : null)}
+                          onBlur={commitEdit}
+                          onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditCell(null); }}
+                        />
+                      ) : <FV v={v} abbr={abbr} />}
+                    </td>
+                  );
+                })}
+                {projYears.map(y => {
+                  const items = (projRows.find(r => r.fiscal_year === y)?.line_items ?? []) as unknown as LineItem[];
+                  const rawV = projLiVal(items, ...(PROJ_ALIAS[projLabel] ?? [projLabel]));
+                  const override = cellEdits?.[histLabel]?.[y];
+                  const v = override !== undefined ? override : rawV;
+                  const isEditing = editCell?.label === histLabel && editCell?.fy === y;
+                  return (
+                    <td key={y} className="text-right tabular-nums cursor-pointer" onClick={() => setEditCell({ label: histLabel, fy: y, val: v !== null ? String(v) : "" })}>
+                      {isEditing ? (
+                        <input
+                          autoFocus type="number"
+                          style={{ width: "100%", textAlign: "right", background: "rgba(139,105,20,0.08)", border: "1px solid #C4A04A", outline: "none", fontFamily: "inherit", fontSize: "inherit" }}
+                          value={editCell!.val}
+                          onChange={e => setEditCell(prev => prev ? { ...prev, val: e.target.value } : null)}
+                          onBlur={commitEdit}
+                          onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditCell(null); }}
+                        />
+                      ) : <FV v={v} abbr={abbr} />}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
+      {onAddRow && (
+        <button
+          onClick={() => { const l = prompt("Row label:"); if (l?.trim()) onAddRow(l.trim()); }}
+          style={{ fontSize: 9, marginTop: 4, padding: "2px 8px", border: "1px dashed rgba(139,105,20,0.3)", background: "transparent", color: "rgba(139,105,20,0.6)", cursor: "pointer", borderRadius: 3 }}
+        >
+          + Row
+        </button>
+      )}
+      {/* suppress unused var warning */}
+      {allYears.length === 0 && null}
     </div>
   );
 }

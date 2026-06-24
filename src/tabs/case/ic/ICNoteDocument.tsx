@@ -6,6 +6,8 @@ import {
   ICRatioTable, ICClientProfile, ICInvestmentStructure,
   ICRehbarHistory, ICVisitReference, ICProductSpecifics,
 } from "./ICComponents";
+import { ICAnnotationLayer, annotationsToSvgString } from "./ICAnnotationLayer";
+import type { Annotation, DrawTool } from "./ICAnnotationLayer";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -26,6 +28,9 @@ export interface IcNoteShape {
   comments?: IcComment[];
   draft?: boolean;
   generated_at?: string;
+  annotations?: Annotation[];
+  cell_edits?: Record<string, Record<string, Record<number, number | null>>>;
+  custom_rows?: Record<string, string[]>;
 }
 
 // ── IC colour constants ───────────────────────────────────────────────────────
@@ -159,18 +164,44 @@ function BulletMd({ text, skipTables = false }: { text: string; skipTables?: boo
 // ── Section panel dispatcher ──────────────────────────────────────────────────
 
 function SectionPanel({
-  sectionId, cc, extracted, ratios,
+  sectionId, cc, extracted, ratios, cellEdits, customRows, onCellEdit, onAddRow,
 }: {
   sectionId: string;
   cc: CaseRow;
   extracted: ExtractedRow[];
   ratios: RatioRow[];
+  cellEdits?: Record<string, Record<string, Record<number, number | null>>>;
+  customRows?: Record<string, string[]>;
+  onCellEdit?: (tableKey: string, rowLabel: string, fy: number, val: number | null) => void;
+  onAddRow?: (tableKey: string, label: string) => void;
 }) {
   const provisional = ((cc.ic_note as Record<string, unknown> | null)?.provisional ?? []) as Array<{ fiscal_year: number; months_covered?: number; pl?: Array<{ label: string; value: number | null; override_value?: number | null }>; bs?: Array<{ label: string; value: number | null; override_value?: number | null }> }>;
+
+  const histCellEdits = cellEdits?.["historical"] as Record<string, Record<number, number>> | undefined;
+  const projCellEdits = cellEdits?.["projections"] as Record<string, Record<number, number>> | undefined;
+
   switch (sectionId) {
     case "executive_summary":      return <ICSummaryPanel cc={cc} ratios={ratios} />;
-    case "historical_financial":   return <ICHistoricalTables extracted={extracted} provisional={provisional} />;
-    case "projections":            return <ICProjectionsTable extracted={extracted} provisional={provisional} />;
+    case "historical_financial":   return (
+      <ICHistoricalTables
+        extracted={extracted}
+        provisional={provisional}
+        cellEdits={histCellEdits}
+        customRows={customRows?.["historical"]}
+        onCellEdit={(rowLabel, fy, val) => onCellEdit?.("historical", rowLabel, fy, val)}
+        onAddRow={(label) => onAddRow?.("historical", label)}
+      />
+    );
+    case "projections":            return (
+      <ICProjectionsTable
+        extracted={extracted}
+        provisional={provisional}
+        cellEdits={projCellEdits}
+        customRows={customRows?.["projections"]}
+        onCellEdit={(rowLabel, fy, val) => onCellEdit?.("projections", rowLabel, fy, val)}
+        onAddRow={(label) => onAddRow?.("projections", label)}
+      />
+    );
     case "key_ratios":             return <ICRatioTable ratios={ratios} />;
     case "client_promoter":        return <ICClientProfile cc={cc} />;
     case "investment_structure":   return <ICInvestmentStructure cc={cc} />;
@@ -287,6 +318,9 @@ export function ICNoteDocument({
   onPatchSection,
   onAddComment,
   onResolveComment,
+  onAnnotationsChange,
+  onCellEdit,
+  onAddRow,
 }: {
   cc: CaseRow;
   extracted: ExtractedRow[];
@@ -298,6 +332,9 @@ export function ICNoteDocument({
   onPatchSection: (sectionId: string, markdown: string) => Promise<void>;
   onAddComment: (sectionId: string, text: string) => Promise<void>;
   onResolveComment: (commentId: string) => Promise<void>;
+  onAnnotationsChange?: (annotations: Annotation[]) => Promise<void>;
+  onCellEdit?: (tableKey: string, rowLabel: string, fy: number, val: number | null) => Promise<void>;
+  onAddRow?: (tableKey: string, label: string) => Promise<void>;
 }) {
   const [editingSection, setEditingSection]             = useState<string | null>(null);
   const [draftText, setDraftText]                       = useState("");
@@ -307,6 +344,10 @@ export function ICNoteDocument({
   const [showReanalyse, setShowReanalyse]               = useState(false);
   const [reanalyseNotes, setReanalyseNotes]             = useState("");
   const [activeNavSection, setActiveNavSection]         = useState<string>(IC_SECTIONS[0]?.id ?? "");
+  const [drawMode, setDrawMode]                         = useState(false);
+  const [drawTool, setDrawTool]                         = useState<DrawTool>("pen");
+  const [drawColor, setDrawColor]                       = useState("#e74c3c");
+  const [drawWidth, setDrawWidth]                       = useState(2);
   const saveTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sectionRefs    = useRef<Record<string, HTMLDivElement | null>>({});
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
@@ -517,6 +558,31 @@ export function ICNoteDocument({
           >
             ↻ Re-analyse
           </button>
+          {/* Draw toolbar */}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+            <button
+              onClick={() => setDrawMode(v => !v)}
+              style={{
+                fontSize: 8, letterSpacing: "0.12em", border: `1px solid ${drawMode ? IC.goldLt : "rgba(212,201,176,0.25)"}`,
+                padding: "4px 10px", background: drawMode ? "rgba(196,160,74,0.15)" : "transparent",
+                color: drawMode ? IC.goldLt : "rgba(250,250,246,0.45)", cursor: "pointer",
+                textTransform: "uppercase", fontFamily: "inherit", borderRadius: 3,
+              }}
+            >
+              ✏ {drawMode ? "Drawing" : "Annotate"}
+            </button>
+            {drawMode && (<>
+              {(["pen","highlight","text","eraser"] as DrawTool[]).map(t => (
+                <button key={t} onClick={() => setDrawTool(t)} style={{ fontSize: 8, padding: "4px 8px", border: `1px solid ${drawTool === t ? IC.goldLt : "rgba(212,201,176,0.2)"}`, background: drawTool === t ? "rgba(196,160,74,0.2)" : "transparent", color: drawTool === t ? IC.goldLt : "rgba(250,250,246,0.4)", cursor: "pointer", fontFamily: "inherit", textTransform: "capitalize", borderRadius: 3 }}>{t}</button>
+              ))}
+              {["#e74c3c","#2563eb","#16a34a","#f59e0b","#1a1a1a","#fef08a"].map(c => (
+                <button key={c} onClick={() => setDrawColor(c)} style={{ width: 16, height: 16, background: c, border: drawColor === c ? "2px solid white" : "2px solid transparent", borderRadius: "50%", cursor: "pointer", flexShrink: 0 }} />
+              ))}
+              <input type="range" min={1} max={8} value={drawWidth} onChange={e => setDrawWidth(Number(e.target.value))} style={{ width: 60, accentColor: IC.goldLt }} />
+              <button onClick={() => { const anns = ic.annotations ?? []; if (anns.length) onAnnotationsChange?.(anns.slice(0, -1)); }} style={{ fontSize: 9, color: "rgba(250,250,246,0.4)", border: "1px solid rgba(212,201,176,0.2)", padding: "3px 8px", background: "transparent", cursor: "pointer", fontFamily: "inherit", borderRadius: 3 }}>↩ Undo</button>
+              <button onClick={() => { if (window.confirm("Clear all annotations?")) onAnnotationsChange?.([]); }} style={{ fontSize: 9, color: "rgba(250,250,246,0.3)", border: "1px solid rgba(212,201,176,0.15)", padding: "3px 8px", background: "transparent", cursor: "pointer", fontFamily: "inherit", borderRadius: 3 }}>✕ Clear</button>
+            </>)}
+          </div>
         </div>
 
         {/* Re-analyse panel */}
@@ -700,7 +766,16 @@ export function ICNoteDocument({
                 {/* Pre-built data panel */}
                 {hasPanel && (
                   <div style={{ marginBottom: 16 }}>
-                    <SectionPanel sectionId={s.id} cc={cc} extracted={extracted} ratios={ratios} />
+                    <SectionPanel
+                      sectionId={s.id}
+                      cc={cc}
+                      extracted={extracted}
+                      ratios={ratios}
+                      cellEdits={ic.cell_edits as Record<string, Record<string, Record<number, number | null>>> | undefined}
+                      customRows={ic.custom_rows}
+                      onCellEdit={onCellEdit}
+                      onAddRow={onAddRow}
+                    />
                   </div>
                 )}
 
@@ -851,6 +926,17 @@ export function ICNoteDocument({
           )}
 
           <div style={{ height: 48 }} />
+
+          {/* Annotation layer — must be last child of contentScrollRef */}
+          <ICAnnotationLayer
+            containerRef={contentScrollRef}
+            annotations={ic.annotations ?? []}
+            tool={drawTool}
+            color={drawColor}
+            strokeWidth={drawMode && drawTool === "highlight" ? 20 : drawWidth}
+            active={drawMode}
+            onChange={anns => onAnnotationsChange?.(anns)}
+          />
         </div>
 
         {/* Comments sidebar */}
