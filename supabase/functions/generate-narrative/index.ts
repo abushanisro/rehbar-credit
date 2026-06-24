@@ -896,9 +896,9 @@ Write observations that demonstrate genuine credit analyst insight — not just 
       },
       toolRequired: ["sections","risks","conditions_precedent","swot"],
       model: "claude-sonnet-4-6",
-      maxTokens: 3500,
+      maxTokens: 5000,
       retries: 0,        // no retry — each attempt can take 60–90s; 2× would exceed Supabase's 150s wall-clock limit
-      timeoutMs: 110_000, // 3500 tok ÷ 40 tok/s (worst case) = 87.5s + 15s overhead = 102.5s; fits under 110s
+      timeoutMs: 115_000, // 5000 tok ÷ 60 tok/s (typical) = 83s + 10s overhead = 93s; fits under 115s
     });
 
     const icNote = { ...args, generated_at: new Date().toISOString(), draft: true };

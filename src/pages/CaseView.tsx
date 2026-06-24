@@ -2148,8 +2148,8 @@ function CaseViewInner() {
       });
       clearInterval(tick);
       if (error) {
-        const ctx = (error as { context?: Response }).context;
-        if (ctx) {
+        const ctx = (error as { context?: unknown }).context;
+        if (ctx instanceof Response) {
           try {
             const body = await ctx.json() as { error?: string };
             if (body?.error) throw new Error(body.error);
