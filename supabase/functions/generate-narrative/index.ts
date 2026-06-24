@@ -595,9 +595,9 @@ function buildCompanyContext(company: CompanyRow | null, directors: DirectorRow[
   if (company?.mca_date_last_agm)     lines.push(`- Last AGM: ${company.mca_date_last_agm}`);
   if (company?.registered_address || company?.mca_email)
     lines.push(`- Contact: ${[company?.mca_email, company?.registered_address].filter(Boolean).join(" | ")}`);
-  if (company?.mca_about) lines.push(`\n**Company Overview (from Corpository):**\n${company.mca_about.slice(0, 1500)}`);
-  if (cc["group_summary"]) lines.push(`\n**Group Summary:**\n${String(cc["group_summary"]).slice(0, 800)}`);
-  if (cc["promoter_details"]) lines.push(`\n**Promoter Details:**\n${String(cc["promoter_details"]).slice(0, 600)}`);
+  if (company?.mca_about) lines.push(`\n**Company Overview:**\n${company.mca_about.slice(0, 600)}`);
+  if (cc["group_summary"]) lines.push(`\n**Group Summary:**\n${String(cc["group_summary"]).slice(0, 400)}`);
+  if (cc["promoter_details"]) lines.push(`\n**Promoter Details:**\n${String(cc["promoter_details"]).slice(0, 300)}`);
   if (directors?.length) {
     lines.push("\n**Board of Directors / Partners:**");
     lines.push("| Name | Designation | DIN | Shareholding % | Appointed |");
@@ -695,7 +695,7 @@ Deno.serve(async (req) => {
     const buildRagBlock = (sectionId: string): string => {
       const ctx = ragContexts[sectionId];
       if (!ctx) return "";
-      return `\n\n[RAG: additional indexed context for this section]\n${ctx.slice(0, 2000)}`;
+      return `\n\n[RAG: indexed context]\n${ctx.slice(0, 600)}`;
     };
 
     // Status update — fire-and-forget (enum trigger may reject via REST, that's ok)
@@ -730,18 +730,18 @@ Deno.serve(async (req) => {
     );
 
     const tables     = buildTables((financials ?? []) as FinRow[], (ratios ?? []) as RatioRow[]);
-    const bankTable  = buildBankSection((bankStatements ?? []) as BankRow[]).slice(0, 5_000);
-    const gstTable   = buildGstSection((gstReturns ?? []) as GstRow[]).slice(0, 4_000);
+    const bankTable  = buildBankSection((bankStatements ?? []) as BankRow[]).slice(0, 2_000);
+    const gstTable   = buildGstSection((gstReturns ?? []) as GstRow[]).slice(0, 1_800);
     const accumnReport = (accumnRows as AccumnReportRow[] | null | undefined)?.[0]?.report_data ?? null;
-    const accumnBlock  = buildAccumnSection(accumnReport).slice(0, 4_000);
+    const accumnBlock  = buildAccumnSection(accumnReport).slice(0, 1_800);
     const cibilBlock   = buildCibilSection((cibilRows as CibilReportRow[] | null | undefined) ?? []);
-    const triBlock     = buildTriangulationSection((triRows as TriangulationReportRow[] | null | undefined)?.[0]).slice(0, 3_000);
+    const triBlock     = buildTriangulationSection((triRows as TriangulationReportRow[] | null | undefined)?.[0]).slice(0, 1_400);
     const projBlock    = buildProjectionCredibility((financials ?? []) as FinRow[]);
 
     // Provisional data lives in ic_note.provisional on the case, not in extracted_financials
     const icNoteJson = (cc.ic_note ?? {}) as Record<string, unknown>;
     const provisionalPeriods = (icNoteJson["provisional"] ?? []) as ProvPeriod[];
-    const provisionalBlock = buildProvisionalSection(provisionalPeriods).slice(0, 3_000);
+    const provisionalBlock = buildProvisionalSection(provisionalPeriods).slice(0, 1_400);
 
     // Bank trend analysis — detect sharp credit decline
     const bankRows = (bankStatements ?? []) as BankRow[];
@@ -772,14 +772,13 @@ PROJECTION RULES (Rehbar SOP §XII):
 - PF/TF: Projections NOT required. PF: project working sheets + timelines mandatory. TF: repayment source justification mandatory.
 - PLS/HL: Projections required.
 
-WRITING STYLE — SENIOR ANALYST QUALITY:
-- Write like a top-tier credit analyst for an experienced Investment Committee.
-- Each section: 3–5 INSIGHT bullet points — trends, anomalies, risks vs benchmarks. Not just number repetition.
+WRITING STYLE — SENIOR ANALYST, CONCISE:
+- BREVITY IS MANDATORY. Each section: exactly 2–3 analytical bullet points. Never write paragraphs. Never repeat data — write insights.
+- Target 150–200 tokens per section. Risks: one row per risk, 8 risks max. CPs: one line each, 6 max. SWOT: 3 items per quadrant.
 - If data is missing, write "Not provided — analyst to confirm". NEVER write <UNKNOWN>.
-- NEVER fabricate numbers. ONLY use figures from the data provided.
+- NEVER fabricate numbers. ONLY use figures from data provided.
 - NEVER include a credit recommendation (APPROVE / DECLINE / DEFER).
-- NEVER include PAN numbers, full addresses, phone numbers, or date of birth.
-- Sections V, VI, VII: UI already renders the tables — write OBSERVATIONS ONLY, no tables in markdown.`,
+- Sections V, VI, VII: UI renders tables — write OBSERVATIONS ONLY, no tables in markdown.`,
 
       userText: `Draft the IC Appraisal Note for this case following the Rehbar SOP exactly.
 ${analyst_notes_for_ic ? `
@@ -897,9 +896,9 @@ Write observations that demonstrate genuine credit analyst insight — not just 
       },
       toolRequired: ["sections","risks","conditions_precedent","swot"],
       model: "claude-sonnet-4-6",
-      maxTokens: 7000,
+      maxTokens: 3500,
       retries: 0,        // no retry — each attempt can take 60–90s; 2× would exceed Supabase's 150s wall-clock limit
-      timeoutMs: 115_000, // 115s = ~82s Claude budget + 33s overhead; Supabase kills at 150s
+      timeoutMs: 110_000, // 3500 tok ÷ 40 tok/s (worst case) = 87.5s + 15s overhead = 102.5s; fits under 110s
     });
 
     const icNote = { ...args, generated_at: new Date().toISOString(), draft: true };
