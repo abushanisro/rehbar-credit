@@ -5,6 +5,7 @@ import { TerminalLayout } from "@/components/terminal/TerminalLayout";
 import { IC_SECTIONS, PRODUCTS, type ProductType } from "@/features/credit/domain";
 import { toast } from "sonner";
 import { BulletOnlyMd } from "@/components/case/MdRenderer";
+import { cn } from "@/lib/utils";
 import {
   ICSummaryPanel,
   ICClientProfile,
@@ -19,7 +20,6 @@ import {
 import type { CaseRow as FullCaseRow, ExtractedRow, RatioRow } from "@/features/case/types";
 
 const IC_ACCESS_ROLES = ["ic_member", "credit_committee", "admin"];
-
 const HISTORY_STATUSES = ["approved", "conditionally_approved", "declined", "queries_resubmission"];
 
 type ICNote = {
@@ -44,57 +44,72 @@ type ICCase = {
 
 type DecisionChoice = "approved" | "conditionally_approved" | "declined" | null;
 
-const DECISION_META: Record<NonNullable<DecisionChoice>, { label: string; color: string; activeClass: string; badge: string }> = {
-  approved:               { label: "APPROVE",       color: "text-success",     activeClass: "bg-success text-white border-success",         badge: "text-success border-success/40 bg-success/5" },
-  conditionally_approved: { label: "COND. APPROVE", color: "text-warning",     activeClass: "bg-warning text-black border-warning",          badge: "text-warning border-warning/40 bg-warning/5" },
-  declined:               { label: "REJECT",        color: "text-destructive", activeClass: "bg-destructive text-white border-destructive",  badge: "text-destructive border-destructive/40 bg-destructive/5" },
+const DECISION_META: Record<NonNullable<DecisionChoice>, {
+  label: string; shortLabel: string;
+  activeClass: string; badge: string; borderColor: string;
+  icon: string;
+}> = {
+  approved: {
+    label: "Approve",
+    shortLabel: "Approved",
+    activeClass: "bg-green-600 text-white border-green-600 shadow-green-100 shadow-lg",
+    badge: "bg-green-50 text-green-700 border-green-200",
+    borderColor: "border-green-300 hover:border-green-500 hover:bg-green-50 text-green-700",
+    icon: "✓",
+  },
+  conditionally_approved: {
+    label: "Conditionally Approve",
+    shortLabel: "Cond. Approved",
+    activeClass: "bg-amber-500 text-white border-amber-500 shadow-amber-100 shadow-lg",
+    badge: "bg-amber-50 text-amber-700 border-amber-200",
+    borderColor: "border-amber-300 hover:border-amber-500 hover:bg-amber-50 text-amber-700",
+    icon: "~",
+  },
+  declined: {
+    label: "Reject",
+    shortLabel: "Rejected",
+    activeClass: "bg-red-600 text-white border-red-600 shadow-red-100 shadow-lg",
+    badge: "bg-red-50 text-red-700 border-red-200",
+    borderColor: "border-red-300 hover:border-red-500 hover:bg-red-50 text-red-700",
+    icon: "✗",
+  },
 };
 
-const SEVERITY_COLOR: Record<string, string> = {
-  low:      "text-success border-success/30",
-  medium:   "text-warning border-warning/30",
-  high:     "text-destructive border-destructive/30",
-  critical: "text-destructive border-destructive/50 font-bold",
+const SEVERITY_STYLE: Record<string, string> = {
+  low:      "bg-green-50 text-green-700 border-green-200",
+  medium:   "bg-amber-50 text-amber-700 border-amber-200",
+  high:     "bg-red-50 text-red-700 border-red-200",
+  critical: "bg-red-100 text-red-800 border-red-300 font-semibold",
 };
 
-const HIST_DECISION_LABEL: Record<string, { short: string; cls: string }> = {
-  approved:               { short: "APPROVED",  cls: "text-success border-success/40" },
-  conditionally_approved: { short: "COND.",     cls: "text-warning border-warning/40" },
-  declined:               { short: "DECLINED",  cls: "text-destructive border-destructive/40" },
-  queries_resubmission:   { short: "QUERIES",   cls: "text-accent border-accent/40" },
+const HIST_DECISION: Record<string, { label: string; cls: string }> = {
+  approved:               { label: "Approved",              cls: "bg-green-50 text-green-700 border-green-200" },
+  conditionally_approved: { label: "Cond. Approved",        cls: "bg-amber-50 text-amber-700 border-amber-200" },
+  declined:               { label: "Declined",              cls: "bg-red-50 text-red-700 border-red-200"       },
+  queries_resubmission:   { label: "Queries Resubmission",  cls: "bg-blue-50 text-blue-700 border-blue-200"    },
 };
 
 export default function ICReview() {
   const { role } = useAuth();
 
-  // ── page-level: pending vs history ────────────────────────────────────────
-  const [pageView, setPageView] = useState<"pending" | "history">("pending");
+  const [pageView, setPageView]               = useState<"pending" | "history">("pending");
+  const [pending, setPending]                 = useState<ICCase[]>([]);
+  const [pendingLoading, setPendingLoading]   = useState(true);
+  const [history, setHistory]                 = useState<ICCase[]>([]);
+  const [historyLoading, setHistoryLoading]   = useState(false);
+  const [historyLoaded, setHistoryLoaded]     = useState(false);
+  const [histSearch, setHistSearch]           = useState("");
+  const [selectedId, setSelectedId]           = useState<string | null>(null);
+  const [activeTab, setActiveTab]             = useState<"note" | "decision">("note");
+  const [activeSection, setActiveSection]     = useState<string>("executive_summary");
+  const [caseDetail, setCaseDetail]           = useState<FullCaseRow | null>(null);
+  const [extracted, setExtracted]             = useState<ExtractedRow[]>([]);
+  const [ratios, setRatios]                   = useState<RatioRow[]>([]);
+  const [detailLoading, setDetailLoading]     = useState(false);
+  const [decisionChoice, setDecisionChoice]   = useState<DecisionChoice>(null);
+  const [decisionNotes, setDecisionNotes]     = useState("");
+  const [saving, setSaving]                   = useState(false);
 
-  // ── pending queue ─────────────────────────────────────────────────────────
-  const [pending, setPending]         = useState<ICCase[]>([]);
-  const [pendingLoading, setPendingLoading] = useState(true);
-
-  // ── history list ──────────────────────────────────────────────────────────
-  const [history, setHistory]         = useState<ICCase[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyLoaded, setHistoryLoaded]   = useState(false);
-  const [histSearch, setHistSearch]         = useState("");
-
-  // ── shared detail state ───────────────────────────────────────────────────
-  const [selectedId, setSelectedId]         = useState<string | null>(null);
-  const [activeTab, setActiveTab]           = useState<"note" | "decision">("note");
-  const [activeSection, setActiveSection]   = useState<string>("executive_summary");
-  const [caseDetail, setCaseDetail]         = useState<FullCaseRow | null>(null);
-  const [extracted, setExtracted]           = useState<ExtractedRow[]>([]);
-  const [ratios, setRatios]                 = useState<RatioRow[]>([]);
-  const [detailLoading, setDetailLoading]   = useState(false);
-
-  // ── decision form (pending only) ──────────────────────────────────────────
-  const [decisionChoice, setDecisionChoice] = useState<DecisionChoice>(null);
-  const [decisionNotes, setDecisionNotes]   = useState("");
-  const [saving, setSaving]                 = useState(false);
-
-  // ── data loaders ──────────────────────────────────────────────────────────
   const loadPending = async () => {
     const { data } = await supabase
       .from("credit_cases")
@@ -125,24 +140,21 @@ export default function ICReview() {
       .channel("ic_review_cases")
       .on("postgres_changes", { event: "*", schema: "public", table: "credit_cases" }, () => {
         loadPending();
-        setHistoryLoaded(false); // invalidate history cache on any change
+        setHistoryLoaded(false);
       })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, []);
 
-  // load history when switching to that tab
   useEffect(() => {
     if (pageView === "history") loadHistory();
   }, [pageView]);
 
-  // fetch full data when selected case changes
   useEffect(() => {
     if (!selectedId) return;
     const allCases = [...pending, ...history];
     const c = allCases.find(x => x.id === selectedId);
     if (!c) return;
-
     setDecisionChoice((c.ic_decision as DecisionChoice) ?? null);
     setDecisionNotes(c.ic_decision_notes ?? "");
     setActiveSection("executive_summary");
@@ -186,373 +198,405 @@ export default function ICReview() {
     if (remaining.length === 0) setPageView("history");
   };
 
-  // ── access denied ──────────────────────────────────────────────────────────
-  if (!IC_ACCESS_ROLES.includes(role ?? "")) {
-    return (
-      <TerminalLayout>
-        <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4">
-          <div className="border border-destructive/40 bg-destructive/5 px-8 py-6 text-center max-w-sm">
-            <div className="text-destructive text-2xl mb-2">⊘</div>
-            <div className="text-destructive font-bold tracking-widest text-sm mb-1">ACCESS DENIED</div>
-            <div className="text-muted-foreground text-xs">Restricted to IC Members, Credit Committee, and Administrators.</div>
-          </div>
-        </div>
-      </TerminalLayout>
-    );
-  }
-
-  // ── section structured content ─────────────────────────────────────────────
+  // ── Section content renderer ────────────────────────────────────────────────
   const renderSectionContent = (sectionId: string) => {
     const md = ic?.sections?.[sectionId]?.markdown ?? "";
-
     if (detailLoading) {
-      return <div className="text-muted-foreground/40 text-xs tracking-widest animate-pulse py-4">LOADING DATA…</div>;
+      return <div className="text-sm text-muted-foreground animate-pulse py-6">Loading section data…</div>;
     }
-
     switch (sectionId) {
       case "executive_summary":
-        return <div className="space-y-3">{caseDetail && <ICSummaryPanel cc={caseDetail} ratios={ratios} />}<BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4">{caseDetail && <ICSummaryPanel cc={caseDetail} ratios={ratios} />}<BulletOnlyMd text={md} /></div>;
       case "client_promoter":
-        return <div className="space-y-3">{caseDetail && <ICClientProfile cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4">{caseDetail && <ICClientProfile cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
       case "investment_structure":
-        return <div className="space-y-3">{caseDetail && <ICInvestmentStructure cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4">{caseDetail && <ICInvestmentStructure cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
       case "rehbar_funding_history":
-        return <div className="space-y-3">{caseDetail && <ICRehbarHistory cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4">{caseDetail && <ICRehbarHistory cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
       case "historical_financial":
-        return <div className="space-y-3"><ICHistoricalTables extracted={extracted} /><BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4"><ICHistoricalTables extracted={extracted} /><BulletOnlyMd text={md} /></div>;
       case "projections":
-        return <div className="space-y-3"><ICProjectionsTable extracted={extracted} /><BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4"><ICProjectionsTable extracted={extracted} /><BulletOnlyMd text={md} /></div>;
       case "key_ratios":
         return <ICRatioTable ratios={ratios} />;
       case "cash_flow":
-        return md
-          ? <BulletOnlyMd text={md} />
-          : <div className="text-muted-foreground/40 text-xs italic">No cash flow narrative. See Historical Analysis (V) for financial tables.</div>;
+        return md ? <BulletOnlyMd text={md} /> : <p className="text-sm text-muted-foreground italic">No cash flow narrative recorded. See Historical Analysis for financial tables.</p>;
       case "due_diligence":
-        return md
-          ? <BulletOnlyMd text={md} />
-          : <div className="text-muted-foreground/40 text-xs italic">No due diligence excerpts recorded by analyst.</div>;
+        return md ? <BulletOnlyMd text={md} /> : <p className="text-sm text-muted-foreground italic">No due diligence notes recorded by the analyst.</p>;
       case "risk_assessment":
-        return md
-          ? <BulletOnlyMd text={md} />
-          : <div className="text-muted-foreground/40 text-xs italic">No risk assessment narrative. See Risk Register entry in the side nav.</div>;
+        return md ? <BulletOnlyMd text={md} /> : <p className="text-sm text-muted-foreground italic">No risk narrative recorded. See the Risk Register section.</p>;
       case "visit_reference":
-        return <div className="space-y-3">{caseDetail && <ICVisitReference cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4">{caseDetail && <ICVisitReference cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
       case "product_specifics":
-        return <div className="space-y-3">{caseDetail && <ICProductSpecifics cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
+        return <div className="space-y-4">{caseDetail && <ICProductSpecifics cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
       default:
-        return md
-          ? <BulletOnlyMd text={md} />
-          : <div className="text-muted-foreground/40 text-xs italic">No content for this section.</div>;
+        return md ? <BulletOnlyMd text={md} /> : <p className="text-sm text-muted-foreground italic">No content recorded for this section.</p>;
     }
   };
 
-  // ── filtered history ───────────────────────────────────────────────────────
   const filteredHistory = history.filter(c =>
     !histSearch ||
     c.client_name.toLowerCase().includes(histSearch.toLowerCase()) ||
     c.case_code.toLowerCase().includes(histSearch.toLowerCase())
   );
 
-  // ── queue list shared renderer ─────────────────────────────────────────────
+  // ── Access denied ────────────────────────────────────────────────────────────
+  if (!IC_ACCESS_ROLES.includes(role ?? "")) {
+    return (
+      <TerminalLayout>
+        <div className="flex flex-col items-center justify-center min-h-[50vh] gap-4">
+          <div className="bg-card rounded-xl border border-red-200 px-10 py-8 text-center max-w-sm" style={{ boxShadow: "var(--shadow-card)" }}>
+            <div className="w-12 h-12 rounded-full bg-red-50 flex items-center justify-center mx-auto mb-4">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+            </div>
+            <h2 className="text-base font-semibold text-foreground mb-2">Access Restricted</h2>
+            <p className="text-sm text-muted-foreground">This portal is restricted to IC Members, Credit Committee members, and Administrators.</p>
+          </div>
+        </div>
+      </TerminalLayout>
+    );
+  }
+
+  // ── Case list renderer ────────────────────────────────────────────────────────
   const renderCaseList = (list: ICCase[], emptyLabel: string) => (
     <div className="flex-1 overflow-y-auto">
-      {list.length === 0
-        ? <div className="px-3 py-6 text-[10px] text-muted-foreground/40 tracking-widest text-center">{emptyLabel}</div>
-        : list.map(c => {
-            const isSelected = c.id === selectedId;
-            const dm = c.ic_decision ? DECISION_META[c.ic_decision as NonNullable<DecisionChoice>] : null;
-            return (
-              <button
-                key={c.id}
-                onClick={() => setSelectedId(c.id)}
-                className={`w-full text-left px-3 py-3 border-b border-border/50 transition-colors ${isSelected ? "bg-primary/10 border-l-2 border-l-primary" : "hover:bg-surface-2"}`}
-              >
-                <div className="flex items-start justify-between gap-1">
-                  <div className="text-[11px] font-bold text-primary truncate leading-tight">{c.client_name}</div>
-                  {dm && (
-                    <span className={`shrink-0 text-[7px] font-bold tracking-widest border px-1 py-px ${dm.badge}`}>
-                      {c.ic_decision === "approved" ? "APPR." : c.ic_decision === "conditionally_approved" ? "COND." : "REJ."}
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5 mt-1">
-                  <span className="text-[9px] text-muted-foreground font-mono">{c.case_code}</span>
-                  <span className="text-[8px] font-bold tracking-widest border border-accent/30 text-accent px-1 py-px">{PRODUCTS[c.product_type]?.short ?? c.product_type}</span>
-                </div>
-                {c.deal_amount && (
-                  <div className="text-[10px] text-success font-bold mt-0.5">₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr</div>
-                )}
-                {isHistory && c.created_at && (
-                  <div className="text-[9px] text-muted-foreground/50 mt-0.5">{new Date(c.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</div>
-                )}
-              </button>
-            );
-          })
-      }
+      {list.length === 0 ? (
+        <div className="px-4 py-8 text-sm text-muted-foreground text-center">{emptyLabel}</div>
+      ) : list.map(c => {
+        const isSelected = c.id === selectedId;
+        const dm = c.ic_decision ? DECISION_META[c.ic_decision as NonNullable<DecisionChoice>] : null;
+        return (
+          <button
+            key={c.id}
+            onClick={() => setSelectedId(c.id)}
+            className={cn(
+              "w-full text-left px-4 py-3.5 border-b border-border/50 transition-colors",
+              isSelected
+                ? "bg-primary/8 border-l-[3px] border-l-primary"
+                : "hover:bg-surface-2 border-l-[3px] border-l-transparent"
+            )}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <p className={cn("text-sm font-semibold leading-snug", isSelected ? "text-primary" : "text-foreground")}>
+                {c.client_name}
+              </p>
+              {dm && (
+                <span className={cn("shrink-0 text-xs font-medium px-2 py-0.5 rounded-full border", dm.badge)}>
+                  {dm.shortLabel}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">{c.case_code}</p>
+            <div className="flex items-center gap-2 mt-1.5">
+              <span className="text-xs text-muted-foreground/70">{PRODUCTS[c.product_type]?.short ?? c.product_type}</span>
+              {c.deal_amount && (
+                <span className="text-xs font-semibold text-green-600">₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr</span>
+              )}
+            </div>
+            {isHistory && c.created_at && (
+              <p className="text-xs text-muted-foreground/50 mt-1">
+                {new Date(c.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+              </p>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 
   return (
     <TerminalLayout>
-      {/* ── Page header ───────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between mb-3 border border-border bg-surface px-4 py-2.5">
+
+      {/* ── Page header ────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between mb-5">
         <div>
-          <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">IC REVIEW PORTAL</div>
-          <div className="text-lg font-bold text-primary glow tracking-wider">INVESTMENT COMMITTEE</div>
+          <h1 className="text-2xl font-bold text-foreground">Investment Committee Review</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">Review and approve credit cases submitted for IC</p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-6">
           <div className="text-right">
-            <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">PENDING</div>
-            <div className="text-2xl font-bold text-warning glow">{pendingLoading ? "…" : pending.length}</div>
+            <p className="text-xs font-medium text-muted-foreground">Pending Review</p>
+            <p className="text-2xl font-bold text-amber-600">{pendingLoading ? "…" : pending.length}</p>
           </div>
           <div className="text-right">
-            <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">DECIDED</div>
-            <div className="text-2xl font-bold text-success glow">{historyLoaded ? history.length : "—"}</div>
+            <p className="text-xs font-medium text-muted-foreground">Decisions Made</p>
+            <p className="text-2xl font-bold text-green-600">{historyLoaded ? history.length : "—"}</p>
           </div>
         </div>
       </div>
 
-      {/* ── Page-level tabs: PENDING / HISTORY ───────────────────────────── */}
-      <div className="flex border-b border-border mb-3">
+      {/* ── Page tabs ────────────────────────────────────────────────────────── */}
+      <div className="flex gap-1 border-b border-border mb-5">
         {(["pending", "history"] as const).map(v => (
           <button
             key={v}
             onClick={() => {
               setPageView(v);
-              // auto-select first case in the new list
               const list = v === "pending" ? pending : history;
-              if (list.length > 0) setSelectedId(list[0].id);
-              else setSelectedId(null);
+              setSelectedId(list.length > 0 ? list[0].id : null);
             }}
-            className={`px-5 py-2 text-[10px] font-bold tracking-widest border-b-2 transition-colors ${
+            className={cn(
+              "px-5 py-3 text-sm font-medium border-b-2 transition-colors",
               pageView === v
                 ? "border-primary text-primary"
-                : "border-transparent text-muted-foreground hover:text-primary"
-            }`}
+                : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+            )}
           >
             {v === "pending"
-              ? `PENDING REVIEW${!pendingLoading ? ` (${pending.length})` : ""}`
-              : `IC HISTORY${historyLoaded ? ` (${history.length})` : ""}`
-            }
+              ? `Pending Review${!pendingLoading ? ` (${pending.length})` : ""}`
+              : `Decision History${historyLoaded ? ` (${history.length})` : ""}`}
           </button>
         ))}
       </div>
 
       {pendingLoading && pageView === "pending" ? (
-        <div className="p-12 text-center text-muted-foreground text-xs tracking-widest">LOADING IC QUEUE…</div>
+        <div className="flex items-center justify-center py-16 text-sm text-muted-foreground animate-pulse">
+          Loading IC queue…
+        </div>
       ) : pageView === "pending" && pending.length === 0 ? (
-        /* ── empty pending state ── */
         <div className="flex flex-col items-center justify-center min-h-[40vh] gap-4">
-          <div className="text-success text-4xl">✓</div>
-          <div className="text-muted-foreground text-xs tracking-widest">NO CASES PENDING IC REVIEW</div>
+          <div className="w-14 h-14 rounded-full bg-green-50 flex items-center justify-center">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </div>
+          <div className="text-center">
+            <p className="text-base font-semibold text-foreground">All caught up!</p>
+            <p className="text-sm text-muted-foreground mt-1">No cases are currently pending IC review.</p>
+          </div>
           <button
             onClick={() => { setPageView("history"); loadHistory(); }}
-            className="mt-2 px-5 py-2 text-[10px] font-bold tracking-widest border border-primary/40 text-primary hover:bg-primary/10 transition-colors"
+            className="mt-2 px-5 py-2.5 text-sm font-medium rounded-lg border border-border text-muted-foreground hover:border-primary hover:text-primary transition-colors"
           >
-            VIEW IC HISTORY →
+            View Decision History →
           </button>
         </div>
       ) : (
-        <div className="flex border border-border bg-surface" style={{ minHeight: "calc(100vh - 260px)" }}>
+        <div className="flex rounded-xl border border-border bg-card overflow-hidden" style={{ minHeight: "calc(100vh - 300px)", boxShadow: "var(--shadow-panel)" }}>
 
-          {/* ── Left: Case list ─────────────────────────────────────────── */}
-          <div className="border-r border-border flex flex-col" style={{ width: "240px", minWidth: "240px" }}>
-            <div className="px-3 py-2 border-b border-border bg-surface-2 flex items-center justify-between">
-              <span className="text-[9px] tracking-widest text-primary font-bold">
-                {pageView === "pending" ? "QUEUE" : "HISTORY"}
+          {/* ── Left: Case queue ────────────────────────────────────────── */}
+          <div className="border-r border-border flex flex-col shrink-0" style={{ width: "260px" }}>
+            <div className="px-4 py-3 border-b border-border bg-surface-2/50 flex items-center justify-between">
+              <span className="text-xs font-semibold text-foreground">
+                {pageView === "pending" ? "Review Queue" : "History"}
               </span>
-              <span className="text-[9px] text-muted-foreground/50">
-                {pageView === "pending" ? pending.length : filteredHistory.length} CASE{(pageView === "pending" ? pending.length : filteredHistory.length) !== 1 ? "S" : ""}
+              <span className="text-xs text-muted-foreground">
+                {pageView === "pending" ? pending.length : filteredHistory.length} case{(pageView === "pending" ? pending.length : filteredHistory.length) !== 1 ? "s" : ""}
               </span>
             </div>
 
-            {/* history search */}
             {pageView === "history" && (
-              <div className="px-2 py-1.5 border-b border-border">
-                <input
-                  type="text"
-                  value={histSearch}
-                  onChange={e => setHistSearch(e.target.value)}
-                  placeholder="Search client / code…"
-                  className="w-full bg-input border border-border px-2 py-1 text-[10px] text-primary focus:outline-none focus:border-primary/60 placeholder:text-muted-foreground/30"
-                />
+              <div className="px-3 py-2.5 border-b border-border">
+                <div className="relative">
+                  <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  </svg>
+                  <input
+                    type="text"
+                    value={histSearch}
+                    onChange={e => setHistSearch(e.target.value)}
+                    placeholder="Search cases…"
+                    className="w-full bg-background border border-border rounded-lg pl-8 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                  />
+                </div>
               </div>
             )}
 
             {pageView === "pending"
-              ? renderCaseList(pending, "NO PENDING CASES")
+              ? renderCaseList(pending, "No pending cases")
               : historyLoading
-                ? <div className="px-3 py-6 text-[10px] text-muted-foreground/40 tracking-widest text-center animate-pulse">LOADING HISTORY…</div>
-                : renderCaseList(filteredHistory, "NO HISTORY FOUND")
-            }
+                ? <div className="px-4 py-8 text-sm text-muted-foreground text-center animate-pulse">Loading history…</div>
+                : renderCaseList(filteredHistory, "No history found")}
           </div>
 
-          {/* ── Right: Detail panel ──────────────────────────────────────── */}
+          {/* ── Right: Case detail ────────────────────────────────────────── */}
           <div className="flex-1 min-w-0 flex flex-col">
             {selectedCase ? (
               <>
                 {/* Case header */}
-                <div className="border-b border-border px-5 py-3 bg-surface-2">
+                <div className="border-b border-border px-6 py-4 bg-surface-2/30">
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-lg font-bold text-primary leading-tight">{selectedCase.client_name}</div>
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <h2 className="text-lg font-bold text-foreground">{selectedCase.client_name}</h2>
                         {isHistory && selectedCase.ic_decision && (() => {
-                          const hm = HIST_DECISION_LABEL[selectedCase.ic_decision] ?? { short: selectedCase.ic_decision.toUpperCase(), cls: "text-muted-foreground border-border" };
+                          const hd = HIST_DECISION[selectedCase.ic_decision] ?? { label: selectedCase.ic_decision, cls: "bg-slate-50 text-slate-600 border-slate-200" };
                           return (
-                            <span className={`text-[9px] font-bold tracking-widest border px-2 py-0.5 ${hm.cls}`}>{hm.short}</span>
+                            <span className={cn("text-xs font-medium px-2.5 py-1 rounded-full border", hd.cls)}>{hd.label}</span>
                           );
                         })()}
                       </div>
-                      <div className="flex items-center gap-2 mt-1 flex-wrap">
-                        <span className="text-[10px] text-muted-foreground font-mono">{selectedCase.case_code}</span>
-                        <span className="text-[9px] font-bold border border-accent/30 text-accent px-1.5 py-px">{PRODUCTS[selectedCase.product_type]?.label ?? selectedCase.product_type}</span>
+                      <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                        <span className="text-sm text-muted-foreground font-mono">{selectedCase.case_code}</span>
+                        <span className="text-xs font-medium px-2 py-0.5 rounded bg-primary/10 text-primary">
+                          {PRODUCTS[selectedCase.product_type]?.label ?? selectedCase.product_type}
+                        </span>
                         {selectedCase.deal_amount && (
-                          <span className="text-success font-bold text-sm">₹{Number(selectedCase.deal_amount).toLocaleString("en-IN")} Cr</span>
+                          <span className="text-sm font-semibold text-green-600">₹{Number(selectedCase.deal_amount).toLocaleString("en-IN")} Cr</span>
                         )}
-                        <span className="text-[9px] text-muted-foreground/50">{new Date(selectedCase.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(selectedCase.created_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+                        </span>
                       </div>
                     </div>
+
                     {!isHistory && selectedCase.ic_decision && (
-                      <div className={`shrink-0 text-[10px] font-bold tracking-widest border px-3 py-1.5 ${
-                        selectedCase.ic_decision === "approved" ? "bg-success/10 text-success border-success/40" :
-                        selectedCase.ic_decision === "conditionally_approved" ? "bg-warning/10 text-warning border-warning/40" :
-                        "bg-destructive/10 text-destructive border-destructive/40"
-                      }`}>
-                        ◉ DECISION RECORDED
+                      <div className={cn("shrink-0 flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg border", DECISION_META[selectedCase.ic_decision as NonNullable<DecisionChoice>]?.badge)}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                        Decision Recorded
                       </div>
                     )}
                   </div>
 
                   {/* Inner tabs */}
-                  <div className="flex gap-0 mt-3 -mb-3">
+                  <div className="flex gap-1 mt-4 -mb-4">
                     {(["note", "decision"] as const).map(t => (
                       <button
                         key={t}
                         onClick={() => setActiveTab(t)}
-                        className={`px-4 py-1.5 text-[10px] tracking-widest font-bold border-t border-x border-border transition-colors ${
+                        className={cn(
+                          "px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors",
                           activeTab === t
-                            ? "bg-surface text-primary border-b border-b-surface"
-                            : "text-muted-foreground hover:text-primary bg-surface-2"
-                        }`}
+                            ? "border-primary text-primary bg-card"
+                            : "border-transparent text-muted-foreground hover:text-foreground"
+                        )}
                       >
-                        {t === "note" ? "IC NOTE" : isHistory ? "DECISION RECORD" : "DECISION"}
+                        {t === "note" ? "IC Note" : isHistory ? "Decision Record" : "Make Decision"}
                       </button>
                     ))}
                   </div>
                 </div>
 
-                {/* Inner tab content */}
+                {/* Tab content */}
                 <div className="flex-1 overflow-y-auto">
 
                   {/* IC NOTE tab */}
                   {activeTab === "note" && (
                     <div className="flex h-full">
                       {/* Section nav */}
-                      <div className="border-r border-border bg-surface-2 overflow-y-auto shrink-0" style={{ width: "160px" }}>
+                      <div className="border-r border-border bg-surface-2/30 overflow-y-auto shrink-0" style={{ width: "200px" }}>
                         {IC_SECTIONS.map(sec => (
                           <button
                             key={sec.id}
                             onClick={() => setActiveSection(sec.id)}
-                            className={`w-full text-left px-3 py-2.5 border-b border-border/40 transition-colors ${
-                              activeSection === sec.id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-primary hover:bg-surface"
-                            }`}
+                            className={cn(
+                              "w-full text-left px-4 py-3 border-b border-border/40 transition-colors",
+                              activeSection === sec.id
+                                ? "bg-primary/8 border-l-[3px] border-l-primary text-primary"
+                                : "border-l-[3px] border-l-transparent text-muted-foreground hover:text-foreground hover:bg-surface-2"
+                            )}
                           >
-                            <div className="text-[10px] font-bold tracking-widest">{sec.roman}</div>
-                            <div className="text-[8px] tracking-wide leading-tight mt-0.5 opacity-80">{sec.title}</div>
+                            <div className="text-[10px] font-semibold text-muted-foreground/60 mb-0.5">{sec.roman}</div>
+                            <div className="text-xs font-medium leading-snug">{sec.title}</div>
                           </button>
                         ))}
+
                         {ic?.risks && ic.risks.length > 0 && (
                           <button
                             onClick={() => setActiveSection("_risks")}
-                            className={`w-full text-left px-3 py-2.5 border-b border-border/40 transition-colors ${activeSection === "_risks" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-primary hover:bg-surface"}`}
+                            className={cn("w-full text-left px-4 py-3 border-b border-border/40 transition-colors border-l-[3px]",
+                              activeSection === "_risks" ? "bg-primary/8 border-l-primary text-primary" : "border-l-transparent text-muted-foreground hover:text-foreground hover:bg-surface-2"
+                            )}
                           >
-                            <div className="text-[10px] font-bold tracking-widest">RISKS</div>
-                            <div className="text-[8px] tracking-wide leading-tight mt-0.5 opacity-80">Risk Register</div>
+                            <div className="text-xs font-medium">Risk Register</div>
+                            <div className="text-[10px] text-muted-foreground/60 mt-0.5">{ic.risks.length} risks</div>
                           </button>
                         )}
+
                         {ic?.conditions_precedent && ic.conditions_precedent.length > 0 && (
                           <button
                             onClick={() => setActiveSection("_conditions")}
-                            className={`w-full text-left px-3 py-2.5 border-b border-border/40 transition-colors ${activeSection === "_conditions" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-primary hover:bg-surface"}`}
+                            className={cn("w-full text-left px-4 py-3 border-b border-border/40 transition-colors border-l-[3px]",
+                              activeSection === "_conditions" ? "bg-primary/8 border-l-primary text-primary" : "border-l-transparent text-muted-foreground hover:text-foreground hover:bg-surface-2"
+                            )}
                           >
-                            <div className="text-[10px] font-bold tracking-widest">CONDITIONS</div>
-                            <div className="text-[8px] tracking-wide leading-tight mt-0.5 opacity-80">Precedent</div>
+                            <div className="text-xs font-medium">Conditions Precedent</div>
+                            <div className="text-[10px] text-muted-foreground/60 mt-0.5">{ic.conditions_precedent.length} conditions</div>
                           </button>
                         )}
+
                         {ic?.swot && (
                           <button
                             onClick={() => setActiveSection("_swot")}
-                            className={`w-full text-left px-3 py-2.5 border-b border-border/40 transition-colors ${activeSection === "_swot" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-primary hover:bg-surface"}`}
+                            className={cn("w-full text-left px-4 py-3 border-b border-border/40 transition-colors border-l-[3px]",
+                              activeSection === "_swot" ? "bg-primary/8 border-l-primary text-primary" : "border-l-transparent text-muted-foreground hover:text-foreground hover:bg-surface-2"
+                            )}
                           >
-                            <div className="text-[10px] font-bold tracking-widest">SWOT</div>
-                            <div className="text-[8px] tracking-wide leading-tight mt-0.5 opacity-80">Analysis</div>
+                            <div className="text-xs font-medium">SWOT Analysis</div>
                           </button>
                         )}
                       </div>
 
                       {/* Section content */}
-                      <div className="flex-1 min-w-0 p-5 overflow-y-auto">
+                      <div className="flex-1 min-w-0 p-6 overflow-y-auto">
                         {activeSection === "_risks" ? (
                           <div>
-                            <div className="text-[10px] tracking-widest font-bold text-primary mb-4 border-b border-border pb-2">RISK REGISTER</div>
-                            <table className="w-full text-xs border-collapse">
-                              <thead>
-                                <tr className="border-b border-border">
-                                  {["CATEGORY","RISK","MITIGANT","SEVERITY"].map(h => (
-                                    <th key={h} className="text-left px-2 py-1.5 text-[9px] tracking-widest text-muted-foreground font-bold">{h}</th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {ic!.risks!.map((r, i) => (
-                                  <tr key={i} className="border-b border-border/40 hover:bg-surface-2">
-                                    <td className="px-2 py-2 text-[10px] text-muted-foreground">{r.category}</td>
-                                    <td className="px-2 py-2 text-[10px]">{r.risk}</td>
-                                    <td className="px-2 py-2 text-[10px] text-muted-foreground">{r.mitigant}</td>
-                                    <td className="px-2 py-2">
-                                      <span className={`text-[9px] font-bold tracking-widest border px-1.5 py-0.5 uppercase ${SEVERITY_COLOR[r.severity?.toLowerCase()] ?? "text-muted-foreground border-border"}`}>
-                                        {r.severity}
-                                      </span>
-                                    </td>
+                            <h3 className="text-base font-semibold text-foreground mb-4">Risk Register</h3>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-sm border-collapse">
+                                <thead>
+                                  <tr className="border-b border-border bg-surface-2/40">
+                                    {["Category", "Risk", "Mitigant", "Severity"].map(h => (
+                                      <th key={h} className="text-left py-3 px-4 text-xs font-medium text-muted-foreground">{h}</th>
+                                    ))}
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
+                                </thead>
+                                <tbody>
+                                  {ic!.risks!.map((r, i) => (
+                                    <tr key={i} className="border-b border-border/40 hover:bg-surface-2/40">
+                                      <td className="py-3 px-4 text-sm text-muted-foreground whitespace-nowrap">{r.category}</td>
+                                      <td className="py-3 px-4 text-sm">{r.risk}</td>
+                                      <td className="py-3 px-4 text-sm text-muted-foreground">{r.mitigant}</td>
+                                      <td className="py-3 px-4">
+                                        <span className={cn("text-xs font-medium px-2.5 py-1 rounded-full border capitalize", SEVERITY_STYLE[r.severity?.toLowerCase()] ?? "bg-slate-50 text-slate-600 border-slate-200")}>
+                                          {r.severity}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
                           </div>
                         ) : activeSection === "_conditions" ? (
                           <div>
-                            <div className="text-[10px] tracking-widest font-bold text-primary mb-4 border-b border-border pb-2">CONDITIONS PRECEDENT</div>
-                            <ol className="space-y-2">
+                            <h3 className="text-base font-semibold text-foreground mb-4">Conditions Precedent</h3>
+                            <ol className="space-y-3">
                               {ic!.conditions_precedent!.map((cond, i) => (
-                                <li key={i} className="flex gap-3 text-xs">
-                                  <span className="shrink-0 text-[9px] font-bold text-muted-foreground/50 tabular-nums mt-0.5">{String(i + 1).padStart(2, "0")}.</span>
-                                  <span className="text-foreground/80 leading-relaxed">{cond}</span>
+                                <li key={i} className="flex gap-4">
+                                  <span className="shrink-0 w-7 h-7 rounded-full bg-primary/10 text-primary text-sm font-semibold flex items-center justify-center">
+                                    {i + 1}
+                                  </span>
+                                  <p className="text-sm text-foreground/80 leading-relaxed pt-0.5">{cond}</p>
                                 </li>
                               ))}
                             </ol>
                           </div>
                         ) : activeSection === "_swot" ? (
                           <div>
-                            <div className="text-[10px] tracking-widest font-bold text-primary mb-4 border-b border-border pb-2">SWOT ANALYSIS</div>
-                            <div className="grid grid-cols-2 gap-3">
+                            <h3 className="text-base font-semibold text-foreground mb-4">SWOT Analysis</h3>
+                            <div className="grid grid-cols-2 gap-4">
                               {([
-                                ["STRENGTHS",    ic?.swot?.strengths,    "text-success",     "border-success/30 bg-success/5"],
-                                ["WEAKNESSES",   ic?.swot?.weaknesses,   "text-destructive", "border-destructive/30 bg-destructive/5"],
-                                ["OPPORTUNITIES",ic?.swot?.opportunities,"text-accent",      "border-accent/30 bg-accent/5"],
-                                ["THREATS",      ic?.swot?.threats,      "text-warning",     "border-warning/30 bg-warning/5"],
+                                ["Strengths",     ic?.swot?.strengths,     "text-green-700", "bg-green-50 border-green-200"],
+                                ["Weaknesses",    ic?.swot?.weaknesses,    "text-red-700",   "bg-red-50 border-red-200"    ],
+                                ["Opportunities", ic?.swot?.opportunities, "text-blue-700",  "bg-blue-50 border-blue-200"  ],
+                                ["Threats",       ic?.swot?.threats,       "text-amber-700", "bg-amber-50 border-amber-200"],
                               ] as [string, string[] | undefined, string, string][]).map(([label, items, cls, boxCls]) => (
-                                <div key={label} className={`border p-3 ${boxCls}`}>
-                                  <div className={`text-[9px] font-bold tracking-widest mb-2 ${cls}`}>{label}</div>
-                                  <div className="space-y-1">
+                                <div key={label} className={cn("rounded-lg border p-4", boxCls)}>
+                                  <h4 className={cn("text-sm font-semibold mb-3", cls)}>{label}</h4>
+                                  <ul className="space-y-2">
                                     {(items ?? []).map((item, i) => (
-                                      <div key={i} className="flex gap-1.5 text-xs">
-                                        <span className={`shrink-0 font-bold ${cls}`}>▸</span>
-                                        <span className="text-foreground/80">{item}</span>
-                                      </div>
+                                      <li key={i} className="flex gap-2.5 text-sm">
+                                        <span className={cn("shrink-0 font-bold mt-0.5", cls)}>·</span>
+                                        <span className="text-foreground/80 leading-snug">{item}</span>
+                                      </li>
                                     ))}
-                                  </div>
+                                  </ul>
                                 </div>
                               ))}
                             </div>
@@ -561,9 +605,9 @@ export default function ICReview() {
                           const sec = IC_SECTIONS.find(s => s.id === activeSection);
                           return (
                             <div>
-                              <div className="flex items-baseline gap-3 mb-4 border-b border-border pb-2">
-                                <span className="text-primary text-lg font-bold">{sec?.roman}.</span>
-                                <span className="text-[10px] tracking-widest font-bold text-primary">{sec?.title}</span>
+                              <div className="flex items-baseline gap-2 mb-5 pb-3 border-b border-border">
+                                <span className="text-sm font-semibold text-muted-foreground">{sec?.roman}.</span>
+                                <h3 className="text-base font-semibold text-foreground">{sec?.title}</h3>
                               </div>
                               {renderSectionContent(activeSection)}
                             </div>
@@ -577,106 +621,122 @@ export default function ICReview() {
                   {activeTab === "decision" && (
                     <div className="p-6 max-w-2xl">
                       {isHistory ? (
-                        /* read-only decision record for history */
-                        <div className="space-y-4">
-                          {selectedCase.ic_decision ? (
-                            <>
-                              <div className={`border px-5 py-4 text-center ${
-                                selectedCase.ic_decision === "approved" ? "bg-success/5 border-success/40" :
-                                selectedCase.ic_decision === "conditionally_approved" ? "bg-warning/5 border-warning/40" :
-                                selectedCase.ic_decision === "declined" ? "bg-destructive/5 border-destructive/40" :
-                                "bg-muted/10 border-border"
-                              }`}>
-                                <div className={`text-xl font-bold tracking-widest ${
-                                  selectedCase.ic_decision === "approved" ? "text-success" :
-                                  selectedCase.ic_decision === "conditionally_approved" ? "text-warning" :
-                                  selectedCase.ic_decision === "declined" ? "text-destructive" : "text-muted-foreground"
-                                }`}>
-                                  {selectedCase.ic_decision === "approved" ? "APPROVED"
-                                    : selectedCase.ic_decision === "conditionally_approved" ? "CONDITIONALLY APPROVED"
-                                    : selectedCase.ic_decision === "declined" ? "DECLINED"
-                                    : selectedCase.ic_decision.replace(/_/g," ").toUpperCase()}
+                        <div className="space-y-5">
+                          {selectedCase.ic_decision ? (() => {
+                            const dm = DECISION_META[selectedCase.ic_decision as NonNullable<DecisionChoice>];
+                            return (
+                              <>
+                                <div className={cn("rounded-xl border px-6 py-5 text-center", dm.badge)}>
+                                  <p className="text-2xl font-bold mb-1">{dm.shortLabel}</p>
+                                  <p className="text-sm text-muted-foreground">{selectedCase.client_name} · {PRODUCTS[selectedCase.product_type]?.label}</p>
                                 </div>
-                                <div className="text-[10px] text-muted-foreground mt-1">{selectedCase.client_name} · {PRODUCTS[selectedCase.product_type]?.label}</div>
-                              </div>
-                              {selectedCase.ic_decision_notes && (
-                                <div>
-                                  <div className="text-[9px] tracking-widest text-muted-foreground mb-2">DECISION NOTES</div>
-                                  <div className="border border-border bg-input/30 px-3 py-3 text-xs font-mono text-foreground/80 whitespace-pre-wrap leading-relaxed">
-                                    {selectedCase.ic_decision_notes}
+                                {selectedCase.ic_decision_notes && (
+                                  <div>
+                                    <h3 className="text-sm font-semibold text-foreground mb-2">Decision Notes</h3>
+                                    <div className="bg-surface-2 rounded-lg border border-border px-4 py-3 text-sm text-foreground/80 whitespace-pre-wrap leading-relaxed">
+                                      {selectedCase.ic_decision_notes}
+                                    </div>
                                   </div>
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <div className="text-muted-foreground/40 text-xs tracking-widest">No decision recorded for this case.</div>
+                                )}
+                              </>
+                            );
+                          })() : (
+                            <p className="text-sm text-muted-foreground italic">No decision recorded for this case.</p>
                           )}
                         </div>
                       ) : (
-                        /* active decision form for pending */
-                        <>
+                        <div className="space-y-6">
+                          <div>
+                            <h3 className="text-base font-semibold text-foreground mb-1">Make Your Decision</h3>
+                            <p className="text-sm text-muted-foreground">Select a decision and provide your rationale or conditions below.</p>
+                          </div>
+
                           {selectedCase.ic_decision && (
-                            <div className="mb-5 border border-warning/40 bg-warning/5 px-4 py-3 text-[10px] tracking-widest text-warning font-bold">
-                              ⚠ DECISION ALREADY RECORDED — YOU MAY UPDATE IT BELOW
+                            <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200">
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                                <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+                              </svg>
+                              <p className="text-sm text-amber-800 font-medium">A decision has already been recorded — you may update it below.</p>
                             </div>
                           )}
-                          <div className="mb-5">
-                            <div className="text-[9px] tracking-widest text-muted-foreground mb-3">SELECT DECISION</div>
-                            <div className="flex gap-2 flex-wrap">
+
+                          {/* Decision buttons */}
+                          <div>
+                            <p className="text-sm font-medium text-foreground mb-3">Select your decision:</p>
+                            <div className="flex flex-col sm:flex-row gap-3">
                               {(["approved", "conditionally_approved", "declined"] as const).map(d => {
-                                const meta = DECISION_META[d];
+                                const meta     = DECISION_META[d];
                                 const isActive = decisionChoice === d;
                                 return (
                                   <button
                                     key={d}
                                     onClick={() => setDecisionChoice(d)}
-                                    className={`px-4 py-2 text-[10px] font-bold tracking-widest border transition-colors ${isActive ? meta.activeClass : `border-border ${meta.color} hover:border-current`}`}
+                                    className={cn(
+                                      "flex-1 py-4 px-4 rounded-xl border-2 text-sm font-semibold transition-all",
+                                      isActive ? meta.activeClass : cn("bg-card border-2", meta.borderColor)
+                                    )}
                                   >
-                                    {isActive ? "◉ " : "○ "}{meta.label}
+                                    <div className="text-lg font-bold mb-0.5">{meta.icon}</div>
+                                    <div>{meta.label}</div>
                                   </button>
                                 );
                               })}
                             </div>
                           </div>
-                          <div className="mb-5">
-                            <div className="text-[9px] tracking-widest text-muted-foreground mb-2">DECISION NOTES / CONDITIONS</div>
+
+                          {/* Notes */}
+                          <div>
+                            <label className="block text-sm font-medium text-foreground mb-2">
+                              Decision Notes / Conditions
+                              <span className="text-muted-foreground font-normal ml-1">(optional)</span>
+                            </label>
                             <textarea
                               value={decisionNotes}
                               onChange={e => setDecisionNotes(e.target.value)}
-                              placeholder="Enter decision rationale, conditions, or queries for the analyst…"
-                              rows={8}
-                              className="w-full bg-input border border-border px-3 py-2 text-xs font-mono text-primary focus:outline-none focus:border-primary/60 placeholder:text-muted-foreground/30 resize-y"
+                              placeholder="Enter your decision rationale, conditions to be met, or queries for the analyst team…"
+                              rows={7}
+                              className="w-full bg-background border border-border rounded-lg px-4 py-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary placeholder:text-muted-foreground/50 resize-y"
                             />
                           </div>
+
                           <button
                             onClick={saveDecision}
                             disabled={!decisionChoice || saving}
-                            className={`px-6 py-2.5 text-[10px] font-bold tracking-widest border transition-colors ${
-                              !decisionChoice ? "border-border text-muted-foreground/30 cursor-not-allowed"
-                              : saving ? "border-primary/40 text-primary/50 cursor-wait"
-                              : "border-primary text-primary hover:bg-primary hover:text-primary-foreground"
-                            }`}
+                            className={cn(
+                              "w-full py-4 rounded-xl text-base font-semibold transition-all",
+                              !decisionChoice
+                                ? "bg-surface-2 text-muted-foreground cursor-not-allowed border-2 border-border"
+                                : saving
+                                ? "bg-primary/70 text-white cursor-wait"
+                                : "bg-primary text-white hover:bg-primary/90 shadow-md hover:shadow-lg"
+                            )}
                           >
-                            {saving ? "SAVING…" : "SAVE DECISION"}
+                            {saving ? "Saving decision…" : "Save Decision"}
                           </button>
-                          {!decisionChoice && <p className="mt-2 text-[9px] text-muted-foreground/40">Select a decision above to enable save.</p>}
-                        </>
+
+                          {!decisionChoice && (
+                            <p className="text-sm text-muted-foreground text-center">Please select a decision above to continue.</p>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}
                 </div>
               </>
             ) : (
-              <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted-foreground/40 text-xs tracking-widest">
-                {pageView === "history" && historyLoading
-                  ? <span className="animate-pulse">LOADING HISTORY…</span>
-                  : <span>SELECT A CASE FROM THE {pageView === "pending" ? "QUEUE" : "LIST"}</span>
-                }
+              <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted-foreground">
+                {pageView === "history" && historyLoading ? (
+                  <span className="text-sm animate-pulse">Loading history…</span>
+                ) : (
+                  <span className="text-sm">Select a case from the {pageView === "pending" ? "queue" : "list"} on the left</span>
+                )}
               </div>
             )}
           </div>
         </div>
       )}
+
     </TerminalLayout>
   );
 }

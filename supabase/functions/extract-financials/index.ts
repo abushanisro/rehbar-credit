@@ -6,6 +6,8 @@
  */
 
 import { createClient }           from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { encodeBase64 }          from "https://deno.land/std@0.224.0/encoding/base64.ts";
+import { getDocumentProxy, extractText } from "npm:unpdf@0.11.0";
 import { callAI, callAIText, type FileContent } from "../_shared/ai-caller.ts";
 import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
@@ -14,7 +16,24 @@ type StatementType = "profit_loss" | "balance_sheet" | "cash_flow" | "projection
 const STANDARD_LINE_ITEMS: Record<StatementType, string[]> = {
   profit_loss:   ["Turnover","Cost of Goods Sold","Gross Profit","Operating Expenses","EBITDA","Depreciation","EBIT","Interest Expense","Profit Before Tax","Tax","PAT"],
   balance_sheet: ["Share Capital","Reserves & Surplus","Net Worth","Long Term Borrowings","Short Term Borrowings","Total Debt","Trade Payables","Other Current Liabilities","Current Liabilities","Total Liabilities","Fixed Assets (Net)","Inventory","Trade Receivables","Cash & Bank","Other Current Assets","Current Assets","Total Assets","Capital Employed"],
-  cash_flow:     ["Cash from Operations","Cash from Investing","Cash from Financing","Net Change in Cash","Opening Cash","Closing Cash"],
+  cash_flow: [
+    // Operating section
+    "Net Profit Before Tax","Depreciation & Amortisation","Profit/Loss on Asset Sale",
+    "Profit/Loss on Investments","Interest/Investment Income","Interest Expense",
+    "Operating Profit Before WC Changes",
+    "Change in Trade Payables","Change in Short-term Borrowings","Change in Provisions",
+    "Change in Other Current Liabilities","Change in ST Loans & Advances",
+    "Change in Other Current Assets","Change in Trade Receivables","Change in Inventories",
+    "Cash from Operations","Taxes Paid","Net Cash from Operations",
+    // Investing section
+    "Purchase of Fixed Assets","Change in LT Loans & Advances","Change in Non-Current Investments",
+    "Change in Fixed Deposits","Proceeds from Equity","Dividends/Interest Received",
+    "Cash from Investing",
+    // Financing section
+    "Interest Paid","Funds Borrowed","Dividend Paid","Cash from Financing",
+    // Summary
+    "Net Change in Cash","Opening Cash","Closing Cash",
+  ],
   projections:   ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt"],
 };
 
@@ -35,13 +54,24 @@ async function downloadAsFile(
   const { data: file, error } = await supabase.storage.from("case-files").download(filePath);
   if (error || !file) throw new Error("File download failed: " + error?.message);
   const bytes = new Uint8Array(await file.arrayBuffer());
-  let b64 = "";
-  for (let i = 0; i < bytes.length; i += 0x8000)
-    b64 += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
-  const base64 = btoa(b64);
-  return fileType === "image"
-    ? { type: "image", base64, mime: imageMime(fileName) }
-    : { type: "pdf",   base64 };
+
+  if (fileType === "image") {
+    return { type: "image", base64: encodeBase64(bytes), mime: imageMime(fileName) };
+  }
+
+  // PDFs: try text extraction first (handles XFA and standard PDFs without needing base64 vision)
+  try {
+    const pdfDoc = await getDocumentProxy(bytes);
+    const { text } = await extractText(pdfDoc, { mergePages: true });
+    if (text && text.trim().length > 200) {
+      return { type: "text", text: `FINANCIAL DOCUMENT (PDF):\n\n${text.slice(0, 150_000)}` };
+    }
+  } catch (e) {
+    console.warn("unpdf extraction failed, falling back to base64 vision:", e);
+  }
+
+  // Fallback for scanned/image-only PDFs — send as vision document
+  return { type: "pdf", base64: encodeBase64(bytes) };
 }
 
 Deno.serve(async (req) => {
@@ -83,6 +113,25 @@ Deno.serve(async (req) => {
     if (!doc) return new Response(JSON.stringify({ error: "Document not found" }), {
       status: 404, headers: { ...cors, "Content-Type": "application/json" },
     });
+
+    // ── Python worker job queue (PDF/image only, not Excel, not unit_only) ──────
+    const pythonEnabled = Deno.env.get("PYTHON_SERVICE_ENABLED") === "true";
+    if (pythonEnabled && doc.file_type !== "excel" && !unit_only) {
+      const isAllInOne   = statement_type === "all_in_one";
+      const targetTypes: StatementType[] = isAllInOne
+        ? ["profit_loss", "balance_sheet", "cash_flow", "projections"]
+        : [statement_type as StatementType];
+      await supabase.from("extraction_jobs").insert({
+        case_id, document_id, user_id: user.id,
+        job_type: "financials",
+        payload: { statement_types: targetTypes, fiscal_year_hint: fiscal_year ?? null },
+      });
+      await supabase.from("financial_documents")
+        .update({ extraction_status: "queued" }).eq("id", document_id);
+      return new Response(JSON.stringify({ ok: true, status: "queued" }), {
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
 
     // Build file content — Excel arrives as pre-parsed text, PDF/image downloaded from storage
     const files: FileContent[] = doc.file_type === "excel"

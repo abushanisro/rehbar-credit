@@ -10,3 +10,5 @@ AI-assisted credit appraisal and IC note platform for Rehbar Financial Services.
 - Claude Sonnet 4.6 (all AI — document extraction, metadata analysis, narrative generation)
 - Tailwind CSS (terminal theme)
 # rehbar-credit
+
+if the point to be this the most unwanted and most of the is abushan you will be te

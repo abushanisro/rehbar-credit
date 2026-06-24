@@ -276,7 +276,11 @@ Deno.serve(async (req) => {
       await admin.from("user_roles").delete().eq("user_id", userId);
       await admin.from("user_roles").insert({ user_id: userId, role });
 
-      // Upsert display name into user_profiles if provided
+      // Upsert into both profile tables so Team page shows name + email immediately
+      await admin.from("profiles").upsert(
+        { id: userId, email, full_name: name || null },
+        { onConflict: "id" }
+      );
       if (name) {
         await admin.from("user_profiles").upsert({ id: userId, full_name: name }, { onConflict: "id" });
       }

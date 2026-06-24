@@ -15,9 +15,10 @@ const MODEL             = "claude-haiku-4-5-20251001";
 // ── File content types ────────────────────────────────────────────────────────
 
 export type FileContent =
-  | { type: "pdf";   base64: string }
-  | { type: "image"; base64: string; mime: string }
-  | { type: "text";  text: string };
+  | { type: "pdf";     base64: string }
+  | { type: "pdf_url"; url: string }
+  | { type: "image";   base64: string; mime: string }
+  | { type: "text";    text: string };
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -41,6 +42,11 @@ function buildMessages(
       content.push({
         type:   "document",
         source: { type: "base64", media_type: "application/pdf", data: f.base64 },
+      });
+    } else if (f.type === "pdf_url") {
+      content.push({
+        type:   "document",
+        source: { type: "url", url: f.url },
       });
     } else if (f.type === "image") {
       content.push({
@@ -66,6 +72,7 @@ export interface CallAIOptions {
   maxTokens?:      number;
   retries?:        number;
   timeoutMs?:      number;
+  model?:          string;
 }
 
 export async function callAI(opts: CallAIOptions): Promise<Record<string, unknown>> {
@@ -73,6 +80,7 @@ export async function callAI(opts: CallAIOptions): Promise<Record<string, unknow
     systemPrompt, userText, files = [],
     toolName, toolDescription, toolSchema, toolRequired = [],
     maxTokens = 8192, retries = 2, timeoutMs = 110_000,
+    model: modelOverride,
   } = opts;
 
   const key      = getKey();
@@ -91,7 +99,7 @@ export async function callAI(opts: CallAIOptions): Promise<Record<string, unknow
           "Content-Type":      "application/json",
         },
         body: JSON.stringify({
-          model:      MODEL,
+          model:      modelOverride ?? MODEL,
           max_tokens: maxTokens,
           system:     systemPrompt,
           messages,

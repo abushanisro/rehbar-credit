@@ -322,6 +322,9 @@ Deno.serve(async (req) => {
 
     const { case_id, page_name = "Unknown", current_path = "/", messages = [], auto_check = false } = body;
 
+    // Create admin client early — needed by both auto_check and normal chat paths
+    const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+
     // ── Auto-check mode: scan case data, return single-sentence alert or null ──
     if (auto_check && case_id) {
       const systemPrompt = await buildCaseSystemPrompt(sb, case_id, "background_check");
@@ -350,7 +353,6 @@ Deno.serve(async (req) => {
       status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
 
-    const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const userClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY")!,

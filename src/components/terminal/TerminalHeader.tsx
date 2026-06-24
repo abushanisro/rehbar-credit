@@ -5,41 +5,40 @@ import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 
 const fmtClock = (d: Date) =>
-  d.toLocaleTimeString("en-US", { hour12: false }) + " IST";
+  d.toLocaleTimeString("en-IN", { hour12: true, hour: "2-digit", minute: "2-digit" });
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── helpers ────────────────────────────────────────────────────────────────────
 function calcCountdown(dueDateStr: string): { text: string; urgent: boolean } {
-  const due = new Date(dueDateStr + "T00:00:00");
-  const now  = new Date();
+  const due    = new Date(dueDateStr + "T00:00:00");
+  const now    = new Date();
   const diffMs = due.getTime() - now.getTime();
-  if (diffMs <= 0) return { text: "OVERDUE", urgent: true };
+  if (diffMs <= 0) return { text: "Overdue", urgent: true };
   const days  = Math.floor(diffMs / 86_400_000);
   const hours = Math.floor((diffMs % 86_400_000) / 3_600_000);
   const mins  = Math.floor((diffMs % 3_600_000) / 60_000);
   const secs  = Math.floor((diffMs % 60_000) / 1_000);
-  if (days > 1)  return { text: `${days}d ${hours}h`, urgent: false };
-  if (days === 1) return { text: `1d ${hours}h ${mins}m`, urgent: true };
-  if (hours > 0)  return { text: `${hours}h ${mins}m ${secs}s`, urgent: true };
-  return { text: `${mins}m ${secs}s`, urgent: true };
+  if (days > 1)   return { text: `${days}d ${hours}h`,       urgent: false };
+  if (days === 1) return { text: `1d ${hours}h ${mins}m`,    urgent: true  };
+  if (hours > 0)  return { text: `${hours}h ${mins}m`,       urgent: true  };
+  return             { text: `${mins}m ${secs}s`,            urgent: true  };
 }
 
-// ── types ─────────────────────────────────────────────────────────────────────
+// ── types ──────────────────────────────────────────────────────────────────────
 type Notif = {
   id: string; case_id: string; case_code: string; client_name: string;
   emi_number: number; due_date: string; emi_amount: number;
   kind: "overdue" | "due_today" | "due_soon";
 };
 
-// ── NotificationBell ──────────────────────────────────────────────────────────
+// ── NotificationBell ───────────────────────────────────────────────────────────
 function NotificationBell({ userId }: { userId: string }) {
-  const [notifs, setNotifs]     = useState<Notif[]>([]);
-  const [open, setOpen]         = useState(false);
-  const [loading, setLoading]   = useState(false);
-  const [tick, setTick]         = useState(0);          // drives countdown re-render
-  const panelRef                = useRef<HTMLDivElement>(null);
-  const navigate                = useNavigate();
+  const [notifs, setNotifs]   = useState<Notif[]>([]);
+  const [open, setOpen]       = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [tick, setTick]       = useState(0);
+  const panelRef              = useRef<HTMLDivElement>(null);
+  const navigate              = useNavigate();
 
-  // countdown ticker — every second
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 1000);
     return () => clearInterval(t);
@@ -64,37 +63,32 @@ function NotificationBell({ userId }: { userId: string }) {
         credit_cases: { case_code: string; client_name: string } | null;
       }) => ({
         id: r.id, case_id: r.case_id,
-        case_code: r.credit_cases?.case_code ?? r.case_id.slice(0, 8),
+        case_code:   r.credit_cases?.case_code   ?? r.case_id.slice(0, 8),
         client_name: r.credit_cases?.client_name ?? "Unknown",
-        emi_number: r.emi_number, due_date: r.due_date, emi_amount: r.emi_amount,
+        emi_number:  r.emi_number,
+        due_date:    r.due_date,
+        emi_amount:  r.emi_amount,
         kind: r.due_date < today ? "overdue" : r.due_date === today ? "due_today" : "due_soon",
       })));
     }
     setLoading(false);
   }, [userId, today, in7Days]);
 
-  // initial fetch
   useEffect(() => { fetchNotifs(); }, [fetchNotifs]);
-
-  // polling fallback every 5 min
   useEffect(() => {
     const t = setInterval(fetchNotifs, 5 * 60_000);
     return () => clearInterval(t);
   }, [fetchNotifs]);
 
-  // ── REAL-TIME subscription ──────────────────────────────────────────────────
   useEffect(() => {
     const channel = supabase
       .channel(`emi-bell-${userId}`)
-      .on("postgres_changes", {
-        event: "*", schema: "public", table: "emi_payments",
-        filter: `user_id=eq.${userId}`,
-      }, () => { fetchNotifs(); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "emi_payments", filter: `user_id=eq.${userId}` },
+        () => { fetchNotifs(); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [userId, fetchNotifs]);
 
-  // close on outside click
   useEffect(() => {
     const h = (e: MouseEvent) => {
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) setOpen(false);
@@ -103,170 +97,178 @@ function NotificationBell({ userId }: { userId: string }) {
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
-  const overdueCount  = notifs.filter(n => n.kind === "overdue").length;
-  const todayCount    = notifs.filter(n => n.kind === "due_today").length;
-  const soonCount     = notifs.filter(n => n.kind === "due_soon").length;
-  const urgentCount   = overdueCount + todayCount;
-  const total         = notifs.length;
+  const overdueCount = notifs.filter(n => n.kind === "overdue").length;
+  const todayCount   = notifs.filter(n => n.kind === "due_today").length;
+  const soonCount    = notifs.filter(n => n.kind === "due_soon").length;
+  const urgentCount  = overdueCount + todayCount;
+  const total        = notifs.length;
 
-  // nearest upcoming (not overdue) for countdown
   const nextPending = notifs.find(n => n.kind !== "overdue");
   const countdown   = nextPending ? calcCountdown(nextPending.due_date) : null;
-  // force re-compute every tick
   void tick;
 
-  const fmtAmt = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  const fmtAmt = (v: number) =>
+    "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 }) + " Cr";
 
-  const kindStyle = {
-    overdue:   { label: "OVERDUE",   badge: "bg-destructive text-white",       row: "border-destructive/20 bg-destructive/5",   tag: "border-destructive/40 text-destructive bg-destructive/10" },
-    due_today: { label: "DUE TODAY", badge: "bg-warning text-black",           row: "border-warning/20 bg-warning/5",           tag: "border-warning/40 text-warning bg-warning/10" },
-    due_soon:  { label: "DUE SOON",  badge: "bg-accent/80 text-accent-foreground", row: "border-border/30",                     tag: "border-accent/40 text-accent bg-accent/10" },
+  const kindLabel = { overdue: "Overdue", due_today: "Due Today", due_soon: "Due Soon" };
+  const kindStyles = {
+    overdue:   { badge: "bg-red-100 text-red-700",   row: "bg-red-50/50 border-l-2 border-red-400",   chip: "bg-red-100 text-red-700"   },
+    due_today: { badge: "bg-amber-100 text-amber-700", row: "bg-amber-50/50 border-l-2 border-amber-400", chip: "bg-amber-100 text-amber-700" },
+    due_soon:  { badge: "bg-blue-100 text-blue-700",  row: "",                                          chip: "bg-blue-100 text-blue-700"  },
   };
 
   return (
-    <div ref={panelRef} className="relative flex items-center gap-2">
-
-      {/* ── countdown chip next to bell ─────────────────────────────────── */}
-      {countdown && (
-        <div className={cn(
-          "hidden sm:flex items-center gap-1 text-[9px] font-bold tracking-widest px-1.5 py-0.5 border",
-          countdown.urgent
-            ? "border-destructive/50 text-destructive bg-destructive/10 animate-pulse"
-            : "border-accent/40 text-accent bg-accent/10"
-        )}>
-          <span>⏱</span>
-          <span>{countdown.text}</span>
-        </div>
-      )}
-
-      {/* ── bell button ─────────────────────────────────────────────────── */}
+    <div ref={panelRef} className="relative">
       <button
         onClick={() => { setOpen(o => !o); if (!open) fetchNotifs(); }}
-        className="relative flex items-center justify-center w-7 h-7 hover:bg-surface-2 border border-transparent hover:border-border transition-colors"
-        title={total > 0 ? `${total} EMI notification${total !== 1 ? "s" : ""}` : "No notifications"}
+        className="relative flex items-center justify-center w-9 h-9 rounded-lg hover:bg-surface-2 transition-colors"
+        title={total > 0 ? `${total} payment reminder${total !== 1 ? "s" : ""}` : "No reminders"}
       >
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-          stroke={urgentCount > 0 ? "#ef4444" : total > 0 ? "#f59e0b" : "currentColor"}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+          stroke={urgentCount > 0 ? "#dc2626" : total > 0 ? "#d97706" : "currentColor"}
           strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-          className={urgentCount > 0 ? "animate-[wiggle_1s_ease-in-out_infinite]" : ""}
         >
           <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
           <path d="M13.73 21a2 2 0 0 1-3.46 0" />
         </svg>
-
-        {/* badge */}
         {total > 0 && (
           <span className={cn(
-            "absolute -top-1.5 -right-1.5 min-w-[16px] h-[16px] text-[8px] font-bold flex items-center justify-center px-0.5 rounded-sm leading-none",
-            urgentCount > 0 ? "bg-destructive text-white" : "bg-warning text-black"
+            "absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] text-[10px] font-bold flex items-center justify-center px-1 rounded-full leading-none",
+            urgentCount > 0 ? "bg-red-600 text-white" : "bg-amber-500 text-white"
           )}>
             {total > 99 ? "99+" : total}
           </span>
         )}
       </button>
 
-      {/* ── dropdown ────────────────────────────────────────────────────── */}
       {open && (
-        <div className="absolute right-0 top-10 bg-surface border border-border shadow-2xl z-50 flex flex-col"
-          style={{ width: "min(340px, calc(100vw - 1rem))", maxHeight: "80vh" }}>
+        <div className="absolute right-0 top-11 bg-card border border-border rounded-xl shadow-xl z-50 flex flex-col overflow-hidden"
+          style={{ width: "min(360px, calc(100vw - 1.5rem))", maxHeight: "80vh" }}>
 
-          {/* header */}
-          <div className="border-b border-border bg-card px-3 py-2 space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold tracking-widest text-primary">NOTIFICATIONS</span>
+          {/* Header */}
+          <div className="px-4 py-3 border-b border-border bg-surface-2/60">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-foreground">Payment Reminders</h3>
               <div className="flex gap-1.5">
-                {overdueCount > 0 && <span className="text-[9px] font-bold px-1.5 py-0.5 bg-destructive text-white">{overdueCount} OVERDUE</span>}
-                {todayCount > 0   && <span className="text-[9px] font-bold px-1.5 py-0.5 bg-warning text-black">{todayCount} TODAY</span>}
-                {soonCount > 0    && <span className="text-[9px] font-bold px-1.5 py-0.5 border border-accent/40 text-accent">{soonCount} SOON</span>}
+                {overdueCount > 0 && (
+                  <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                    {overdueCount} overdue
+                  </span>
+                )}
+                {todayCount > 0 && (
+                  <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                    {todayCount} today
+                  </span>
+                )}
+                {soonCount > 0 && (
+                  <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                    {soonCount} upcoming
+                  </span>
+                )}
               </div>
             </div>
 
-            {/* next-due countdown bar */}
             {nextPending && (() => {
               const cd = calcCountdown(nextPending.due_date);
               return (
                 <div className={cn(
-                  "flex items-center justify-between border px-2 py-1.5",
-                  cd.urgent ? "border-destructive/40 bg-destructive/5" : "border-accent/30 bg-accent/5"
+                  "flex items-center justify-between rounded-lg px-3 py-2.5",
+                  cd.urgent ? "bg-red-50 border border-red-200" : "bg-blue-50 border border-blue-200"
                 )}>
                   <div>
-                    <div className="text-[8px] tracking-widest text-muted-foreground">NEXT DUE · {nextPending.client_name}</div>
-                    <div className="text-[10px] font-bold text-primary mt-0.5">EMI #{nextPending.emi_number} · ₹{fmtAmt(nextPending.emi_amount)} Cr</div>
-                    <div className="text-[9px] text-muted-foreground">{nextPending.due_date}</div>
+                    <p className="text-xs text-muted-foreground">Next due · {nextPending.client_name}</p>
+                    <p className="text-sm font-semibold text-foreground mt-0.5">
+                      EMI #{nextPending.emi_number} · {fmtAmt(nextPending.emi_amount)}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{nextPending.due_date}</p>
                   </div>
                   <div className="text-right">
-                    <div className="text-[8px] tracking-widest text-muted-foreground mb-0.5">COUNTDOWN</div>
-                    <div className={cn(
-                      "text-[18px] font-bold tabular-nums leading-none font-mono",
-                      cd.urgent ? "text-destructive" : "text-accent"
-                    )}>{cd.text}</div>
+                    <p className="text-xs text-muted-foreground mb-0.5">Countdown</p>
+                    <p className={cn("text-lg font-bold font-mono tabular-nums", cd.urgent ? "text-red-600" : "text-blue-600")}>
+                      {cd.text}
+                    </p>
                   </div>
                 </div>
               );
             })()}
 
-            {/* stats row */}
             {total > 0 && (
-              <div className="grid grid-cols-3 gap-1 text-center">
-                <div className="border border-destructive/20 bg-destructive/5 py-1">
-                  <div className="text-[14px] font-bold text-destructive">{overdueCount}</div>
-                  <div className="text-[8px] text-destructive/70 tracking-wider">OVERDUE</div>
+              <div className="grid grid-cols-3 gap-2 mt-2">
+                <div className="rounded-lg bg-red-50 border border-red-100 py-2 text-center">
+                  <p className="text-lg font-bold text-red-600">{overdueCount}</p>
+                  <p className="text-xs text-red-500">Overdue</p>
                 </div>
-                <div className="border border-warning/20 bg-warning/5 py-1">
-                  <div className="text-[14px] font-bold text-warning">{todayCount}</div>
-                  <div className="text-[8px] text-warning/70 tracking-wider">DUE TODAY</div>
+                <div className="rounded-lg bg-amber-50 border border-amber-100 py-2 text-center">
+                  <p className="text-lg font-bold text-amber-600">{todayCount}</p>
+                  <p className="text-xs text-amber-500">Due Today</p>
                 </div>
-                <div className="border border-accent/20 bg-accent/5 py-1">
-                  <div className="text-[14px] font-bold text-accent">{soonCount}</div>
-                  <div className="text-[8px] text-accent/70 tracking-wider">DUE SOON</div>
+                <div className="rounded-lg bg-blue-50 border border-blue-100 py-2 text-center">
+                  <p className="text-lg font-bold text-blue-600">{soonCount}</p>
+                  <p className="text-xs text-blue-500">Upcoming</p>
                 </div>
               </div>
             )}
           </div>
 
-          {/* list */}
+          {/* List */}
           <div className="overflow-y-auto flex-1">
             {loading && (
-              <div className="px-3 py-6 text-[10px] text-muted-foreground text-center tracking-widest animate-pulse">SYNCING…</div>
+              <div className="px-4 py-8 text-sm text-muted-foreground text-center animate-pulse">
+                Loading reminders…
+              </div>
             )}
             {!loading && total === 0 && (
-              <div className="px-3 py-8 text-center space-y-2">
-                <div className="text-success text-2xl">✓</div>
-                <div className="text-[10px] text-muted-foreground tracking-wider">All EMIs on track — no overdue or upcoming payments</div>
+              <div className="px-4 py-10 text-center">
+                <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-3">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                </div>
+                <p className="text-sm font-medium text-foreground">All payments on track</p>
+                <p className="text-xs text-muted-foreground mt-1">No overdue or upcoming EMIs in the next 7 days</p>
               </div>
             )}
             {!loading && notifs.map(n => {
-              const s = kindStyle[n.kind];
+              const s  = kindStyles[n.kind];
               const cd = calcCountdown(n.due_date);
               return (
                 <button
                   key={n.id}
                   onClick={() => { navigate(`/case/${n.case_id}`); setOpen(false); }}
-                  className={cn("w-full text-left border-b border-border/30 px-3 py-2 hover:bg-surface-2 transition-colors", s.row)}
+                  className={cn(
+                    "w-full text-left px-4 py-3 hover:bg-surface-2 transition-colors border-b border-border/50",
+                    s.row
+                  )}
                 >
-                  <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="text-[10px] font-bold text-primary truncate">{n.client_name}</div>
-                      <div className="text-[9px] text-muted-foreground">{n.case_code} · EMI #{n.emi_number}</div>
+                      <p className="text-sm font-medium text-foreground truncate">{n.client_name}</p>
+                      <p className="text-xs text-muted-foreground">{n.case_code} · EMI #{n.emi_number}</p>
                     </div>
                     <div className="flex flex-col items-end gap-1 shrink-0">
-                      <span className={cn("text-[8px] font-bold tracking-widest border px-1.5 py-0.5", s.tag)}>{s.label}</span>
-                      <span className={cn("text-[9px] font-bold font-mono tabular-nums", cd.urgent ? "text-destructive" : "text-accent")}>{cd.text}</span>
+                      <span className={cn("text-xs font-medium px-2 py-0.5 rounded-full", s.chip)}>
+                        {kindLabel[n.kind]}
+                      </span>
+                      <span className={cn("text-xs font-mono font-bold", cd.urgent ? "text-red-600" : "text-blue-600")}>
+                        {cd.text}
+                      </span>
                     </div>
                   </div>
-                  <div className="mt-1 flex items-center justify-between">
-                    <span className="text-[9px] text-muted-foreground">Due: {n.due_date}</span>
-                    <span className="text-[10px] font-bold text-primary tabular-nums">₹{fmtAmt(n.emi_amount)} Cr</span>
+                  <div className="mt-1.5 flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">Due: {n.due_date}</span>
+                    <span className="text-sm font-semibold text-foreground">{fmtAmt(n.emi_amount)}</span>
                   </div>
                 </button>
               );
             })}
           </div>
 
-          {/* footer */}
-          <div className="border-t border-border px-3 py-1.5 flex items-center justify-between">
-            <span className="text-[9px] text-muted-foreground tracking-wider">REAL-TIME · UPDATES LIVE</span>
-            <button onClick={fetchNotifs} className="text-[9px] text-accent hover:underline tracking-wider">REFRESH</button>
+          {/* Footer */}
+          <div className="border-t border-border px-4 py-2.5 flex items-center justify-between bg-surface-2/40">
+            <span className="text-xs text-muted-foreground">Updates in real-time</span>
+            <button onClick={fetchNotifs} className="text-xs text-primary hover:underline font-medium">
+              Refresh
+            </button>
           </div>
         </div>
       )}
@@ -274,86 +276,44 @@ function NotificationBell({ userId }: { userId: string }) {
   );
 }
 
-// ── AI Token Usage meter (fed by CustomEvent from anywhere in the app) ────────
+// ── AI token tracking — runs silently in background ────────────────────────────
 type TokenPayload =
   | { status: "loading"; label: string; max_tokens: number }
   | { status: "complete"; label: string; input_tokens: number; output_tokens: number; max_tokens: number; model: string };
 
-interface TokenState {
-  status: "idle" | "loading" | "complete";
-  label: string;
-  input_tokens: number;
-  output_tokens: number;   // live-estimated during loading, actual on complete
-  max_tokens: number;
-  model: string;
-  sessionTotal: number;
-}
-
 function useAiTokenUsage() {
-  const [state, setState] = useState<TokenState>({
-    status: "idle", label: "", input_tokens: 0, output_tokens: 0, max_tokens: 2500, model: "claude-sonnet-4-6", sessionTotal: 0,
-  });
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   useEffect(() => {
-    const handler = (e: Event) => {
-      const d = (e as CustomEvent<TokenPayload>).detail;
-
-      if (d.status === "loading") {
-        // Start animated estimate: Claude Sonnet ~35 output tokens/sec
-        if (tickRef.current) clearInterval(tickRef.current);
-        setState(prev => ({ ...prev, status: "loading", label: d.label, max_tokens: d.max_tokens, output_tokens: 0, input_tokens: 0 }));
-        tickRef.current = setInterval(() => {
-          setState(prev => ({
-            ...prev,
-            output_tokens: Math.min(prev.output_tokens + 35, prev.max_tokens - 10),
-          }));
-        }, 1000);
-      } else {
-        // Complete — snap to real values
-        if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
-        setState(prev => ({
-          status: "complete",
-          label: d.label,
-          input_tokens: d.input_tokens,
-          output_tokens: d.output_tokens,
-          max_tokens: d.max_tokens,
-          model: d.model,
-          sessionTotal: prev.sessionTotal + d.input_tokens + d.output_tokens,
-        }));
-      }
-    };
+    const handler = (e: Event) => { void (e as CustomEvent<TokenPayload>).detail; };
     window.addEventListener("ai-token-usage", handler);
-    return () => { window.removeEventListener("ai-token-usage", handler); if (tickRef.current) clearInterval(tickRef.current); };
+    return () => window.removeEventListener("ai-token-usage", handler);
   }, []);
-
-  return state;
 }
 
-// ── TerminalHeader ────────────────────────────────────────────────────────────
+// ── AppHeader ──────────────────────────────────────────────────────────────────
 export const TerminalHeader = () => {
-  const [now, setNow]   = useState(new Date());
+  const [now, setNow] = useState(new Date());
   const { user, role, signOut } = useAuth();
-  const loc             = useLocation();
-  const navigate        = useNavigate();
-  const tokenState      = useAiTokenUsage();
+  const loc      = useLocation();
+  const navigate = useNavigate();
+  useAiTokenUsage();
 
-  const [isLight, setIsLight] = useState(() => localStorage.getItem("rehbar-theme") === "light");
+  // Default to light mode — toggle dark class
+  const [isDark, setIsDark] = useState(() => localStorage.getItem("rehbar-theme") === "dark");
 
   useEffect(() => {
-    // Briefly add a class so all panels/cards also transition on switch,
-    // then remove it so hover effects stay instant.
     document.documentElement.classList.add("theme-switching");
-    if (isLight) {
-      document.documentElement.classList.add("light");
-      localStorage.setItem("rehbar-theme", "light");
-    } else {
+    if (isDark) {
+      document.documentElement.classList.add("dark");
       document.documentElement.classList.remove("light");
       localStorage.setItem("rehbar-theme", "dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+      document.documentElement.classList.remove("light");
+      localStorage.setItem("rehbar-theme", "light");
     }
     const t = setTimeout(() => document.documentElement.classList.remove("theme-switching"), 250);
     return () => clearTimeout(t);
-  }, [isLight]);
+  }, [isDark]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -367,114 +327,78 @@ export const TerminalHeader = () => {
       if (e.key === "F3") { e.preventDefault(); navigate("/companies"); }
       if (e.key === "F4") { e.preventDefault(); window.dispatchEvent(new CustomEvent("toggle-analyst-chat")); }
       if (e.key === "F5") { e.preventDefault(); navigate("/users"); }
-
+      if (e.key === "F6") { e.preventDefault(); navigate("/observability"); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [navigate]);
 
-  const navItem = (to: string, label: string, code: string) => {
-    const active = loc.pathname === to || (to.length > 1 && loc.pathname.startsWith(to));
-    return (
-      <Link to={to} className={cn(
-        "px-3 py-1 text-xs tracking-widest border-r border-border transition-colors",
-        active ? "bg-primary text-primary-foreground" : "text-primary/80 hover:bg-surface-2"
-      )}>
-        <span className={cn("mr-2 text-[9px] font-bold border px-0.5", active ? "border-primary-foreground/40 text-primary-foreground/70" : "border-border text-muted-foreground")}>{code}</span>{label}
-      </Link>
-    );
+  const isActive = (to: string) =>
+    to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(to);
+
+  const navLink = (to: string, label: string) => (
+    <Link
+      to={to}
+      className={cn(
+        "px-3 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap",
+        isActive(to)
+          ? "bg-primary/10 text-primary"
+          : "text-muted-foreground hover:text-foreground hover:bg-surface-2"
+      )}
+    >
+      {label}
+    </Link>
+  );
+
+  const roleLabel: Record<string, string> = {
+    admin: "Admin", analyst: "Analyst", business_development: "BD",
+    ic_member: "IC Member", credit_committee: "Credit Committee", operations: "Operations",
   };
+
+  const isICOnly = ["ic_member", "credit_committee"].includes(role ?? "");
 
   return (
     <>
-      <div className="border-b border-border bg-surface text-[11px] flex items-center justify-between px-3 h-9">
-        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
-          <img src="/Rehbar_logo.png" alt="Rehbar" className="h-6 w-auto object-contain shrink-0" />
-          <span className="text-primary font-bold tracking-widest glow hidden xs:block truncate">REHBAR//CAS</span>
-          <span className="text-primary font-bold tracking-widest glow hidden lg:block">· CREDIT TERMINAL</span>
-          <span className="text-muted-foreground hidden sm:block">v1.0.0</span>
-          <span className="text-success ticker-blink hidden sm:block">● LIVE</span>
-          <span className="text-muted-foreground hidden md:block">AI ENGINE</span>
+      {/* ── Main header ───────────────────────────────────────────────────── */}
+      <header className="h-14 border-b border-border bg-card flex items-center gap-4 px-4 lg:px-6">
 
-          {/* ── AI Token Meter — always visible ─────────────────────── */}
-          {(() => {
-            const { status, label, input_tokens, output_tokens, max_tokens, model, sessionTotal } = tokenState;
-            const outPct    = Math.min(100, Math.round((output_tokens / max_tokens) * 100));
-            const pctColor  = outPct >= 85 ? "text-destructive" : outPct >= 60 ? "text-warning" : "text-success";
-            const barFill   = outPct >= 85 ? "bg-destructive" : outPct >= 60 ? "bg-warning" : "bg-success";
-            const isLoading = status === "loading";
-            return (
-              <div className="hidden sm:flex items-center gap-3 border-l border-border/50 pl-3">
-                <div className="flex flex-col gap-1 min-w-[160px]">
-                  {/* top: counts */}
-                  {status !== "idle" && (
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[9px] text-muted-foreground/60 tracking-widest font-medium">{label.toUpperCase()}</span>
-                        {isLoading && <span className="text-warning text-[9px] animate-pulse font-bold">▸</span>}
-                      </div>
-                      <div className="flex items-center gap-1.5 text-[9px] tabular-nums">
-                        <span className="text-muted-foreground/50">IN</span>
-                        <span className="text-foreground/70 font-medium">{input_tokens > 0 ? input_tokens.toLocaleString("en-IN") : "—"}</span>
-                        <span className="text-border">·</span>
-                        <span className="text-muted-foreground/50">OUT</span>
-                        <span className={`font-bold ${isLoading ? "text-warning animate-pulse" : "text-foreground/90"}`}>
-                          {output_tokens.toLocaleString("en-IN")}
-                        </span>
-                        <span className="text-muted-foreground/40">/ {max_tokens.toLocaleString("en-IN")}</span>
-                      </div>
-                    </div>
-                  )}
-                  {/* bar */}
-                  <div className="relative w-full h-[6px] bg-border/40 rounded-sm overflow-hidden">
-                    {status !== "idle" && (
-                      <div
-                        className={`h-full rounded-sm transition-all duration-700 ${isLoading ? "bg-warning" : barFill}`}
-                        style={{
-                          width: `${outPct}%`,
-                          boxShadow: isLoading ? "0 0 6px hsl(var(--warning))" : undefined,
-                        }}
-                      />
-                    )}
-                  </div>
-                  {/* bottom: pct + session + model */}
-                  <div className="flex items-center justify-between text-[8px]">
-                    <span className={`font-bold tabular-nums ${status === "idle" ? "text-muted-foreground/30" : isLoading ? "text-warning/80" : pctColor}`}>
-                      {status === "idle" ? "0%" : `${outPct}%`}
-                    </span>
-                    <div className="flex items-center gap-2 text-muted-foreground/35">
-                      {sessionTotal > 0 && (
-                        <span className="tabular-nums hidden md:inline">{(sessionTotal / 1000).toFixed(1)}k session</span>
-                      )}
-                      {model && status === "complete" && (
-                        <span className="hidden lg:inline truncate max-w-[90px]">{model}</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-        </div>
-        <div className="flex items-center gap-2 sm:gap-3 text-muted-foreground shrink-0">
-          <span className="hidden md:block">{user?.email}</span>
-          {role && (
-            <span className="hidden md:block text-[9px] font-bold tracking-widest border border-primary/40 text-primary bg-primary/10 px-1.5 py-0.5">
-              {role === "admin" ? "ADMIN" : role === "analyst" ? "ANALYST" : role === "business_development" ? "BD" : role === "ic_member" ? "IC" : role === "credit_committee" ? "CC" : role.toUpperCase()}
-            </span>
+        {/* Logo */}
+        <Link to="/" className="flex items-center gap-2.5 shrink-0 mr-2">
+          <img src="/Rehbar_logo.png" alt="Rehbar" className="h-8 w-auto object-contain" />
+          <span className="font-semibold text-foreground hidden sm:block text-sm">Rehbar CAS</span>
+        </Link>
+
+        {/* Navigation */}
+        <nav className="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto">
+          {isICOnly ? (
+            navLink("/ic", "IC Review")
+          ) : (
+            <>
+              {navLink("/", "Pipeline")}
+              {navLink("/new", "New Case")}
+              {navLink("/companies", "Companies")}
+              {navLink("/users", "Team")}
+              {navLink("/observability", "System")}
+              {role === "admin" && navLink("/ic", "IC Portal")}
+            </>
           )}
-          <span className="text-primary hidden sm:block">{fmtClock(now)}</span>
+        </nav>
+
+        {/* Right side */}
+        <div className="flex items-center gap-1 shrink-0">
+          {/* Clock */}
+          <span className="hidden lg:block text-sm text-muted-foreground mr-2 tabular-nums">
+            {fmtClock(now)}
+          </span>
+
+          {/* Theme toggle */}
           <button
-            onClick={() => setIsLight(l => !l)}
-            className="flex items-center justify-center w-7 h-7 hover:bg-surface-2 border border-transparent hover:border-border transition-colors"
-            title={isLight ? "Switch to dark mode" : "Switch to light mode"}
+            onClick={() => setIsDark(d => !d)}
+            className="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-surface-2 transition-colors text-muted-foreground hover:text-foreground"
+            title={isDark ? "Switch to light mode" : "Switch to dark mode"}
           >
-            {isLight ? (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
-            ) : (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            {isDark ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="5" />
                 <line x1="12" y1="1" x2="12" y2="3" />
                 <line x1="12" y1="21" x2="12" y2="23" />
@@ -485,36 +409,46 @@ export const TerminalHeader = () => {
                 <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
                 <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
               </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
             )}
           </button>
+
+          {/* Notification bell */}
           {user && <NotificationBell userId={user.id} />}
-          <button
-            onClick={async () => { await signOut(); navigate("/auth"); }}
-            className="text-destructive hover:underline"
-          >[LOGOUT]</button>
+
+          {/* User info + logout */}
+          <div className="flex items-center gap-2 ml-1 pl-2 border-l border-border">
+            {role && (
+              <span className="hidden md:block text-xs font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                {roleLabel[role] ?? role}
+              </span>
+            )}
+            <span className="hidden lg:block text-sm text-muted-foreground truncate max-w-[180px]">
+              {user?.email}
+            </span>
+            <button
+              onClick={async () => { await signOut(); navigate("/auth"); }}
+              className="h-9 px-3 text-sm font-medium text-muted-foreground hover:text-destructive hover:bg-red-50 rounded-lg transition-colors"
+            >
+              Sign out
+            </button>
+          </div>
         </div>
-      </div>
-      <nav className="border-b border-border bg-card flex items-center h-9">
-        {["ic_member", "credit_committee"].includes(role ?? "") ? (
-          // IC-only nav — no access to the rest of the app
-          navItem("/ic", "IC REVIEW PORTAL", "IC")
-        ) : (
-          <>
-            {navItem("/", "PIPELINE", "F1")}
-            {navItem("/new", "NEW CASE", "F2")}
-            {navItem("/companies", "MASTER DATA", "F3")}
-            {navItem("/users", "TEAM", "F5")}
-            {role === "admin" && navItem("/ic", "IC PORTAL", "IC")}
-          </>
-        )}
-        <div className="flex-1" />
-        <div className="px-3 text-[11px] text-muted-foreground tracking-widest hidden md:block">
-          REHBAR FINANCIAL SERVICES · IC APPRAISAL <span className="text-primary">_</span>
-          <span className="ticker-blink text-primary">█</span>
-        </div>
-      </nav>
-      <div className="border-b border-border bg-surface-2 h-6 overflow-hidden flex items-center px-3 text-[10px] tracking-widest">
-        <span className="text-warning truncate">⚠ AI-GENERATED DRAFTS REQUIRE ANALYST REVIEW · NO AUTO CREDIT VERDICTS · DSCR FORMULA IS FINANCE-LOCKED</span>
+      </header>
+
+      {/* ── Compliance notice ─────────────────────────────────────────────── */}
+      <div className="border-b border-amber-200 bg-amber-50 px-4 lg:px-6 py-1.5 flex items-center gap-2">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+        <span className="text-xs text-amber-800">
+          AI-generated analysis must be reviewed by a qualified analyst before any credit decision is made.
+        </span>
       </div>
     </>
   );

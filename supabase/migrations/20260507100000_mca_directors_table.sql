@@ -54,3 +54,6 @@ CREATE POLICY "Read directors"   ON company_directors FOR SELECT TO authenticate
 CREATE POLICY "Insert directors" ON company_directors FOR INSERT TO authenticated WITH CHECK (true);
 CREATE POLICY "Update directors" ON company_directors FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "Delete directors" ON company_directors FOR DELETE TO authenticated USING (true);
+
+
+

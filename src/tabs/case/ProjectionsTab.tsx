@@ -18,8 +18,9 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip as RTooltip,
   ResponsiveContainer, ReferenceLine, Legend,
 } from "recharts";
-import type { ExtractedRow, CaseRow, LineItem } from "@/features/case/types";
+import type { ExtractedRow, CaseRow, LineItem, DocRow } from "@/features/case/types";
 import { unitAbbr, fmtUnit } from "@/features/case/utils";
+import { UploadGrid } from "@/components/case/UploadGrid";
 
 // ─── Recharts tooltip style ───────────────────────────────────────────────────
 const TT: React.CSSProperties = {
@@ -502,10 +503,11 @@ export function ProjectionsTab({
   progress,
   progressLabel,
   onGenerateNote,
-  projComment = "",
-  onSaveComment,
   onUpload,
   onDirectImport,
+  docs = [],
+  onDelete,
+  onRetry,
 }: {
   extracted: ExtractedRow[];
   cc: CaseRow;
@@ -513,10 +515,11 @@ export function ProjectionsTab({
   progress: number;
   progressLabel: string;
   onGenerateNote: () => void;
-  projComment?: string;
-  onSaveComment?: (text: string) => Promise<void>;
   onUpload?: (file: File, fiscalYear: number | null) => Promise<void>;
   onDirectImport?: (data: { fiscal_year: number; line_items: LineItem[]; unit: string }[]) => Promise<void>;
+  docs?: DocRow[];
+  onDelete?: (doc: DocRow) => void;
+  onRetry?: (doc: DocRow) => void;
 }) {
   const projRows = extracted.filter(r => r.statement_type === "projections");
   const histPL   = extracted.filter(r => r.statement_type === "profit_loss");
@@ -537,24 +540,79 @@ export function ProjectionsTab({
 
   const model = useMemo(() => buildModel(histPL, histBS, nForward), [histPL, histBS, nForward]);
 
-  const [comment, setComment]       = useState(projComment);
-  const [saving,  setSaving]        = useState(false);
-  const [saved,   setSaved]         = useState(false);
-  const [importBusy, setImportBusy] = useState(false);
-  const [directBusy, setDirectBusy] = useState(false);
-  const importFileRef      = useRef<HTMLInputElement>(null);
-  const directImportFileRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { setComment(projComment); }, [projComment]);
+  const hasFullDetail = projRows.some(r =>
+    (r.line_items as unknown as LineItem[]).some(li => li.label === "Revenue")
+  );
+  const [projDetailTab, setProjDetailTab] = useState<"pl" | "bs" | "cf">("pl");
 
-  const handleSave = async () => {
-    if (!onSaveComment) return;
-    setSaving(true);
-    await onSaveComment(comment);
-    setSaving(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  const getVal = (row: ExtractedRow, label: string): number | null => {
+    const it = (row.line_items as unknown as LineItem[]).find(li => li.label === label);
+    if (!it) return null;
+    return it.override_value !== undefined && it.override_value !== null ? it.override_value : it.value;
   };
 
+  const [importBusy, setImportBusy] = useState(false);
+  const [directBusy, setDirectBusy] = useState(false);
+  const [projAnalysis,        setProjAnalysis]        = useState<string | null>(null);
+  const [projAnalysisLoading, setProjAnalysisLoading] = useState(false);
+  const [projAnalysisProgress, setProjAnalysisProgress] = useState(0);
+  const [projAnalysisLabel,   setProjAnalysisLabel]   = useState("");
+
+  const generateProjectionAnalysis = async () => {
+    setProjAnalysisLoading(true);
+    setProjAnalysisProgress(0);
+    setProjAnalysisLabel("Preparing projection data");
+    const STEPS = ["Preparing projection data","Reading historical trend","Analysing model vs upload","Evaluating risk flags","Drafting analysis"];
+    let p = 0;
+    const tick = setInterval(() => {
+      p = Math.min(p + 2, 88);
+      setProjAnalysisProgress(p);
+      setProjAnalysisLabel(STEPS[Math.min(Math.floor(p / 20), STEPS.length - 1)]);
+    }, 150);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const PROMPT = `Provide a structured projection analysis note for this case. Use this exact structure:
+
+PROJECTION MODEL: State the algorithm (OLS Regression / Holt-Winters / CAGR), confidence level, number of historical years used, and average revenue growth rate assumed.
+REVENUE ASSESSMENT: Assess the projected revenue trajectory vs historical trend. State CAGR and whether it is reasonable given the business type.
+MARGIN ASSESSMENT: Assess EBITDA and PAT margin assumptions vs historical averages. Note any expansion or compression and whether it is justified.
+BALANCE SHEET TRAJECTORY: Comment on Net Worth accumulation (PAT retained each year) and Debt position (is it being reduced or held flat).
+RISK FLAGS: If projections are uploaded, list key risk flags from the sanity check. If only AI estimates exist, state the main uncertainty sources.
+OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what the analyst should probe further.`;
+      const res = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyst-chat`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${session?.access_token ?? ""}`,
+            "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+          },
+          body: JSON.stringify({
+            case_id: cc.id,
+            messages: [{ role: "user", content: PROMPT }],
+            page_name: "projections",
+          }),
+        },
+      );
+      clearInterval(tick);
+      const json = await res.json();
+      if (json.reply) {
+        setProjAnalysis(json.reply as string);
+        setProjAnalysisProgress(100);
+        setProjAnalysisLabel("Complete");
+      } else {
+        throw new Error(json.error ?? "No analysis returned");
+      }
+    } catch (e) {
+      clearInterval(tick);
+      toast.error("Analysis failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setTimeout(() => { setProjAnalysisLoading(false); setProjAnalysisProgress(0); setProjAnalysisLabel(""); }, 600);
+    }
+  };
+  const importFileRef      = useRef<HTMLInputElement>(null);
+  const directImportFileRef = useRef<HTMLInputElement>(null);
   const handleDirectImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -586,101 +644,50 @@ export function ProjectionsTab({
   };
 
   const importPanel = (onUpload || onDirectImport) ? (
-    <Panel title="IMPORT PROJECTION DOCUMENT" ticker="PDF · EXCEL · IMAGE">
+    <Panel title="Projection Document Upload" ticker="PDF · Excel · Image">
+      <UploadGrid
+        onUpload={(f, _cls, fy) => { void onUpload?.(f, fy); }}
+        onDelete={d => onDelete?.(d)}
+        onRetry={d => onRetry?.(d)}
+        busy={busy || importBusy}
+        docs={docs}
+        progress={progress}
+        progressLabel={progressLabel}
+        defaultClass="projections"
+        allowedClasses={["projections"]}
+        showClass={false}
+        showFy={false}
+        hint={[
+          "Upload projected financial statements PDF — AI extracts P&L, Balance Sheet, and Cash Flow for all fiscal years",
+          "Excel upload: AI parses column headers as fiscal years and maps line items automatically",
+        ]}
+      />
+
+      {onDirectImport && (
+        <div className="mt-3 border-t border-border/30 pt-3">
+          <input ref={directImportFileRef} type="file" className="hidden"
+            accept=".xlsx,.xls,.csv" onChange={handleDirectImportFile} />
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              onClick={() => directImportFileRef.current?.click()}
+              disabled={directBusy || busy}
+              className="bg-accent/10 text-accent border border-accent/30 rounded px-3 py-1.5 text-xs font-medium hover:bg-accent/20 transition-colors disabled:opacity-50"
+            >
+              {directBusy ? "Importing…" : "⚡ Direct Excel Import (no AI)"}
+            </button>
+            <span className="text-xs text-muted-foreground">Instant · no token cost · structured Excel only</span>
+            {directBusy && (
+              <span className="text-xs text-accent animate-pulse">Parsing…</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Hidden ref kept for legacy handleImportFile */}
       <input ref={importFileRef} type="file" className="hidden"
         accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp" onChange={handleImportFile} />
-      <input ref={directImportFileRef} type="file" className="hidden"
-        accept=".xlsx,.xls,.csv" onChange={handleDirectImportFile} />
-      <button onClick={async () => {
-        const XLSX = await import("xlsx");
-        const wb = XLSX.utils.book_new();
-        const fys = ["FY2025", "FY2026", "FY2027"];
-        const labels = ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt","Projected Gross Profit","Projected EBIT","Projected Depreciation","Projected Interest Expense","Projected Operating Expenses","Projected Total Assets"];
-        const rows = [["Particulars", ...fys], ["// Same unit as historical data. Import via DIRECT EXCEL IMPORT above."], ...labels.map(l => [l, "", "", ""])];
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "Projections");
-        XLSX.writeFile(wb, "projections_template.xlsx");
-      }} className="text-[10px] tracking-widest border border-accent/40 text-accent/80 px-3 py-1.5 hover:text-accent hover:border-accent/60 disabled:opacity-40">
-        ⬇ TEMPLATE
-      </button>
-
-      <div className="space-y-4">
-        {/* ── Direct Excel import (instant, no AI) ── */}
-        {onDirectImport && (
-          <div className="border border-accent/30 bg-accent/5 p-3 space-y-2">
-            <div className="text-[9px] text-accent tracking-widest font-bold">DIRECT EXCEL IMPORT · INSTANT · NO AI</div>
-            <div className="text-[9px] text-muted-foreground/70 leading-relaxed">
-              Import a structured Excel file directly — no AI, no token cost, instant.
-              First column = line item labels. Remaining columns = fiscal years (e.g. FY26, FY2026, 2026).
-              Labels are auto-mapped to standard projection items.
-            </div>
-            <div className="flex items-center gap-3 flex-wrap">
-              <button
-                onClick={() => directImportFileRef.current?.click()}
-                disabled={directBusy || busy}
-                className="bg-accent text-accent-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
-              >
-                {directBusy ? "IMPORTING…" : "[ ⬆ IMPORT EXCEL DIRECTLY ]"}
-              </button>
-              {directBusy && (
-                <span className="text-[9px] text-accent tracking-widest animate-pulse">▸ Parsing…</span>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* ── AI extraction (PDF / image / Excel via AI) ── */}
-        {onUpload && (
-          <div className="space-y-2">
-            <div className="text-[9px] text-muted-foreground/60 tracking-widest font-bold">AI EXTRACTION · PDF / IMAGE / EXCEL</div>
-            <div className="text-[9px] text-muted-foreground/70 leading-relaxed">
-              Use AI to extract from PDF, image, or unstructured Excel. AI detects fiscal years and maps all projection line items automatically.
-            </div>
-            <div className="flex items-center gap-3 flex-wrap">
-              <button
-                onClick={() => importFileRef.current?.click()}
-                disabled={importBusy || busy}
-                className="bg-primary text-primary-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
-              >
-                {importBusy ? "UPLOADING…" : "[ CHOOSE FILE → ]"}
-              </button>
-              {importBusy && (
-                <span className="text-[9px] text-primary tracking-widest animate-pulse">▸ Extracting with AI…</span>
-              )}
-              {busy && !importBusy && (
-                <span className="text-[9px] text-muted-foreground/50">▸ Another operation in progress…</span>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
     </Panel>
   ) : null;
-
-  const commentPanel = (
-    <Panel title="ANALYST COMMENTARY" ticker="PROJECTIONS NOTE">
-      <div className="space-y-2">
-        <textarea
-          value={comment}
-          onChange={e => { setComment(e.target.value); setSaved(false); }}
-          rows={4}
-          placeholder="Add your observations on the projections — assumptions, risks, management guidance, comparables..."
-          className="w-full bg-input border border-border text-foreground text-xs p-2 resize-y placeholder:text-muted-foreground/40 font-mono leading-relaxed focus:outline-none focus:border-primary"
-        />
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleSave}
-            disabled={saving || !onSaveComment}
-            className="bg-primary text-primary-foreground px-4 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
-          >
-            {saving ? "SAVING..." : saved ? "✓ SAVED" : "[SAVE COMMENT →]"}
-          </button>
-          {!onSaveComment && (
-            <span className="text-[9px] text-muted-foreground tracking-wider">Save not wired — contact dev</span>
-          )}
-        </div>
-      </div>
-    </Panel>
-  );
 
   // ── No data at all ────────────────────────────────────────────────────────
   if (projRows.length === 0 && !model) {
@@ -693,7 +700,6 @@ export function ProjectionsTab({
             <p>Upload financial statements in the <strong>UPLOAD</strong> tab, extract them, then return here.</p>
           </div>
         </Panel>
-        {commentPanel}
       </div>
     );
   }
@@ -704,8 +710,10 @@ export function ProjectionsTab({
       <div className="space-y-3">
         {importPanel}
         <EstimatedView caseId={cc.id} model={model} histPL={histPL} unit={unit} abbr={abbr} unitTicker={unitTicker}
-          busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
-        {commentPanel}
+          busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote}
+          projAnalysis={projAnalysis} projAnalysisLoading={projAnalysisLoading}
+          projAnalysisProgress={projAnalysisProgress} projAnalysisLabel={projAnalysisLabel}
+          onGenerateAnalysis={generateProjectionAnalysis} />
       </div>
     );
   }
@@ -713,13 +721,18 @@ export function ProjectionsTab({
   // ── Projections uploaded — full view + sanity check ───────────────────────
   const projData = uploadedYears.map(fy => {
     const items = ((projRows.find(r => r.fiscal_year === fy)?.line_items ?? []) as unknown as LineItem[]);
+    const pbt     = liVal(items, "PBT");
+    const finCost = liVal(items, "Finance Cost");
+    const depr    = liVal(items, "Depreciation");
+    const ebitda  = liVal(items, "Projected EBITDA") ??
+      (pbt != null && finCost != null && depr != null ? pbt + finCost + depr : null);
     return {
       fy,
-      turnover:  liVal(items, "Projected Turnover"),
-      ebitda:    liVal(items, "Projected EBITDA"),
-      pat:       liVal(items, "Projected PAT"),
-      networth:  liVal(items, "Projected Net Worth"),
-      totalDebt: liVal(items, "Projected Total Debt"),
+      turnover:  liVal(items, "Projected Turnover")   ?? liVal(items, "Revenue"),
+      ebitda,
+      pat:       liVal(items, "Projected PAT")        ?? liVal(items, "PAT"),
+      networth:  liVal(items, "Projected Net Worth")  ?? liVal(items, "Net Worth"),
+      totalDebt: liVal(items, "Projected Total Debt") ?? liVal(items, "Total Debt"),
     };
   });
 
@@ -768,7 +781,13 @@ export function ProjectionsTab({
   const debtClr = (v: number | null | undefined) =>
     v == null ? "text-foreground/50" : v < 3 ? "text-success" : v < 5 ? "text-warning" : "text-destructive";
 
-  const projLineItems = ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt"];
+  const projSummaryRows: { label: string; key: "turnover"|"ebitda"|"pat"|"networth"|"totalDebt" }[] = [
+    { label: hasFullDetail ? "Revenue"    : "Projected Turnover",   key: "turnover"  },
+    { label: hasFullDetail ? "EBITDA"     : "Projected EBITDA",     key: "ebitda"    },
+    { label: hasFullDetail ? "PAT"        : "Projected PAT",        key: "pat"       },
+    { label: hasFullDetail ? "Net Worth"  : "Projected Net Worth",  key: "networth"  },
+    { label: hasFullDetail ? "Total Debt" : "Projected Total Debt", key: "totalDebt" },
+  ];
   const analyticsRows = [
     { label: "EBITDA Margin",           fn: (m: typeof projMetrics[0]) => pct(m.ebitdaMargin) },
     { label: "PAT / Net Profit Margin", fn: (m: typeof projMetrics[0]) => pct(m.patMargin) },
@@ -929,12 +948,11 @@ export function ProjectionsTab({
             </tr>
           </thead>
           <tbody>
-            {projLineItems.map(label => {
-              const values = uploadedYears.map(fy =>
-                liVal(((projRows.find(r => r.fiscal_year === fy)?.line_items ?? []) as unknown as LineItem[]), label));
+            {projSummaryRows.map(({ label, key }) => {
+              const values = projData.map(d => d[key]);
               const ic = cagr(values[0] ?? null, values[values.length - 1] ?? null, nY);
               return (
-                <tr key={label} className="border-b border-border/30">
+                <tr key={key} className="border-b border-border/30">
                   <td className="py-1.5 text-foreground/90 font-medium">{label}</td>
                   {values.map((v, i) => (
                     <td key={uploadedYears[i]} className="text-right tabular-nums text-primary">
@@ -952,6 +970,175 @@ export function ProjectionsTab({
           </tbody>
         </table>
       </Panel>
+
+      {/* Full P&L / BS / CF detail — Schedule III format (PDF-extracted data) */}
+      {hasFullDetail && (() => {
+        const sortedRows = [...projRows].sort((a, b) => a.fiscal_year - b.fiscal_year);
+        const colCount = sortedRows.length + 1;
+
+        const secHdr = (key: string, label: string) => (
+          <tr key={key}>
+            <td colSpan={colCount} className="pt-3 pb-1 text-[9px] tracking-widest text-muted-foreground font-bold uppercase border-b border-border/40">
+              {label}
+            </td>
+          </tr>
+        );
+
+        const subHdr = (key: string, label: string) => (
+          <tr key={key}>
+            <td colSpan={colCount} className="pt-2 pb-0 text-[9px] text-foreground/60 font-semibold italic" style={{ paddingLeft: "12px" }}>
+              {label}
+            </td>
+          </tr>
+        );
+
+        const sp = (key: string) => (
+          <tr key={key}><td colSpan={colCount} className="py-0.5" /></tr>
+        );
+
+        const dr = (
+          dataLabel: string,
+          displayLabel: string,
+          indent: number,
+          opts: { bold?: boolean; grandTotal?: boolean; green?: boolean } = {},
+        ) => {
+          const vals = sortedRows.map(r => getVal(r, dataLabel));
+          if (vals.every(v => v == null)) return null;
+          const { bold, grandTotal, green } = opts;
+          return (
+            <tr key={`dr-${dataLabel}`}
+              className={`${grandTotal ? "border-t border-border" : "border-b border-border/20"} hover:bg-surface/20`}>
+              <td
+                className={`py-1 pr-2 text-[10px] ${bold || grandTotal ? "font-bold text-foreground" : "text-foreground/80"} ${grandTotal ? "uppercase tracking-wide" : ""}`}
+                style={{ paddingLeft: `${indent * 12 + 4}px` }}
+              >
+                {displayLabel}
+              </td>
+              {vals.map((v, i) => (
+                <td key={sortedRows[i].fiscal_year}
+                  className={`text-right pr-3 tabular-nums text-[10px] ${bold || grandTotal ? "font-bold" : ""} ${
+                    green && v != null && v > 0 ? "text-success" :
+                    green && v != null && v < 0 ? "text-destructive" :
+                    grandTotal ? "text-foreground" : "text-primary"
+                  }`}>
+                  {v == null ? "—" : v.toLocaleString("en-IN")}
+                  {abbr && v != null && <span className="text-[8px] text-muted-foreground ml-0.5">{abbr}</span>}
+                </td>
+              ))}
+            </tr>
+          );
+        };
+
+        const plSection = [
+          secHdr("sh-inc",  "Income"),
+          dr("Revenue",           "Revenue from Operations",          1),
+          dr("Other Income",      "Other Income",                     1),
+          dr("Total Income",      "Total Income",                     0, { bold: true }),
+          sp("sp-pl1"),
+          secHdr("sh-cogs", "Cost of Goods Sold"),
+          dr("COGS",              "Cost of Materials Consumed",       1),
+          dr("Gross Profit",      "Gross Profit",                     0, { bold: true }),
+          sp("sp-pl2"),
+          secHdr("sh-ind",  "Indirect Expenses"),
+          dr("Employee Expense",  "Employee Benefits Expense",        1),
+          dr("Finance Cost",      "Finance Costs",                    1),
+          dr("Depreciation",      "Depreciation & Amortisation",      1),
+          dr("Other Expenses",    "Other Expenses",                   1),
+          dr("Total Indirect Exp","Total Indirect Expenses",          0, { bold: true }),
+          sp("sp-pl3"),
+          secHdr("sh-pbt",  "Profitability"),
+          dr("PBT",               "Net Profit Before Tax",            1),
+          dr("Income Tax",        "Provision for Income Tax",         1),
+          dr("PAT",               "Net Profit for the Year (PAT)",    0, { bold: true, green: true, grandTotal: true }),
+        ];
+
+        const bsSection = [
+          secHdr("sh-eq",   "Equity and Liabilities"),
+          subHdr("sub-sh",  "Shareholders' Funds"),
+          dr("Share Capital",              "Share Capital",                       2),
+          dr("Reserves & Surplus",         "Reserves and Surplus",                2),
+          dr("Net Worth",                  "Net Worth",                           1, { bold: true }),
+          sp("sp-bs1"),
+          subHdr("sub-ncl", "Non-Current Liabilities"),
+          dr("LT Borrowings",              "Long-Term Borrowings",                2),
+          sp("sp-bs2"),
+          subHdr("sub-cl",  "Current Liabilities"),
+          dr("ST Borrowings",              "Short-Term Borrowings",               2),
+          dr("Trade Payables",             "Trade Payables",                      2),
+          dr("Other Current Liabilities",  "Other Current Liabilities",           2),
+          dr("ST Provisions",              "Short-Term Provisions",               2),
+          sp("sp-bs3"),
+          dr("Total Liabilities",          "Total Equity and Liabilities",        0, { bold: true, grandTotal: true }),
+          sp("sp-bs4"),
+          secHdr("sh-ast",  "Assets"),
+          subHdr("sub-nca", "Non-Current Assets"),
+          dr("Fixed Assets",               "Property, Plant & Equipment",         2),
+          dr("Non-Current Investments",    "Non-Current Investments",             2),
+          dr("LT Loans & Advances",        "Long-Term Loans & Advances",          2),
+          dr("Total Non-Current Assets",   "Total Non-Current Assets",            1, { bold: true }),
+          sp("sp-bs5"),
+          subHdr("sub-ca",  "Current Assets"),
+          dr("Inventories",                "Inventories",                         2),
+          dr("Trade Receivables",          "Trade Receivables",                   2),
+          dr("Cash & Equivalents",         "Cash and Cash Equivalents",           2),
+          dr("ST Loans & Advances",        "Short-Term Loans & Advances",         2),
+          dr("Other Current Assets",       "Other Current Assets",                2),
+          dr("Total Current Assets",       "Total Current Assets",                1, { bold: true }),
+          sp("sp-bs6"),
+          dr("Total Assets",               "Total Assets",                        0, { bold: true, grandTotal: true }),
+        ];
+
+        const cfSection = [
+          secHdr("sh-cfo", "Operating Activities"),
+          dr("CFO",           "Net Cash from Operating Activities",    1, { bold: true }),
+          sp("sp-cf1"),
+          secHdr("sh-cfi", "Investing Activities"),
+          dr("CFI",           "Net Cash from Investing Activities",    1, { bold: true }),
+          sp("sp-cf2"),
+          secHdr("sh-cff", "Financing Activities"),
+          dr("CFF",           "Net Cash from Financing Activities",    1, { bold: true }),
+          sp("sp-cf3"),
+          dr("Net Cash Change","Net Increase / (Decrease) in Cash",   0, { bold: true, grandTotal: true }),
+          sp("sp-cf4"),
+          dr("Opening Cash",  "Cash at Beginning of Year",             1),
+          dr("Closing Cash",  "Cash at End of Year",                   1, { bold: true }),
+        ];
+
+        const activeSection = projDetailTab === "pl" ? plSection : projDetailTab === "bs" ? bsSection : cfSection;
+
+        return (
+          <Panel title="PROJECTED FINANCIALS" ticker={`${sortedRows.length} YEARS · SCHEDULE III`} status="live">
+            <div className="flex gap-1 mb-3 border-b border-border pb-2">
+              {([["pl","P&L"],["bs","Balance Sheet"],["cf","Cash Flow"]] as const).map(([k, lbl]) => (
+                <button key={k} onClick={() => setProjDetailTab(k)}
+                  className={`text-[9px] tracking-widest px-2 py-1 transition-colors ${projDetailTab === k ? "text-primary border-b-2 border-primary" : "text-muted-foreground hover:text-foreground"}`}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="text-muted-foreground border-b border-border">
+                  <tr>
+                    <th className="text-left py-1 pr-4 text-[9px] tracking-widest w-56">PARTICULARS</th>
+                    {sortedRows.map(r => (
+                      <th key={r.fiscal_year} className="text-right pr-3 text-[9px] tracking-widest whitespace-nowrap">
+                        31-Mar-{r.fiscal_year}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {activeSection}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-2 text-[9px] text-muted-foreground/50 text-right">
+              All amounts in {unit ?? "INR"} · AI-extracted from projection document
+            </div>
+          </Panel>
+        );
+      })()}
 
       {/* Analytics Matrix */}
       <Panel title="PROJECTION ANALYTICS MATRIX" ticker={unitTicker ? `DERIVED RATIOS · ${unitTicker}` : "DERIVED RATIOS"}>
@@ -1201,16 +1388,16 @@ export function ProjectionsTab({
         </Panel>
       )}
 
-      <ProjectionChatPanel
-        caseId={cc.id}
-        model={model}
-        projData={projData}
-        riskFlags={riskFlags}
-        verdict={verdict}
-        abbr={abbr}
+      <ProjectionAnalysisPanel
+        analysis={projAnalysis}
+        loading={projAnalysisLoading}
+        progress={projAnalysisProgress}
+        label={projAnalysisLabel}
+        onGenerate={generateProjectionAnalysis}
       />
 
-      {commentPanel}
+      <ProjectionMethodologyPanel />
+
       <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
     </div>
   );
@@ -1220,7 +1407,8 @@ export function ProjectionsTab({
 // ESTIMATED VIEW (no projections uploaded)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, progress, progressLabel, onGenerateNote }: {
+function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, progress, progressLabel, onGenerateNote,
+  projAnalysis, projAnalysisLoading, projAnalysisProgress, projAnalysisLabel, onGenerateAnalysis }: {
   caseId: string;
   model: ModelOutput;
   histPL: ExtractedRow[];
@@ -1231,6 +1419,11 @@ function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, pr
   progress: number;
   progressLabel: string;
   onGenerateNote: () => void;
+  projAnalysis: string | null;
+  projAnalysisLoading: boolean;
+  projAnalysisProgress: number;
+  projAnalysisLabel: string;
+  onGenerateAnalysis: () => void;
 }) {
   const { points: est } = model;
   const estYears = est.map(p => p.fy);
@@ -1382,167 +1575,336 @@ function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, pr
         </div>
       </Panel>
 
-      <ProjectionChatPanel caseId={caseId} model={model} abbr={abbr} />
+      <ProjectionAnalysisPanel
+        analysis={projAnalysis}
+        loading={projAnalysisLoading}
+        progress={projAnalysisProgress}
+        label={projAnalysisLabel}
+        onGenerate={onGenerateAnalysis}
+      />
+
+      <ProjectionMethodologyPanel />
 
       <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
     </div>
   );
 }
 
-// ─── Projection Chat Panel ────────────────────────────────────────────────────
-function ProjectionChatPanel({
-  caseId,
-  model,
-  projData,
-  riskFlags,
-  verdict,
-  abbr,
+// ─── Projection AI Analysis Panel ────────────────────────────────────────────
+function ProjectionAnalysisPanel({
+  analysis,
+  loading,
+  progress,
+  label,
+  onGenerate,
 }: {
-  caseId: string;
-  model: ModelOutput | null;
-  projData?: Array<{ fy: number; turnover: number | null; ebitda: number | null; pat: number | null; networth: number | null; totalDebt: number | null }>;
-  riskFlags?: RiskFlag[];
-  verdict?: { text: string; cls: string; note: string };
-  abbr: string;
+  analysis: string | null;
+  loading: boolean;
+  progress: number;
+  label: string;
+  onGenerate: () => void;
 }) {
-  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
-
-  const buildContext = () => {
-    const lines: string[] = ["=== PROJECTION ANALYSIS CONTEXT ==="];
-    if (model) {
-      lines.push(`\nAI/ML MODEL: ${METHOD_LABEL[model.method]}`);
-      lines.push(`Confidence: ${model.confidence} | Base FY: ${model.baseFY} | History: ${model.histYears} year(s)`);
-      if (model.r2 != null) lines.push(`R²: ${model.r2.toFixed(3)}${model.rmse != null ? ` | RMSE: ${model.rmse.toFixed(2)}${abbr ? ` ${abbr}` : ""}` : ""}`);
-      lines.push(`Revenue growth: ${model.avgGrowthPct.toFixed(1)}% p.a.`);
-      if (model.avgEbitdaMarginPct != null) lines.push(`EBITDA margin: ${model.avgEbitdaMarginPct.toFixed(1)}% (${model.ebitdaTrend ?? "stable"})`);
-      if (model.avgPatMarginPct != null) lines.push(`PAT margin: ${model.avgPatMarginPct.toFixed(1)}% (${model.patTrend ?? "stable"})`);
-      lines.push("\nAI Model Points:");
-      for (const p of model.points) {
-        const parts = [`FY${p.fy}:`];
-        if (p.turnover != null) parts.push(`Turnover=${p.turnover.toFixed(2)}${abbr}`);
-        if (p.ebitda != null) parts.push(`EBITDA=${p.ebitda.toFixed(2)}${abbr}`);
-        if (p.pat != null) parts.push(`PAT=${p.pat.toFixed(2)}${abbr}`);
-        if (p.upper != null && p.lower != null) parts.push(`90%CI=[${p.lower.toFixed(1)},${p.upper.toFixed(1)}]`);
-        lines.push("  " + parts.join(" | "));
-      }
-    }
-    if (projData && projData.length > 0) {
-      lines.push("\nUPLOADED MANAGEMENT PROJECTIONS:");
-      for (const d of projData) {
-        const parts = [`FY${d.fy}:`];
-        if (d.turnover != null) parts.push(`Turnover=${d.turnover.toFixed(2)}${abbr}`);
-        if (d.ebitda != null) parts.push(`EBITDA=${d.ebitda.toFixed(2)}${abbr}`);
-        if (d.pat != null) parts.push(`PAT=${d.pat.toFixed(2)}${abbr}`);
-        if (d.networth != null) parts.push(`NetWorth=${d.networth.toFixed(2)}${abbr}`);
-        if (d.totalDebt != null) parts.push(`Debt=${d.totalDebt.toFixed(2)}${abbr}`);
-        lines.push("  " + parts.join(" | "));
-      }
-      if (verdict) {
-        lines.push(`\nSanity Check: ${verdict.text}`);
-        lines.push(verdict.note);
-      }
-      if (riskFlags && riskFlags.length > 0) {
-        lines.push("\nRisk Flags:");
-        for (const f of riskFlags) lines.push(`  [${f.severity}] ${f.title}: ${f.detail}`);
-      }
-    }
-    lines.push("=== END CONTEXT ===");
-    return lines.join("\n");
-  };
-
-  const handleSend = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg = { role: "user" as const, content: input.trim() };
-    const newMessages = [...messages, userMsg];
-    setMessages(newMessages);
-    setInput("");
-    setLoading(true);
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error("Not authenticated");
-      const base = (import.meta as unknown as { env: { VITE_SUPABASE_URL: string } }).env.VITE_SUPABASE_URL;
-      const ctxMsg  = { role: "user" as const, content: buildContext() };
-      const ctxAck  = { role: "assistant" as const, content: "Understood. I have the full projection context. Please ask your questions." };
-      const apiMsgs = messages.length === 0
-        ? [ctxMsg, ctxAck, userMsg]
-        : [ctxMsg, ctxAck, ...newMessages];
-      const res = await fetch(`${base}/functions/v1/analyst-chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${session.access_token}` },
-        body: JSON.stringify({ case_id: caseId, page_name: "Projections", messages: apiMsgs }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { reply?: string; error?: string };
-      if (data.error) throw new Error(data.error);
-      setMessages(prev => [...prev, { role: "assistant", content: data.reply ?? "" }]);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setMessages(prev => [...prev, { role: "assistant", content: `Error: ${msg}` }]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
-    <Panel title="PROJECTION ANALYST CHAT" ticker="AI MODEL + UPLOAD COMPARISON">
-      <div className="space-y-2">
-        <div className="text-[9px] text-muted-foreground/60 pb-1 border-b border-border/30">
-          Ask questions about the AI model, uploaded projections, sanity check, or assumptions. The AI has full context of both.
-        </div>
-        <div className="h-64 overflow-y-auto space-y-2 pr-1">
-          {messages.length === 0 && (
-            <div className="text-[10px] text-muted-foreground/40 text-center pt-10">
-              Ask about growth assumptions, feasibility, risks, or compare AI model vs management projections…
-            </div>
-          )}
-          {messages.map((m, i) => (
-            <div key={i} className={`flex gap-2 ${m.role === "user" ? "flex-row-reverse" : ""}`}>
-              <div className={`text-[9px] font-bold tracking-wider min-w-[28px] pt-0.5 shrink-0 ${m.role === "user" ? "text-right text-primary" : "text-accent"}`}>
-                {m.role === "user" ? "YOU" : "AI"}
-              </div>
-              <div className={`text-[10px] leading-relaxed whitespace-pre-wrap max-w-[85%] px-2 py-1.5 border ${
-                m.role === "user"
-                  ? "border-primary/30 bg-primary/5 text-foreground"
-                  : "border-accent/20 bg-accent/5 text-foreground/90"
-              }`}>
-                {m.content}
-              </div>
-            </div>
-          ))}
-          {loading && (
-            <div className="flex gap-2">
-              <div className="text-[9px] font-bold tracking-wider min-w-[28px] pt-0.5 text-accent">AI</div>
-              <div className="text-[10px] text-muted-foreground/50 border border-accent/20 bg-accent/5 px-2 py-1.5 italic">Analysing…</div>
-            </div>
-          )}
-          <div ref={bottomRef} />
-        </div>
-        <div className="flex gap-2 pt-1 border-t border-border/30">
-          <input
-            type="text"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); } }}
-            placeholder="Ask about projections, assumptions, model vs uploaded…"
-            disabled={loading}
-            className="flex-1 bg-input border border-border text-foreground text-[10px] px-2 py-1.5 placeholder:text-muted-foreground/40 font-mono focus:outline-none focus:border-primary"
-          />
+    <Panel
+      title="AI Projection Analysis"
+      ticker="Insights"
+      status={loading ? "warn" : analysis ? "live" : "idle"}
+    >
+      {!analysis && !loading && (
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-[10px] text-muted-foreground leading-relaxed">
+            Generate a structured AI analysis of the projection model — covering method confidence, revenue
+            trajectory, margin assumptions, balance sheet outlook, risk flags, and overall credibility.
+          </p>
           <button
-            onClick={() => void handleSend()}
-            disabled={loading || !input.trim()}
-            className="bg-primary text-primary-foreground px-3 py-1.5 text-[10px] tracking-widest font-bold disabled:opacity-50"
+            onClick={onGenerate}
+            className="shrink-0 bg-primary text-primary-foreground px-5 py-2.5 rounded-md text-sm font-semibold hover:bg-primary/90 transition-colors"
           >
-            {loading ? "…" : "SEND →"}
+            Generate AI Analysis
           </button>
         </div>
-      </div>
+      )}
+      {loading && (
+        <div className="space-y-3 py-2">
+          <div className="flex justify-between text-sm">
+            <span className="text-primary">▸ {label || "Analysing…"}</span>
+            <span className="text-primary font-semibold tabular-nums">{progress}%</span>
+          </div>
+          <div className="h-2 bg-muted rounded-full overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <div className="grid grid-cols-5 gap-1 text-[10px] text-muted-foreground">
+            {["Prep","Trend","Model","Risk Flags","Drafting"].map((s, i) => (
+              <div key={s} className={`text-center py-1 rounded border border-border/30 ${progress >= (i + 1) * 20 ? "text-primary border-primary/40 bg-primary/5 font-medium" : ""}`}>{s}</div>
+            ))}
+          </div>
+        </div>
+      )}
+      {analysis && (
+        <div className="space-y-4">
+          <div className="text-[9px] text-warning/80 tracking-wider border border-warning/30 bg-warning/5 px-2 py-1.5">
+            ⚠ AI-ASSISTED ANALYSIS · VERIFY BEFORE RELYING ON · NOT A CREDIT RECOMMENDATION
+          </div>
+          <div className="space-y-3">
+            {analysis.split(/\n{2,}/).map((block, i) => {
+              const match = block.match(/^([A-Z][A-Z\s/&():]+):\s*([\s\S]*)$/);
+              if (match) {
+                return (
+                  <div key={i} className="border-l-2 border-border/60 pl-3">
+                    <div className="text-xs font-semibold text-muted-foreground mb-0.5 uppercase tracking-wide">{match[1]}</div>
+                    <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{match[2].trim()}</p>
+                  </div>
+                );
+              }
+              return <p key={i} className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{block}</p>;
+            })}
+          </div>
+          <button
+            onClick={onGenerate}
+            disabled={loading}
+            className="text-sm text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
+          >
+            Regenerate
+          </button>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+// ─── Projection Methodology Panel ────────────────────────────────────────────
+function ProjectionMethodologyPanel() {
+  const [open, setOpen] = useState(false);
+
+  const SECTION = "text-[9px] font-bold tracking-widest text-primary/70 uppercase mb-1.5 mt-3 first:mt-0";
+  const ROW = "flex gap-2 items-start text-[10px]";
+  const LABEL = "text-muted-foreground/60 min-w-[140px] shrink-0";
+  const VAL = "font-mono text-foreground/80";
+  const CODE = "font-mono bg-muted/40 text-[10px] px-1 py-0.5 rounded text-foreground/80 border border-border/30";
+  const SEP = "border-t border-border/20 my-2";
+
+  return (
+    <Panel
+      title="Projection Methodology"
+      ticker="Algorithms · Formulas · Thresholds"
+      status="idle"
+      actions={
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {open ? "Collapse ↑" : "Expand ↓"}
+        </button>
+      }
+    >
+      {open && (
+        <div className="space-y-0 text-xs">
+
+          {/* ── 1. Model Selection ── */}
+          <p className={SECTION}>1 · Revenue Forecast — Model Selection Logic</p>
+          <p className="text-[10px] text-muted-foreground/60 mb-2">
+            The system selects one of three algorithms based on available history and statistical fit:
+          </p>
+          <table className="w-full text-[10px] border-collapse mb-2">
+            <thead>
+              <tr className="border-b border-border/30 text-muted-foreground/60">
+                <th className="text-left py-1 pr-3 font-medium w-32">Condition</th>
+                <th className="text-left py-1 pr-3 font-medium w-40">Algorithm</th>
+                <th className="text-left py-1 font-medium">Parameters</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/10">
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">≥ 3 years, R² ≥ 0.70</td>
+                <td className="py-1 pr-3 text-success font-semibold">OLS Regression</td>
+                <td className="py-1 text-muted-foreground/70">LINEAR fit on (year-index, turnover)</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">≥ 3 years, R² &lt; 0.70</td>
+                <td className="py-1 pr-3 text-warning font-semibold">Holt-Winters</td>
+                <td className="py-1 text-muted-foreground/70">α = 0.50, β = 0.30 · PI from growth-rate std dev</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">2 years exactly</td>
+                <td className="py-1 pr-3 text-warning font-semibold">Holt-Winters</td>
+                <td className="py-1 text-muted-foreground/70">α = 0.60, β = 0.40 · PI band = 60% of growth</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">1 year only</td>
+                <td className="py-1 pr-3 text-destructive font-semibold">CAGR (10% fixed)</td>
+                <td className="py-1 text-muted-foreground/70">Upper = 130% · Lower = 70% of forecast</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <hr className={SEP} />
+
+          {/* ── 2. OLS Formulas ── */}
+          <p className={SECTION}>2 · OLS Regression Formulas</p>
+          <div className="space-y-1.5 mb-2">
+            <div className={ROW}><span className={LABEL}>Slope</span><code className={CODE}>b = Σ(xᵢ−x̄)(yᵢ−ȳ) / Σ(xᵢ−x̄)²</code></div>
+            <div className={ROW}><span className={LABEL}>Intercept</span><code className={CODE}>a = ȳ − b·x̄</code></div>
+            <div className={ROW}><span className={LABEL}>Forecast</span><code className={CODE}>ŷ(x) = b·x + a  &nbsp;  (x = 0-based year index)</code></div>
+            <div className={ROW}><span className={LABEL}>R²</span><code className={CODE}>R² = 1 − SS_res / SS_tot  &nbsp;  (clamped to ≥ 0)</code></div>
+            <div className={ROW}><span className={LABEL}>RMSE</span><code className={CODE}>RMSE = √(SS_res / n)</code></div>
+            <div className={ROW}><span className={LABEL}>90% Prediction Interval</span><code className={CODE}>forecast ± 1.645 × RMSE</code></div>
+            <div className={ROW}><span className={LABEL}>Confidence</span><code className={CODE}>HIGH if R² ≥ 0.90 · MEDIUM if R² ≥ 0.70</code></div>
+          </div>
+
+          <hr className={SEP} />
+
+          {/* ── 3. Holt-Winters ── */}
+          <p className={SECTION}>3 · Holt-Winters Double Exponential Smoothing</p>
+          <div className="space-y-1.5 mb-2">
+            <div className={ROW}><span className={LABEL}>Initialise</span><code className={CODE}>L₀ = y₀ · T₀ = y₁ − y₀</code></div>
+            <div className={ROW}><span className={LABEL}>Level update</span><code className={CODE}>Lₜ = α·yₜ + (1−α)·(Lₜ₋₁ + Tₜ₋₁)</code></div>
+            <div className={ROW}><span className={LABEL}>Trend update</span><code className={CODE}>Tₜ = β·(Lₜ − Lₜ₋₁) + (1−β)·Tₜ₋₁</code></div>
+            <div className={ROW}><span className={LABEL}>h-step forecast</span><code className={CODE}>ŷ(t+h) = Lₜ + h·Tₜ  &nbsp;  (clamped to ≥ 0)</code></div>
+            <div className={ROW}><span className={LABEL}>PI band (≥3 yrs)</span><code className={CODE}>forecast × (1 ± σ·√h)  &nbsp;  where σ = std dev of YoY growth rates</code></div>
+            <div className={ROW}><span className={LABEL}>PI band (2 yrs)</span><code className={CODE}>forecast × (1 ± 0.60·|growth|·√h)</code></div>
+          </div>
+
+          <hr className={SEP} />
+
+          {/* ── 4. Margin Forecasting ── */}
+          <p className={SECTION}>4 · EBITDA & PAT Margin Forecasting</p>
+          <div className="space-y-1.5 mb-2">
+            <div className={ROW}><span className={LABEL}>Margin series</span><code className={CODE}>mₜ = metric_t / Turnover_t  &nbsp;  (one value per historical year)</code></div>
+            <div className={ROW}><span className={LABEL}>Smoothed margin</span><code className={CODE}>Apply Holt-Winters(α=0.5, β=0.3) on margin series → level L</code></div>
+            <div className={ROW}><span className={LABEL}>Trend detect</span><code className={CODE}>|T| &lt; 0.005 → stable · T &gt; 0 → improving · T &lt; 0 → declining  (EBITDA)</code></div>
+            <div className={ROW}><span className={LABEL}></span><code className={CODE}>|T| &lt; 0.003 → stable  (PAT threshold)</code></div>
+            <div className={ROW}><span className={LABEL}>Apply to forecast</span><code className={CODE}>Projected EBITDA = Rev_forecast × L_ebitda</code></div>
+            <div className={ROW}><span className={LABEL}></span><code className={CODE}>Projected PAT    = Rev_forecast × L_pat</code></div>
+          </div>
+
+          <hr className={SEP} />
+
+          {/* ── 5. Balance Sheet ── */}
+          <p className={SECTION}>5 · Balance Sheet Projection Rules</p>
+          <div className="space-y-1.5 mb-2">
+            <div className={ROW}><span className={LABEL}>Net Worth</span><code className={CODE}>NW(t) = NW(t−1) + PAT(t)  &nbsp;  (PAT accumulated each year)</code></div>
+            <div className={ROW}><span className={LABEL}>Total Debt</span><code className={CODE}>Flat — last historical value carried forward (repayment unknown)</code></div>
+            <div className={ROW}><span className={LABEL}>Other BS items</span><code className={CODE}>Not projected (only 5 line items modelled)</code></div>
+          </div>
+
+          <hr className={SEP} />
+
+          {/* ── 6. Risk Flags ── */}
+          <p className={SECTION}>6 · Automated Risk Flag Thresholds (vs Uploaded Projections)</p>
+          <table className="w-full text-[10px] border-collapse mb-2">
+            <thead>
+              <tr className="border-b border-border/30 text-muted-foreground/60">
+                <th className="text-left py-1 pr-3 font-medium">Flag</th>
+                <th className="text-left py-1 pr-3 font-medium w-20">Severity</th>
+                <th className="text-left py-1 font-medium">Trigger</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/10">
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">Revenue CAGR excess</td>
+                <td className="py-1 pr-3 text-destructive font-bold">HIGH</td>
+                <td className="py-1 text-muted-foreground/70">Uploaded CAGR &gt; model CAGR + 25pp</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">Revenue CAGR excess</td>
+                <td className="py-1 pr-3 text-warning font-bold">MEDIUM</td>
+                <td className="py-1 text-muted-foreground/70">Uploaded CAGR &gt; model CAGR + 10pp</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">Y1 above prediction band</td>
+                <td className="py-1 pr-3 text-destructive font-bold">HIGH</td>
+                <td className="py-1 text-muted-foreground/70">FY1 uploaded revenue &gt; model 90% PI upper bound</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">EBITDA margin expansion</td>
+                <td className="py-1 pr-3 text-destructive font-bold">HIGH</td>
+                <td className="py-1 text-muted-foreground/70">Avg uploaded EBITDA% &gt; historical trend + 10pp</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">EBITDA margin expansion</td>
+                <td className="py-1 pr-3 text-warning font-bold">MEDIUM</td>
+                <td className="py-1 text-muted-foreground/70">Avg uploaded EBITDA% &gt; historical trend + 5pp</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">PAT faster than EBITDA</td>
+                <td className="py-1 pr-3 text-warning font-bold">MEDIUM</td>
+                <td className="py-1 text-muted-foreground/70">PAT CAGR &gt; EBITDA CAGR + 8pp (implies falling interest / tax)</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">Sharp debt reduction</td>
+                <td className="py-1 pr-3 text-warning font-bold">MEDIUM</td>
+                <td className="py-1 text-muted-foreground/70">Total Debt drops &gt; 40% over projection period</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">Low model confidence</td>
+                <td className="py-1 pr-3 text-muted-foreground font-bold">LOW</td>
+                <td className="py-1 text-muted-foreground/70">Model built on &lt; 2 years of history (CAGR fallback)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <hr className={SEP} />
+
+          {/* ── 7. Variance Classification ── */}
+          <p className={SECTION}>7 · Variance Classification (Uploaded vs AI Estimate)</p>
+          <div className="space-y-1.5 mb-2">
+            <div className={ROW}><span className={LABEL}>Formula</span><code className={CODE}>variance% = (uploaded − estimate) / |estimate| × 100</code></div>
+          </div>
+          <table className="w-full text-[10px] border-collapse mb-2">
+            <thead>
+              <tr className="border-b border-border/30 text-muted-foreground/60">
+                <th className="text-left py-1 pr-3 font-medium w-24">|variance%|</th>
+                <th className="text-left py-1 pr-3 font-medium w-40">Label</th>
+                <th className="text-left py-1 font-medium">Colour</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/10">
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">&lt; 15%</td>
+                <td className="py-1 pr-3 text-success font-semibold">IN LINE</td>
+                <td className="py-1 text-muted-foreground/70">Green</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">15% – 35%</td>
+                <td className="py-1 pr-3 text-warning font-semibold">OPTIMISTIC / CONSERVATIVE</td>
+                <td className="py-1 text-muted-foreground/70">Amber</td>
+              </tr>
+              <tr>
+                <td className="py-1 pr-3 text-foreground/80">≥ 35%</td>
+                <td className="py-1 pr-3 text-destructive font-semibold">VERY OPTIMISTIC / VERY CONSERVATIVE</td>
+                <td className="py-1 text-muted-foreground/70">Red</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <hr className={SEP} />
+
+          {/* ── 8. CAGR utility ── */}
+          <p className={SECTION}>8 · CAGR Utility (used in risk flags & KPI cards)</p>
+          <div className="space-y-1.5 mb-2">
+            <div className={ROW}><span className={LABEL}>Formula</span><code className={CODE}>CAGR = (V_n / V_0)^(1/n) − 1  &nbsp;  where n = number of years</code></div>
+            <div className={ROW}><span className={LABEL}>Returns null if</span><code className={CODE}>V_0 ≤ 0, V_n is null, or n ≤ 0</code></div>
+          </div>
+
+          <hr className={SEP} />
+
+          {/* ── 9. Key Assumptions ── */}
+          <p className={SECTION}>9 · Known Limitations & Assumptions</p>
+          <ul className="space-y-1 text-[10px] text-muted-foreground/70 list-none pl-0">
+            <li>▸ Revenue is modelled independently; EBITDA and PAT are derived via margin ratios, not forecasted directly</li>
+            <li>▸ Total Debt is held flat — loan repayment schedules are not modelled (upload actual projections for debt drawdown/repayment)</li>
+            <li>▸ Net Worth accumulates PAT each year, implying zero dividends — if dividends are paid, NW will be overstated</li>
+            <li>▸ The 90% prediction interval assumes residuals are normally distributed; extreme outlier years distort RMSE</li>
+            <li>▸ Holt-Winters parameters (α, β) are fixed defaults and are not optimised per series</li>
+            <li>▸ Only 5 line items are modelled: Turnover, EBITDA, PAT, Net Worth, Total Debt</li>
+            <li>▸ Seasonal or cyclical patterns are not captured — the model assumes a linear or smoothly trending series</li>
+          </ul>
+
+        </div>
+      )}
     </Panel>
   );
 }

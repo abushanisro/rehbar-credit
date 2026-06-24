@@ -10,6 +10,7 @@ import type { Tables } from "@/integrations/supabase/types";
 import type { CaseRow, DocRow, ExtractedRow, UploadQueueItem, QueueStatus, AccumnReport } from "@/features/case/types";
 import { extractPdfText } from "@/lib/pdf-text-extractor";
 import { AccumnDashboard } from "./AccumnDashboard";
+import { parseAccumnGstExcel } from "@/lib/gst-accumn-excel-parser";
 
 export function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: {
   cc: CaseRow;
@@ -35,6 +36,12 @@ export function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }
   const [accumnLabel, setAccumnLabel]       = useState("");
 
   const accumnFileRef                       = useRef<HTMLInputElement>(null);
+
+  // ── Accumn Excel direct import state ─────────────────────────────────────
+  const [xlsBusy, setXlsBusy]       = useState(false);
+  const [xlsProgress, setXlsProgress] = useState(0);
+  const [xlsLabel, setXlsLabel]     = useState("");
+  const xlsFileRef                  = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
@@ -372,6 +379,64 @@ export function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }
     }
   };
 
+  const handleAccumnExcelImport = async (file: File) => {
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!["xlsx", "xls"].includes(ext)) { toast.error("Please select an Excel file (.xlsx or .xls)"); return; }
+    setXlsBusy(true); setXlsProgress(5); setXlsLabel("Reading Excel…");
+    try {
+      setXlsProgress(15); setXlsLabel("Parsing Accumn report…");
+      const result = await parseAccumnGstExcel(file);
+
+      setXlsProgress(40); setXlsLabel(`Parsed ${result.periods.length} return periods · upserting…`);
+
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      // Upsert in batches of 50
+      const BATCH = 50;
+      const rows = result.periods.map(p => ({
+        case_id: cc.id,
+        user_id: user.id,
+        period: p.period,
+        return_type: p.return_type,
+        gstin: p.gstin,
+        taxable_turnover: p.taxable_turnover,
+        exempt_turnover: p.exempt_turnover,
+        total_turnover: p.total_turnover,
+        output_tax: p.output_tax,
+        itc_claimed: p.itc_claimed,
+        net_tax_paid: p.net_tax_paid,
+        filing_date: p.filing_date,
+        filing_status: p.filing_status,
+      }));
+
+      let inserted = 0;
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const batch = rows.slice(i, i + BATCH);
+        const { error } = await (supabase.from("gst_return_data") as ReturnType<typeof supabase.from>).upsert(
+          batch as never,
+          { onConflict: "case_id,period,return_type" }
+        );
+        if (error) throw new Error(error.message);
+        inserted += batch.length;
+        setXlsProgress(40 + Math.round((inserted / rows.length) * 55));
+        setXlsLabel(`Saving… ${inserted}/${rows.length}`);
+      }
+
+      setXlsProgress(100); setXlsLabel("Done");
+      toast.success(
+        `Accumn Excel imported — ${result.periods.length} periods` +
+        (result.gstin ? ` · GSTIN: ${result.gstin}` : "") +
+        (result.company_name ? ` · ${result.company_name}` : "")
+      );
+      await onReload();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Import failed");
+    } finally {
+      setTimeout(() => { setXlsBusy(false); setXlsProgress(0); setXlsLabel(""); }, 800);
+    }
+  };
+
   const statusCls = (s: string) => s === "filed" ? "text-success" : s === "late" ? "text-warning" : "text-destructive";
 
   return (
@@ -396,6 +461,26 @@ export function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }
             <span className="text-muted-foreground ml-1">· GSTR-1 / GSTR-3B / GSTR-9 · Multiple OK</span>
           </div>
           {gstin && <div className="text-[10px] text-accent tracking-wider">GSTIN: {gstin}</div>}
+
+          {/* Accumn Excel direct import */}
+          <div className="flex items-center gap-2 pt-1 border-t border-border/30">
+            <input ref={xlsFileRef} type="file" className="hidden" accept=".xlsx,.xls"
+              onChange={e => { const f = e.target.files?.[0]; if (f) handleAccumnExcelImport(f); e.target.value = ""; }} />
+            <button
+              onClick={() => xlsFileRef.current?.click()}
+              disabled={xlsBusy || busy || queueRunning}
+              className="text-[10px] tracking-widest border border-accent/40 text-accent/80 hover:bg-accent/10 px-3 py-1 disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {xlsBusy ? "IMPORTING…" : "⬆ IMPORT ACCUMN EXCEL"}
+            </button>
+            <span className="text-[9px] text-muted-foreground/50 tracking-wide">Accumn GST Analytical Report · .xlsx direct import (no AI)</span>
+          </div>
+          {xlsBusy && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px] text-muted-foreground"><span>{xlsLabel}</span><span>{xlsProgress}%</span></div>
+              <div className="h-1.5 bg-border"><div className="h-full bg-accent transition-all" style={{ width: `${xlsProgress}%` }} /></div>
+            </div>
+          )}
 
           {/* Queue */}
           {fileQueue.length > 0 && (

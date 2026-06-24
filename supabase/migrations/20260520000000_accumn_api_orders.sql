@@ -19,6 +19,10 @@ create table if not exists accumn_api_orders (
 
 alter table accumn_api_orders enable row level security;
 
+drop policy if exists "accumn_orders_select" on accumn_api_orders;
+drop policy if exists "accumn_orders_insert" on accumn_api_orders;
+drop policy if exists "accumn_orders_delete" on accumn_api_orders;
+
 create policy "accumn_orders_select" on accumn_api_orders
   for select to authenticated using (true);
 
@@ -28,6 +32,6 @@ create policy "accumn_orders_insert" on accumn_api_orders
 create policy "accumn_orders_delete" on accumn_api_orders
   for delete to authenticated using (auth.uid() = user_id);
 
-create index accumn_api_orders_case_idx on accumn_api_orders (case_id);
-create index accumn_api_orders_ff_order_idx on accumn_api_orders (ff_order_id)
+create index if not exists accumn_api_orders_case_idx on accumn_api_orders (case_id);
+create index if not exists accumn_api_orders_ff_order_idx on accumn_api_orders (ff_order_id)
   where ff_order_id is not null;

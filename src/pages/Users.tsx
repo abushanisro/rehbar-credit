@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { TerminalLayout } from "@/components/terminal/TerminalLayout";
-import { Panel } from "@/components/terminal/Panel";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -15,30 +14,30 @@ type AppUser = {
 };
 
 const ROLES = [
-  { value: "admin",               label: "Administrator" },
-  { value: "analyst",             label: "Credit Analyst" },
-  { value: "business_development",label: "Business Development" },
-  { value: "ic_member",           label: "IC Member" },
-  { value: "credit_committee",    label: "Credit Committee" },
-  { value: "operations",          label: "Operations" },
+  { value: "admin",                label: "Administrator" },
+  { value: "analyst",              label: "Credit Analyst" },
+  { value: "business_development", label: "Business Development" },
+  { value: "ic_member",            label: "IC Member" },
+  { value: "credit_committee",     label: "Credit Committee" },
+  { value: "operations",           label: "Operations" },
 ];
 
 const ROLE_BADGE: Record<string, string> = {
-  admin:                "bg-destructive/20 text-destructive border-destructive/40",
-  analyst:              "bg-primary/10 text-primary border-primary/30",
-  business_development: "bg-accent/10 text-accent border-accent/30",
-  ic_member:            "bg-success/10 text-success border-success/30",
-  credit_committee:     "bg-warning/10 text-warning border-warning/30",
-  operations:           "bg-muted/20 text-muted-foreground border-border",
+  admin:                "bg-red-50 text-red-700 border-red-200",
+  analyst:              "bg-orange-50 text-primary border-orange-200",
+  business_development: "bg-amber-50 text-amber-700 border-amber-200",
+  ic_member:            "bg-green-50 text-green-700 border-green-200",
+  credit_committee:     "bg-blue-50 text-blue-700 border-blue-200",
+  operations:           "bg-slate-50 text-slate-600 border-slate-200",
 };
 
-const ROLE_LABEL: Record<string, string> = {
-  admin:                "ADMIN",
-  analyst:              "ANALYST",
-  business_development: "BD",
-  ic_member:            "IC MEMBER",
-  credit_committee:     "CC",
-  operations:           "OPS",
+const ROLE_DESCRIPTIONS: Record<string, string> = {
+  admin:                "Full access: create users, manage roles, create/edit/delete cases, approve IC, assign cases.",
+  analyst:              "Create & edit cases, create master data, recommend cases to IC committee.",
+  business_development: "Create cases, create master data, view all cases. Cannot edit or push to IC.",
+  ic_member:            "View-only access to cases that have been recommended to IC.",
+  credit_committee:     "View cases and issue final approval decisions on IC-recommended cases.",
+  operations:           "View-only access across the platform. No create or edit permissions.",
 };
 
 function fmtDate(iso: string | null) {
@@ -50,60 +49,47 @@ function fmtDate(iso: string | null) {
 
 export default function Users() {
   const { user: currentUser, role: currentRole } = useAuth();
-  const [users, setUsers]       = useState<AppUser[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState<string | null>(null);
-  const [search, setSearch]     = useState("");
+  const [users, setUsers]     = useState<AppUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<string | null>(null);
+  const [search, setSearch]   = useState("");
   const [filterRole, setFilterRole] = useState("all");
 
-  // Invite form
   const [inviteName,  setInviteName]  = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole,  setInviteRole]  = useState("analyst");
   const [inviting,    setInviting]    = useState(false);
 
-  // Inline role change / revoke / delete
   const [changingRole,    setChangingRole]    = useState<string | null>(null);
   const [revokingId,      setRevokingId]      = useState<string | null>(null);
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   const [deletingId,      setDeletingId]      = useState<string | null>(null);
-  // "revoke" | "delete" — which action is being confirmed
   const [confirmAction,   setConfirmAction]   = useState<"revoke" | "delete">("revoke");
 
   const fetchUsers = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // Query profiles (email + name) and user_roles separately, join client-side.
-      // Both tables now have SELECT open to all authenticated users via migration
-      // 20260516010000_team_page_rls.sql
       const [{ data: profiles, error: pe }, { data: roles, error: re }] = await Promise.all([
         supabase.from("profiles").select("id, email, full_name, created_at"),
         supabase.from("user_roles").select("user_id, role"),
       ]);
-
       if (pe) throw new Error(pe.message);
       if (re) throw new Error(re.message);
 
-      const roleMap = Object.fromEntries(
-        (roles ?? []).map(r => [r.user_id, r.role as string])
-      );
+      const roleMap    = Object.fromEntries((roles ?? []).map(r => [r.user_id, r.role as string]));
+      const profileMap = Object.fromEntries((profiles ?? []).map(p => [p.id, p]));
+      const allIds     = [...new Set([...(profiles ?? []).map(p => p.id), ...(roles ?? []).map(r => r.user_id)])];
 
-      const merged: AppUser[] = (profiles ?? []).map(p => ({
-        id:         p.id,
-        email:      p.email ?? null,
-        full_name:  p.full_name ?? null,
-        role:       roleMap[p.id] ?? null,
-        created_at: p.created_at as string,
-      }));
-
-      // Sort: current user first, then by join date desc
+      const merged: AppUser[] = allIds.map(uid => {
+        const p = profileMap[uid];
+        return { id: uid, email: p?.email ?? null, full_name: p?.full_name ?? null, role: roleMap[uid] ?? null, created_at: (p?.created_at as string) ?? new Date().toISOString() };
+      });
       merged.sort((a, b) => {
         if (a.id === currentUser?.id) return -1;
         if (b.id === currentUser?.id) return 1;
         return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       });
-
       setUsers(merged);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load users");
@@ -120,18 +106,13 @@ export default function Users() {
     setInviting(true);
     try {
       const { data, error: fnErr } = await supabase.functions.invoke("invite-user", {
-        body: {
-          email:            inviteEmail.trim(),
-          name:             inviteName.trim() || undefined,
-          role:             inviteRole,
-          invited_by_email: currentUser?.email ?? "",
-        },
+        body: { email: inviteEmail.trim(), name: inviteName.trim() || undefined, role: inviteRole, invited_by_email: currentUser?.email ?? "" },
       });
       if (fnErr) throw new Error(fnErr.message);
       if (data?.already_exists) {
-        toast.warning(`${inviteEmail} already has an account — role updated to ${ROLE_LABEL[inviteRole] ?? inviteRole}`);
+        toast.warning(`${inviteEmail} already has an account — role updated`);
       } else {
-        toast.success(`Invite sent to ${inviteEmail}`);
+        toast.success(`Invitation sent to ${inviteEmail}`);
       }
       setInviteEmail(""); setInviteName(""); setInviteRole("analyst");
       await fetchUsers();
@@ -142,24 +123,15 @@ export default function Users() {
     }
   };
 
-  // Admins can write user_roles directly (user_roles_admin_all RLS policy)
   const changeRole = async (u: AppUser, newRole: string) => {
     if (u.id === currentUser?.id) return;
     setChangingRole(u.id);
     try {
-      // Delete existing roles for this user, then insert the new one
-      const { error: delErr } = await supabase
-        .from("user_roles")
-        .delete()
-        .eq("user_id", u.id);
+      const { error: delErr } = await supabase.from("user_roles").delete().eq("user_id", u.id);
       if (delErr) throw new Error(delErr.message);
-
-      const { error: insErr } = await supabase
-        .from("user_roles")
-        .insert({ user_id: u.id, role: newRole });
+      const { error: insErr } = await supabase.from("user_roles").insert({ user_id: u.id, role: newRole });
       if (insErr) throw new Error(insErr.message);
-
-      toast.success(`${u.email ?? u.id} → ${ROLE_LABEL[newRole] ?? newRole}`);
+      toast.success(`Role updated for ${u.email ?? u.id}`);
       await fetchUsers();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Role change failed");
@@ -172,12 +144,9 @@ export default function Users() {
     setConfirmRevokeId(null);
     setRevokingId(u.id);
     try {
-      const { error: delErr } = await supabase
-        .from("user_roles")
-        .delete()
-        .eq("user_id", u.id);
+      const { error: delErr } = await supabase.from("user_roles").delete().eq("user_id", u.id);
       if (delErr) throw new Error(delErr.message);
-      toast.success(`Role removed — ${u.email ?? u.id} can no longer access the platform`);
+      toast.success(`Access removed for ${u.email ?? u.id}`);
       await fetchUsers();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Remove access failed");
@@ -190,9 +159,7 @@ export default function Users() {
     setConfirmRevokeId(null);
     setDeletingId(u.id);
     try {
-      const { data, error: fnErr } = await supabase.functions.invoke("delete-user", {
-        body: { user_id: u.id },
-      });
+      const { data, error: fnErr } = await supabase.functions.invoke("delete-user", { body: { user_id: u.id } });
       if (fnErr) throw new Error(fnErr.message);
       if (data?.error) throw new Error(data.error);
       toast.success(`${u.email ?? u.id} permanently deleted`);
@@ -206,222 +173,223 @@ export default function Users() {
 
   const filtered = users.filter(u => {
     const q = search.toLowerCase();
-    const matchSearch = !q
-      || (u.email ?? "").toLowerCase().includes(q)
-      || (u.full_name ?? "").toLowerCase().includes(q);
-    const matchRole = filterRole === "all" || u.role === filterRole;
+    const matchSearch = !q || (u.email ?? "").toLowerCase().includes(q) || (u.full_name ?? "").toLowerCase().includes(q);
+    const matchRole   = filterRole === "all" || u.role === filterRole;
     return matchSearch && matchRole;
   });
 
-  const isAdmin = currentRole === "admin";
-  const total   = users.length;
-  const byRole  = ROLES.map(r => ({ ...r, count: users.filter(u => u.role === r.value).length }));
-  const noRole  = users.filter(u => !u.role).length;
-
-  const inputCls = "bg-input border border-border px-2 py-1.5 text-xs text-primary focus:outline-none focus:border-primary font-mono";
-  const labelCls = "terminal-label block mb-1";
+  const isAdmin  = currentRole === "admin";
+  const total    = users.length;
+  const byRole   = ROLES.map(r => ({ ...r, count: users.filter(u => u.role === r.value).length }));
+  const noRole   = users.filter(u => !u.role).length;
 
   return (
     <TerminalLayout>
-      <div className="space-y-3">
+      <div className="space-y-6">
 
-        {/* ── Stats ──────────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-8 gap-2">
-          <div className="terminal-panel px-3 py-2">
-            <div className="terminal-label">TOTAL</div>
-            <div className="text-2xl font-bold text-primary mt-0.5 tabular-nums">{total}</div>
+        {/* ── Page header ──────────────────────────────────────────────── */}
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Team Management</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">Manage team members, roles, and access permissions</p>
+        </div>
+
+        {/* ── Stats ────────────────────────────────────────────────────── */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+          <div className="bg-card rounded-lg border border-border px-4 py-3" style={{ boxShadow: "var(--shadow-panel)" }}>
+            <p className="text-xs font-medium text-muted-foreground">Total Users</p>
+            <p className="text-2xl font-bold text-foreground mt-0.5">{total}</p>
           </div>
           {byRole.map(r => (
-            <div key={r.value} className="terminal-panel px-3 py-2">
-              <div className="terminal-label">{ROLE_LABEL[r.value]}</div>
-              <div className="text-2xl font-bold text-primary mt-0.5 tabular-nums">{r.count}</div>
+            <div key={r.value} className="bg-card rounded-lg border border-border px-4 py-3" style={{ boxShadow: "var(--shadow-panel)" }}>
+              <p className="text-xs font-medium text-muted-foreground truncate">{r.label}</p>
+              <p className="text-2xl font-bold text-foreground mt-0.5">{r.count}</p>
             </div>
           ))}
           {noRole > 0 && (
-            <div className="terminal-panel px-3 py-2">
-              <div className="terminal-label text-warning">NO ROLE</div>
-              <div className="text-2xl font-bold text-warning mt-0.5 tabular-nums">{noRole}</div>
+            <div className="bg-card rounded-lg border border-amber-200 px-4 py-3 bg-amber-50" style={{ boxShadow: "var(--shadow-panel)" }}>
+              <p className="text-xs font-medium text-amber-700">No Role</p>
+              <p className="text-2xl font-bold text-amber-700 mt-0.5">{noRole}</p>
             </div>
           )}
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
 
-          {/* ── LEFT: table ─────────────────────────────────────────────── */}
-          <Panel title="TEAM MEMBERS" ticker="REHBAR/TEAM" className="xl:col-span-8">
-
-            {/* Filters */}
-            <div className="flex flex-wrap gap-2 mb-3">
-              <input
-                type="search"
-                placeholder="Search by email or name…"
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                className={cn(inputCls, "flex-1 min-w-[180px]")}
-              />
-              <select
-                value={filterRole}
-                onChange={e => setFilterRole(e.target.value)}
-                className={inputCls}
-              >
-                <option value="all">All Roles</option>
-                {ROLES.map(r => (
-                  <option key={r.value} value={r.value}>{r.label}</option>
-                ))}
-              </select>
+          {/* ── LEFT: Team table ─────────────────────────────────────────── */}
+          <div className="xl:col-span-8 bg-card rounded-lg border border-border overflow-hidden" style={{ boxShadow: "var(--shadow-panel)" }}>
+            {/* Panel header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <h2 className="text-sm font-semibold text-foreground">Team Members</h2>
               <button
                 onClick={fetchUsers}
                 disabled={loading}
-                className="border border-border text-muted-foreground px-3 py-1.5 text-xs tracking-widest hover:border-primary hover:text-primary transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground border border-border rounded-lg px-3 py-1.5 hover:border-primary/40 transition-colors disabled:opacity-50"
               >
-                {loading ? "SYNCING…" : "↻ REFRESH"}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={loading ? "animate-spin" : ""}>
+                  <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                </svg>
+                {loading ? "Syncing…" : "Refresh"}
               </button>
             </div>
 
+            {/* Filters */}
+            <div className="flex flex-wrap gap-3 px-5 py-3 border-b border-border bg-surface-2/40">
+              <div className="relative flex-1 min-w-[200px]">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  type="search"
+                  placeholder="Search by name or email…"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  className="w-full bg-background border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                />
+              </div>
+              <select
+                value={filterRole}
+                onChange={e => setFilterRole(e.target.value)}
+                className="bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+              >
+                <option value="all">All Roles</option>
+                {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+              </select>
+            </div>
+
             {error && (
-              <div className="border border-destructive/40 bg-destructive/5 text-destructive px-3 py-2 text-xs mb-3 tracking-wide">
-                ✗ {error}
+              <div className="mx-5 my-3 flex items-center gap-2 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                {error}
               </div>
             )}
 
             {loading && !users.length ? (
-              <div className="flex items-center justify-center py-12">
-                <span className="text-muted-foreground text-xs tracking-widest animate-pulse">LOADING TEAM DATA…</span>
+              <div className="flex items-center justify-center py-16">
+                <span className="text-sm text-muted-foreground animate-pulse">Loading team members…</span>
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-xs border-collapse">
+                <table className="w-full text-sm border-collapse">
                   <thead>
-                    <tr className="border-b border-border bg-surface/60">
-                      {(["EMAIL", "NAME", "ROLE", "JOINED", isAdmin ? "ACTIONS" : ""] as string[])
-                        .filter(Boolean)
-                        .map(h => (
-                          <th key={h} className="text-left py-2 px-3 text-[9px] tracking-widest text-muted-foreground font-normal whitespace-nowrap border-r border-border/30 last:border-r-0">
-                            {h}
-                          </th>
-                        ))}
+                    <tr className="border-b border-border bg-surface-2/30">
+                      <th className="text-left py-3 px-5 text-xs font-medium text-muted-foreground">Name / Email</th>
+                      <th className="text-left py-3 px-4 text-xs font-medium text-muted-foreground">Role</th>
+                      <th className="text-left py-3 px-4 text-xs font-medium text-muted-foreground">Joined</th>
+                      {isAdmin && <th className="text-left py-3 px-4 text-xs font-medium text-muted-foreground">Actions</th>}
                     </tr>
                   </thead>
                   <tbody>
                     {filtered.length === 0 && (
                       <tr>
-                        <td colSpan={isAdmin ? 5 : 4} className="text-center py-10 text-muted-foreground tracking-wider text-xs">
-                          {search || filterRole !== "all" ? "No users match filter" : "No users found"}
+                        <td colSpan={isAdmin ? 4 : 3} className="text-center py-12 text-sm text-muted-foreground">
+                          {search || filterRole !== "all" ? "No users match your search" : "No users found"}
                         </td>
                       </tr>
                     )}
                     {filtered.map(u => {
                       const isMe       = u.id === currentUser?.id;
-                      const roleStyle  = u.role ? (ROLE_BADGE[u.role] ?? "bg-muted/10 text-muted-foreground border-border/30") : "bg-muted/10 text-muted-foreground border-border/30";
+                      const roleStyle  = u.role ? (ROLE_BADGE[u.role] ?? "bg-slate-50 text-slate-600 border-slate-200") : "bg-amber-50 text-amber-600 border-amber-200";
                       const isChanging = changingRole === u.id;
                       return (
-                        <tr key={u.id} className={cn(
-                          "border-b border-border/40 hover:bg-surface-2 transition-colors align-middle",
-                          isMe && "bg-primary/5"
-                        )}>
-                          {/* Email */}
-                          <td className="py-2.5 px-3 border-r border-border/20">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="font-mono text-primary truncate">{u.email ?? <span className="text-muted-foreground italic">no email</span>}</span>
+                        <tr key={u.id} className={cn("border-b border-border/50 hover:bg-surface-2/50 transition-colors", isMe && "bg-primary/3")}>
+                          {/* Name + Email */}
+                          <td className="py-3.5 px-5">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                                <span className="text-xs font-semibold text-primary">
+                                  {(u.full_name ?? u.email ?? "?")[0].toUpperCase()}
+                                </span>
+                              </div>
+                              <div className="min-w-0">
+                                {u.full_name && <p className="text-sm font-medium text-foreground truncate">{u.full_name}</p>}
+                                <p className={cn("text-xs truncate", u.full_name ? "text-muted-foreground" : "text-sm font-medium text-foreground")}>
+                                  {u.email ?? <span className="italic text-muted-foreground/50">No email</span>}
+                                </p>
+                              </div>
                               {isMe && (
-                                <span className="shrink-0 text-[8px] font-bold tracking-widest text-primary border border-primary/40 px-1 py-px">YOU</span>
+                                <span className="shrink-0 text-xs font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">You</span>
                               )}
                             </div>
                           </td>
-                          {/* Name */}
-                          <td className="py-2.5 px-3 text-foreground/70 border-r border-border/20 whitespace-nowrap">
-                            {u.full_name || <span className="text-muted-foreground/30 italic text-[10px]">—</span>}
-                          </td>
-                          {/* Role badge */}
-                          <td className="py-2.5 px-3 border-r border-border/20 whitespace-nowrap">
+                          {/* Role */}
+                          <td className="py-3.5 px-4">
                             {u.role ? (
-                              <span className={cn("text-[9px] font-bold tracking-widest border px-1.5 py-0.5", roleStyle)}>
-                                {ROLE_LABEL[u.role] ?? u.role.toUpperCase()}
+                              <span className={cn("text-xs font-medium px-2.5 py-1 rounded-full border", roleStyle)}>
+                                {ROLES.find(r => r.value === u.role)?.label ?? u.role}
                               </span>
                             ) : (
-                              <span className="text-[9px] text-warning tracking-widest font-bold">NO ROLE</span>
+                              <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-amber-50 text-amber-600 border border-amber-200">
+                                No role assigned
+                              </span>
                             )}
                           </td>
                           {/* Joined */}
-                          <td className="py-2.5 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">
+                          <td className="py-3.5 px-4 text-sm text-muted-foreground whitespace-nowrap">
                             {fmtDate(u.created_at)}
                           </td>
-                          {/* Actions — admin only */}
+                          {/* Actions */}
                           {isAdmin && (
-                            <td className="py-2 px-3">
+                            <td className="py-3 px-4">
                               {isMe ? (
-                                <span className="text-[9px] text-muted-foreground/25 tracking-widest">—</span>
-
+                                <span className="text-sm text-muted-foreground/30">—</span>
                               ) : isChanging || revokingId === u.id || deletingId === u.id ? (
-                                <span className="text-[9px] text-warning animate-pulse tracking-widest">
-                                  {deletingId === u.id ? "DELETING…" : revokingId === u.id ? "REVOKING…" : "UPDATING…"}
+                                <span className="text-sm text-amber-600 animate-pulse">
+                                  {deletingId === u.id ? "Deleting…" : revokingId === u.id ? "Removing access…" : "Updating…"}
                                 </span>
-
                               ) : confirmRevokeId === u.id ? (
-                                /* ── Confirm step ── */
-                                <div className="space-y-1">
-                                  <div className={cn(
-                                    "text-[9px] font-bold tracking-widest",
-                                    confirmAction === "delete" ? "text-destructive" : "text-warning"
-                                  )}>
-                                    {confirmAction === "delete"
-                                      ? "PERMANENTLY DELETE USER?"
-                                      : "REMOVE ACCESS?"}
-                                  </div>
+                                <div className="space-y-2">
+                                  <p className={cn("text-sm font-medium", confirmAction === "delete" ? "text-red-700" : "text-amber-700")}>
+                                    {confirmAction === "delete" ? "Permanently delete this user?" : "Remove their access?"}
+                                  </p>
                                   {confirmAction === "delete" && (
-                                    <div className="text-[8px] text-muted-foreground tracking-wide">
-                                      This cannot be undone.
-                                    </div>
+                                    <p className="text-xs text-muted-foreground">This action cannot be undone.</p>
                                   )}
-                                  <div className="flex items-center gap-1.5 mt-1">
+                                  <div className="flex items-center gap-2 mt-1">
                                     <button
                                       onClick={() => confirmAction === "delete" ? deleteUser(u) : removeAccess(u)}
                                       className={cn(
-                                        "text-[9px] font-bold tracking-widest border px-2 py-0.5 transition-colors",
+                                        "text-sm font-medium px-3 py-1.5 rounded-lg border transition-colors",
                                         confirmAction === "delete"
-                                          ? "border-destructive text-destructive bg-destructive/10 hover:bg-destructive/20"
-                                          : "border-warning/60 text-warning bg-warning/10 hover:bg-warning/20"
+                                          ? "border-red-300 text-red-700 bg-red-50 hover:bg-red-100"
+                                          : "border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100"
                                       )}
                                     >
-                                      {confirmAction === "delete" ? "DELETE" : "REVOKE"}
+                                      {confirmAction === "delete" ? "Delete" : "Remove Access"}
                                     </button>
                                     <button
                                       onClick={() => setConfirmRevokeId(null)}
-                                      className="text-[9px] font-bold tracking-widest border border-border text-muted-foreground px-2 py-0.5 hover:border-primary hover:text-primary transition-colors"
+                                      className="text-sm font-medium px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:text-foreground transition-colors"
                                     >
-                                      CANCEL
+                                      Cancel
                                     </button>
                                   </div>
                                 </div>
-
                               ) : (
-                                /* ── Normal: role dropdown + revoke + delete ── */
-                                <div className="flex items-center gap-1.5 flex-wrap">
+                                <div className="flex items-center gap-2 flex-wrap">
                                   <select
                                     value={u.role ?? ""}
                                     onChange={e => changeRole(u, e.target.value)}
-                                    className="bg-input border border-border text-[9px] text-muted-foreground px-1.5 py-1 focus:outline-none focus:border-primary hover:border-primary/60 transition-colors cursor-pointer font-mono tracking-wider"
+                                    className="bg-background border border-border rounded-md text-xs px-2 py-1.5 focus:outline-none focus:border-primary hover:border-primary/40 cursor-pointer"
                                   >
-                                    <option value="" disabled>— ROLE —</option>
-                                    {ROLES.map(r => (
-                                      <option key={r.value} value={r.value}>
-                                        {r.label.toUpperCase()}
-                                      </option>
-                                    ))}
+                                    <option value="" disabled>Change role…</option>
+                                    {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                                   </select>
                                   <button
                                     onClick={() => { setConfirmAction("revoke"); setConfirmRevokeId(u.id); }}
-                                    className="text-[9px] font-bold tracking-widest border border-warning/40 text-warning/70 px-2 py-1 hover:bg-warning/10 hover:border-warning hover:text-warning transition-colors whitespace-nowrap"
+                                    className="text-xs font-medium px-2.5 py-1.5 rounded-md border border-amber-200 text-amber-700 hover:bg-amber-50 transition-colors"
                                     title="Remove role — user keeps their account"
                                   >
-                                    REVOKE
+                                    Remove Access
                                   </button>
                                   <button
                                     onClick={() => { setConfirmAction("delete"); setConfirmRevokeId(u.id); }}
-                                    className="text-[9px] font-bold tracking-widest border border-destructive/40 text-destructive/70 px-2 py-1 hover:bg-destructive/10 hover:border-destructive hover:text-destructive transition-colors whitespace-nowrap"
+                                    className="text-xs font-medium px-2.5 py-1.5 rounded-md border border-red-200 text-red-700 hover:bg-red-50 transition-colors"
                                     title="Permanently delete this user"
                                   >
-                                    DELETE
+                                    Delete
                                   </button>
                                 </div>
                               )}
@@ -436,36 +404,40 @@ export default function Users() {
             )}
 
             {!loading && filtered.length > 0 && (
-              <div className="mt-2 pt-2 border-t border-border/30 text-[9px] text-muted-foreground tracking-wider">
-                SHOWING {filtered.length} OF {total} TEAM MEMBERS
+              <div className="px-5 py-3 border-t border-border bg-surface-2/30">
+                <p className="text-xs text-muted-foreground">Showing {filtered.length} of {total} team members</p>
               </div>
             )}
-          </Panel>
+          </div>
 
-          {/* ── RIGHT ────────────────────────────────────────────────────── */}
-          <div className="xl:col-span-4 space-y-3">
+          {/* ── RIGHT: Invite + Permissions ──────────────────────────────── */}
+          <div className="xl:col-span-4 space-y-5">
 
-            {/* Invite panel — admin only */}
+            {/* Invite panel */}
             {isAdmin ? (
-              <Panel title="INVITE NEW USER" ticker="REHBAR/INVITE" status="live">
-                <form onSubmit={sendInvite} className="space-y-3">
+              <div className="bg-card rounded-lg border border-border overflow-hidden" style={{ boxShadow: "var(--shadow-panel)" }}>
+                <div className="px-5 py-4 border-b border-border">
+                  <h2 className="text-sm font-semibold text-foreground">Invite New Team Member</h2>
+                  <p className="text-xs text-muted-foreground mt-0.5">Send a branded invitation email</p>
+                </div>
+                <form onSubmit={sendInvite} className="px-5 py-4 space-y-4">
                   <div>
-                    <label className={labelCls}>Full Name (optional)</label>
+                    <label className="block text-sm font-medium text-foreground mb-1.5">Full Name <span className="text-muted-foreground font-normal">(optional)</span></label>
                     <input
                       type="text"
-                      className={cn(inputCls, "w-full")}
-                      placeholder="Raashid Ahmed"
+                      className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                      placeholder="e.g. Raashid Ahmed"
                       value={inviteName}
                       onChange={e => setInviteName(e.target.value)}
                       disabled={inviting}
                     />
                   </div>
                   <div>
-                    <label className={labelCls}>Email Address *</label>
+                    <label className="block text-sm font-medium text-foreground mb-1.5">Email Address <span className="text-red-500">*</span></label>
                     <input
                       required
                       type="email"
-                      className={cn(inputCls, "w-full")}
+                      className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
                       placeholder="analyst@rehbar.co.in"
                       value={inviteEmail}
                       onChange={e => setInviteEmail(e.target.value)}
@@ -473,103 +445,90 @@ export default function Users() {
                     />
                   </div>
                   <div>
-                    <label className={labelCls}>Assign Role *</label>
+                    <label className="block text-sm font-medium text-foreground mb-1.5">Assign Role <span className="text-red-500">*</span></label>
                     <select
-                      className={cn(inputCls, "w-full")}
+                      className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
                       value={inviteRole}
                       onChange={e => setInviteRole(e.target.value)}
                       disabled={inviting}
                     >
-                      {ROLES.map(r => (
-                        <option key={r.value} value={r.value}>{r.label}</option>
-                      ))}
+                      {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                     </select>
                   </div>
 
-                  {/* Live role description */}
-                  <div className="border border-border/50 bg-surface/40 px-3 py-2.5 text-[10px] space-y-1">
-                    {{
-                      admin:                { color: "text-destructive",    title: "ADMINISTRATOR",        desc: "Full access: create users, manage roles, create / edit / delete cases, approve IC, assign cases." },
-                      analyst:              { color: "text-primary",        title: "CREDIT ANALYST",       desc: "Create & edit cases, create master data, recommend cases to IC committee." },
-                      business_development: { color: "text-accent",         title: "BUSINESS DEVELOPMENT", desc: "Create cases, create master data, view all cases. Cannot edit or push to IC." },
-                      ic_member:            { color: "text-success",        title: "IC MEMBER",            desc: "View-only access to cases that have been recommended to IC." },
-                      credit_committee:     { color: "text-warning",        title: "CREDIT COMMITTEE",     desc: "View cases and issue final approval decisions on IC-recommended cases." },
-                      operations:           { color: "text-muted-foreground",title: "OPERATIONS",          desc: "View-only access across the platform. No create or edit permissions." },
-                    }[inviteRole] && (() => {
-                      const r = ({
-                        admin:                { color: "text-destructive",    title: "ADMINISTRATOR",        desc: "Full access: create users, manage roles, create / edit / delete cases, approve IC, assign cases." },
-                        analyst:              { color: "text-primary",        title: "CREDIT ANALYST",       desc: "Create & edit cases, create master data, recommend cases to IC committee." },
-                        business_development: { color: "text-accent",         title: "BUSINESS DEVELOPMENT", desc: "Create cases, create master data, view all cases. Cannot edit or push to IC." },
-                        ic_member:            { color: "text-success",        title: "IC MEMBER",            desc: "View-only access to cases that have been recommended to IC." },
-                        credit_committee:     { color: "text-warning",        title: "CREDIT COMMITTEE",     desc: "View cases and issue final approval decisions on IC-recommended cases." },
-                        operations:           { color: "text-muted-foreground",title: "OPERATIONS",          desc: "View-only access across the platform. No create or edit permissions." },
-                      } as Record<string, {color:string;title:string;desc:string}>)[inviteRole];
-                      return r ? (
-                        <>
-                          <div className={cn("font-bold tracking-wider", r.color)}>{r.title}</div>
-                          <div className="text-muted-foreground leading-relaxed">{r.desc}</div>
-                        </>
-                      ) : null;
-                    })()}
-                  </div>
+                  {/* Role description */}
+                  {ROLE_DESCRIPTIONS[inviteRole] && (
+                    <div className="rounded-lg bg-surface-2 border border-border px-3 py-2.5">
+                      <p className="text-xs font-medium text-foreground mb-0.5">
+                        {ROLES.find(r => r.value === inviteRole)?.label}
+                      </p>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {ROLE_DESCRIPTIONS[inviteRole]}
+                      </p>
+                    </div>
+                  )}
 
                   <button
                     type="submit"
                     disabled={inviting || !inviteEmail.trim()}
-                    className="w-full bg-primary text-primary-foreground py-2 text-xs tracking-widest font-bold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+                    className="w-full bg-primary text-white rounded-lg py-3 text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    {inviting ? "SENDING INVITE…" : `[SEND INVITE → ${ROLE_LABEL[inviteRole] ?? inviteRole}]`}
+                    {inviting ? "Sending invitation…" : "Send Invitation"}
                   </button>
 
-                  <p className="text-[9px] text-muted-foreground/50 leading-relaxed tracking-wide">
-                    A branded Rehbar invite email is sent via Resend. If the user already has an account, their role is updated and no email is re-sent.
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    A Rehbar-branded invite email will be sent. If the user already has an account, their role will be updated.
                   </p>
                 </form>
-              </Panel>
+              </div>
             ) : (
-              <Panel title="ACCESS RESTRICTED" ticker="REHBAR/TEAM" status="warn">
-                <div className="py-6 text-center space-y-2">
-                  <div className="text-warning text-2xl">⊘</div>
-                  <div className="text-xs text-muted-foreground tracking-wider leading-relaxed">
-                    Only Administrators can invite users or change roles.<br />
-                    Contact your admin to request changes.
-                  </div>
+              <div className="bg-card rounded-lg border border-border p-6 text-center" style={{ boxShadow: "var(--shadow-panel)" }}>
+                <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center mx-auto mb-3">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
                 </div>
-              </Panel>
+                <p className="text-sm font-medium text-foreground mb-1">Admin access required</p>
+                <p className="text-xs text-muted-foreground">Only administrators can invite users or change roles. Contact your administrator to request changes.</p>
+              </div>
             )}
 
             {/* Permissions matrix */}
-            <Panel title="ROLE PERMISSIONS" ticker="RBAC">
+            <div className="bg-card rounded-lg border border-border overflow-hidden" style={{ boxShadow: "var(--shadow-panel)" }}>
+              <div className="px-5 py-4 border-b border-border">
+                <h2 className="text-sm font-semibold text-foreground">Role Permissions</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">What each role can do</p>
+              </div>
               <div className="overflow-x-auto">
-                <table className="w-full text-[9px] border-collapse">
+                <table className="w-full text-xs border-collapse">
                   <thead>
-                    <tr className="border-b border-border">
-                      <th className="text-left py-1.5 px-2 text-muted-foreground font-normal tracking-widest whitespace-nowrap">PERMISSION</th>
-                      {["ADM","ANL","BD","IC","CC","OPS"].map(r => (
-                        <th key={r} className="py-1.5 px-2 text-muted-foreground font-normal tracking-widest text-center">{r}</th>
+                    <tr className="border-b border-border bg-surface-2/30">
+                      <th className="text-left py-2.5 px-4 text-xs font-medium text-muted-foreground">Permission</th>
+                      {["Admin","Analyst","BD","IC","CC","Ops"].map(r => (
+                        <th key={r} className="py-2.5 px-2 text-xs font-medium text-muted-foreground text-center">{r}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {([
-                      ["View Cases",    [1,1,1,1,1,1]],
-                      ["Create Case",   [1,1,1,0,0,0]],
-                      ["Edit Case",     [1,1,0,0,0,0]],
-                      ["Delete Case",   [1,0,0,0,0,0]],
-                      ["Create Master", [1,1,1,0,0,0]],
-                      ["Assign Case",   [1,0,0,0,0,0]],
-                      ["Recommend IC",  [1,1,0,0,0,0]],
-                      ["Approve IC",    [1,0,0,0,1,0]],
-                      ["Manage Users",  [1,0,0,0,0,0]],
+                      ["View Cases",     [1,1,1,1,1,1]],
+                      ["Create Case",    [1,1,1,0,0,0]],
+                      ["Edit Case",      [1,1,0,0,0,0]],
+                      ["Delete Case",    [1,0,0,0,0,0]],
+                      ["Master Data",    [1,1,1,0,0,0]],
+                      ["Assign Case",    [1,0,0,0,0,0]],
+                      ["Recommend IC",   [1,1,0,0,0,0]],
+                      ["Approve IC",     [1,0,0,0,1,0]],
+                      ["Manage Users",   [1,0,0,0,0,0]],
                     ] as [string, number[]][]).map(([label, perms]) => (
-                      <tr key={label} className="border-b border-border/30 hover:bg-surface-2">
-                        <td className="py-1.5 px-2 text-muted-foreground whitespace-nowrap">{label}</td>
+                      <tr key={label} className="border-b border-border/40 hover:bg-surface-2/40">
+                        <td className="py-2.5 px-4 text-sm text-foreground/80 whitespace-nowrap">{label}</td>
                         {perms.map((p, i) => (
-                          <td key={i} className="py-1.5 px-2 text-center">
+                          <td key={i} className="py-2.5 px-2 text-center">
                             {p
-                              ? <span className="text-success font-bold">✓</span>
-                              : <span className="text-muted-foreground/25">—</span>
-                            }
+                              ? <span className="inline-block w-4 h-4 rounded-full bg-green-100 text-green-600 text-[10px] leading-4 font-bold text-center">✓</span>
+                              : <span className="inline-block w-1 h-1 rounded-full bg-border mx-auto" />}
                           </td>
                         ))}
                       </tr>
@@ -577,8 +536,7 @@ export default function Users() {
                   </tbody>
                 </table>
               </div>
-            </Panel>
-
+            </div>
           </div>
         </div>
       </div>

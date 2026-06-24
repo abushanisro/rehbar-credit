@@ -124,7 +124,7 @@ export default function ICAuth() {
     }
   };
 
-  const inputCls = "w-full bg-input border border-border px-3 py-2 text-primary font-mono focus:outline-none focus:border-primary";
+  const inputCls = "w-full bg-background border border-border rounded-md px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-colors";
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
@@ -168,14 +168,14 @@ export default function ICAuth() {
           {/* Login form */}
           <form onSubmit={submit} className="p-5 space-y-4">
             <div>
-              <label className="terminal-label block mb-1">▶ IC MEMBER EMAIL</label>
+              <label className="block text-sm font-medium text-foreground mb-1.5">Email Address</label>
               <input
                 type="email" value={email} onChange={e => setEmail(e.target.value)}
                 required autoFocus className={inputCls} placeholder="icmember@rehbar.co.in"
               />
             </div>
             <div>
-              <label className="terminal-label block mb-1">▶ PASSPHRASE</label>
+              <label className="block text-sm font-medium text-foreground mb-1.5">Passphrase</label>
               <input
                 type="password" value={password} onChange={e => setPassword(e.target.value)}
                 required className={inputCls} placeholder="••••••••"
@@ -183,19 +183,19 @@ export default function ICAuth() {
             </div>
             <button
               type="submit" disabled={loading || Date.now() < lockedUntil}
-              className="w-full bg-primary text-primary-foreground py-2.5 font-bold tracking-widest hover:brightness-110 disabled:opacity-50 transition"
+              className="w-full bg-primary text-primary-foreground py-2.5 text-sm font-semibold rounded-md hover:bg-primary/90 disabled:opacity-50 transition"
             >
-              {loading ? "▶ AUTHENTICATING…" : remainingSecs > 0 ? `⊘ LOCKED ${remainingSecs}s` : "▶ ENTER IC PORTAL"}
+              {loading ? "Signing in…" : remainingSecs > 0 ? `Locked (${remainingSecs}s)` : "Sign In"}
             </button>
           </form>
         </div>
 
-        <div className="mt-4 text-center text-[10px] text-muted-foreground tracking-widest">
-          RESTRICTED ACCESS · INVESTMENT COMMITTEE ONLY
+        <div className="mt-4 text-center text-xs text-muted-foreground">
+          Restricted access · Investment Committee only
         </div>
         <div className="mt-2 text-center">
-          <Link to="/auth" className="text-[10px] text-muted-foreground/50 hover:text-primary tracking-widest transition-colors">
-            ← BACK TO MAIN LOGIN
+          <Link to="/auth" className="text-xs text-muted-foreground/50 hover:text-primary transition-colors">
+            ← Back to main login
           </Link>
         </div>
       </div>

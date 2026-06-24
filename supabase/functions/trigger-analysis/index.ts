@@ -499,6 +499,24 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    // Route to Python microservice when enabled
+    if (Deno.env.get("PYTHON_SERVICE_ENABLED") === "true") {
+      const jobs = body.document_ids.map((doc_id) => ({
+        case_id:     body.case_id,
+        document_id: doc_id,
+        user_id:     body.user_id,
+        job_type:    "financials",
+        payload:     {},
+      }));
+      const { data: inserted } = await supabase.from("extraction_jobs").insert(jobs).select("id");
+      await supabase.from("financial_documents")
+        .update({ extraction_status: "pending", extraction_error: null })
+        .in("id", body.document_ids);
+      return new Response(JSON.stringify({ ok: true, queued: jobs.length, job_ids: inserted?.map((j: { id: string }) => j.id) ?? [] }), {
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+
     await supabase.from("financial_documents")
       .update({ extraction_status: "running", extraction_error: null })
       .in("id", body.document_ids);

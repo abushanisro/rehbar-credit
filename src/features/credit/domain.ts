@@ -30,7 +30,7 @@ export type CaseStatus =
   | "queries_resubmission";
 
 export type StatementType = "profit_loss" | "balance_sheet" | "cash_flow" | "projections" | "all_in_one";
-export type DocClass = StatementType | "bank_statement" | "gst_return" | "provisional" | "other";
+export type DocClass = StatementType | "bank_statement" | "gst_return" | "cibil_report" | "provisional" | "other";
 export type ThresholdStatus = "green" | "amber" | "red" | "na";
 
 export interface ProductMeta {
@@ -184,18 +184,18 @@ export const CASE_STATUS_META: Record<CaseStatus, { label: string; color: string
  * Each section is rendered as its own panel in the IC Note editor.
  */
 export const IC_SECTIONS = [
-  { id: "executive_summary", roman: "I", title: "EXECUTIVE SUMMARY", desc: "Overview, fund amount, reason, key ratios, strategic rationale, policy exceptions, conditions precedent" },
-  { id: "client_promoter", roman: "II", title: "CLIENT & PROMOTER PROFILE", desc: "Legal name, constitution, year established, principal borrower, group summary, promoter CIBIL" },
-  { id: "investment_structure", roman: "III", title: "PROPOSED INVESTMENT STRUCTURE", desc: "End use, facility details, IRR, collateral, short-term stress" },
-  { id: "rehbar_funding_history", roman: "IV", title: "REHBAR FUNDING HISTORY", desc: "Historical funding to client / Non-Rehbar history for new clients" },
-  { id: "historical_financial", roman: "V", title: "HISTORICAL FINANCIAL ANALYSIS (3Y)", desc: "P&L YoY, BS YoY (reconstructed if needed), qualitative observations" },
-  { id: "projections", roman: "VI", title: "PROJECTIONS & ESTIMATES", desc: "P&L and BS projections (3Y), assumption justification" },
-  { id: "key_ratios", roman: "VII", title: "KEY FINANCIAL RATIOS", desc: "Liquidity, Leverage, Efficiency, Profitability, Coverage — historical & projected" },
-  { id: "cash_flow", roman: "VIII", title: "CASH FLOW STATEMENT", desc: "Operating, investing, financing analysis for repayment capacity" },
-  { id: "due_diligence", roman: "IX", title: "DUE DILIGENCE EXCERPTS", desc: "External DD findings (mandatory for Pvt Ltd/Ltd), stakeholder interviews" },
-  { id: "risk_assessment", roman: "X", title: "RISK ASSESSMENT & MITIGATION", desc: "Business, industry, financial, transaction risks + mitigants" },
-  { id: "visit_reference", roman: "XI", title: "VISIT REPORT, REFERENCE CHECKS, EXEC RECOMMENDATION", desc: "Site visit, reference checks (vendors, bankers, customers), exec recommendation" },
-  { id: "product_specifics", roman: "XII", title: "SPECIFIC PRODUCT REQUIREMENTS & EXEMPTIONS", desc: "Product-rule application (PF/TF projections, PLS reporting, HL FOIR/LTV, etc.)" },
+  { id: "executive_summary",    roman: "I",    title: "EXECUTIVE SUMMARY",                                    short: "Exec Summary",      desc: "Overview, fund amount, reason, key ratios, strategic rationale, policy exceptions, conditions precedent" },
+  { id: "client_promoter",      roman: "II",   title: "CLIENT & PROMOTER PROFILE",                           short: "Client Profile",    desc: "Legal name, constitution, year established, principal borrower, group summary, promoter CIBIL" },
+  { id: "investment_structure", roman: "III",  title: "PROPOSED INVESTMENT STRUCTURE",                       short: "Investment",        desc: "End use, facility details, IRR, collateral, short-term stress" },
+  { id: "rehbar_funding_history",roman: "IV",  title: "REHBAR FUNDING HISTORY",                              short: "Funding History",   desc: "Historical funding to client / Non-Rehbar history for new clients" },
+  { id: "historical_financial", roman: "V",    title: "HISTORICAL FINANCIAL ANALYSIS (3Y)",                  short: "Financials",        desc: "P&L YoY, BS YoY (reconstructed if needed), qualitative observations" },
+  { id: "projections",          roman: "VI",   title: "PROJECTIONS & ESTIMATES",                             short: "Projections",       desc: "P&L and BS projections (3Y), assumption justification" },
+  { id: "key_ratios",           roman: "VII",  title: "KEY FINANCIAL RATIOS",                                short: "Key Ratios",        desc: "Liquidity, Leverage, Efficiency, Profitability, Coverage — historical & projected" },
+  { id: "cash_flow",            roman: "VIII", title: "CASH FLOW STATEMENT",                                 short: "Cash Flow",         desc: "Operating, investing, financing analysis for repayment capacity" },
+  { id: "due_diligence",        roman: "IX",   title: "DUE DILIGENCE EXCERPTS",                              short: "Due Diligence",     desc: "External DD findings (mandatory for Pvt Ltd/Ltd), stakeholder interviews" },
+  { id: "risk_assessment",      roman: "X",    title: "RISK ASSESSMENT & MITIGATION",                        short: "Risk Assessment",   desc: "Business, industry, financial, transaction risks + mitigants" },
+  { id: "visit_reference",      roman: "XI",   title: "VISIT REPORT & EXEC RECOMMENDATION",                  short: "Visit Report",      desc: "Site visit, reference checks (vendors, bankers, customers), exec recommendation" },
+  { id: "product_specifics",    roman: "XII",  title: "SPECIFIC PRODUCT REQUIREMENTS & EXEMPTIONS",          short: "Product Reqs",      desc: "Product-rule application (PF/TF projections, PLS reporting, HL FOIR/LTV, etc.)" },
 ] as const;
 
 export type ICSectionId = (typeof IC_SECTIONS)[number]["id"];

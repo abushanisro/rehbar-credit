@@ -1,4 +1,4 @@
-﻿import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
+﻿import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { RoomProvider } from "@/liveblocks.config";
 import { CollabAvatarStack, TabPresenceDots, LiveCursors } from "@/components/collab/CollabPresence";
@@ -35,11 +35,25 @@ import { ProvisionalTab } from "@/tabs/case/ProvisionalTab";
 import type { ProvPeriod } from "@/tabs/case/ProvisionalTab";
 import { AccumnBsaPanel } from "@/components/case/AccumnBsaPanel";
 import { AccumnApiPanel } from "@/components/case/AccumnApiPanel";
+import { CibilTab, type CibilReportRow } from "@/tabs/case/CibilTab";
+import { DerivedCashFlowPanel } from "@/components/case/DerivedCashFlowPanel";
+import { buildDerivedCashFlowSeries } from "@/features/case/derivedCashFlow";
+import { runArticulationChecks, CHECK_RESULT_ROW } from "@/features/case/articulationChecks";
+import type { ArticulationCheck } from "@/features/case/articulationChecks";
+import { parseAccumnGstExcel } from "@/lib/gst-accumn-excel-parser";
+import { parseBsaExcel, isBsaExcel, type BsaParseResult } from "@/lib/bsa-excel-parser";
+import { UploadGrid as CompactUploadGrid } from "@/components/case/UploadGrid";
+import { ICNoteDocument } from "@/tabs/case/ic/ICNoteDocument";
+import type { IcNoteShape } from "@/tabs/case/ic/ICNoteDocument";
+import { buildIcNoteHtml as buildIcNoteHtmlFull, buildIcNotePrintCss } from "@/tabs/case/ic/buildIcNoteHtml";
+import { TriangulationTab } from "@/tabs/case/TriangulationTab";
+import type { TriangulationData } from "@/lib/triangulation-excel-parser";
 
 type CaseRow = Tables<"credit_cases">;
 type DocRow = Tables<"financial_documents">;
 type ExtractedRow = Tables<"extracted_financials">;
 type RatioRow = Tables<"financial_ratios">;
+interface BsaReportRow { id: string; case_id: string; document_id: string | null; report_data: BsaParseResult; company_name: string | null; period_covered: string | null; abb: number | null; created_at: string }
 
 interface RatioRiskFactor { severity: "HIGH" | "MEDIUM" | "LOW"; category: string; description: string }
 interface RatioAnalysisResult {
@@ -432,7 +446,7 @@ export default function CaseView() {
   const { id } = useParams<{ id: string }>();
   if (!id) return null;
   return (
-    <RoomProvider id={`case-${id}`} initialPresence={{ name: "", email: "", color: "#E8721C", activeTab: "upload", editingField: null, cursor: null }}>
+    <RoomProvider id={`case-${id}`} initialPresence={{ name: "", email: "", color: "#E8721C", activeTab: "review", editingField: null, cursor: null }}>
       <CaseViewInner />
     </RoomProvider>
   );
@@ -442,11 +456,11 @@ function CaseViewInner() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [tab, setTabRaw] = useState<"upload" | "review" | "provisional" | "ratios" | "projections" | "ic_note" | "bank" | "gst" | "partner">("upload");
+  const [tab, setTabRaw] = useState<"review" | "provisional" | "ratios" | "projections" | "ic_note" | "bank" | "gst" | "cibil" | "triangulation" | "partner">("review");
   const [entity, setEntity] = useState<"main" | "partner">("main");
-  const [partnerSubTab, setPartnerSubTab] = useState<"upload" | "review" | "ratios" | "bank" | "gst">("upload");
+  const [partnerSubTab, setPartnerSubTab] = useState<"review" | "ratios" | "bank" | "gst">("review");
   const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
-  const setTab = (t: typeof tab) => { setTabRaw(t); };
+  const setTab = (t: typeof tab) => { setTabRaw(t); window.scrollTo({ top: 0 }); };
   const [cc, setCc] = useState<CaseRow | null>(null);
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [extracted, setExtracted] = useState<ExtractedRow[]>([]);
@@ -457,7 +471,10 @@ function CaseViewInner() {
   const [ratioAiProgress, setRatioAiProgress] = useState(0);
   const [ratioAiLabel, setRatioAiLabel] = useState("");
   const [bankData, setBankData]             = useState<Tables<"bank_statement_data">[]>([]);
+  const [bsaData, setBsaData]               = useState<BsaReportRow | null>(null);
+  const [triangulationData, setTriangulationData] = useState<{ id: string; case_id: string; report_data: TriangulationData; period_covered: string | null; created_at: string } | null>(null);
   const [gstData, setGstData]               = useState<Tables<"gst_return_data">[]>([]);
+  const [cibilData, setCibilData]           = useState<CibilReportRow[]>([]);
   const [accumnData, setAccumnData]         = useState<AccumnReport | null>(null);
   const [accumnOrders, setAccumnOrders]     = useState<Tables<"accumn_api_orders">[]>([]);
   const [linkedCompany, setLinkedCompany]   = useState<Record<string, string | null> | null>(null);
@@ -543,7 +560,7 @@ function CaseViewInner() {
 
   const reload = useCallback(async () => {
     if (!id) return;
-    const [c, d, e, r, bk, gs, ao] = await Promise.all([
+    const [c, d, e, r, bk, gs, ao, cr] = await Promise.all([
       supabase.from("credit_cases").select("*").eq("id", id).single(),
       supabase.from("financial_documents").select("*").eq("case_id", id).order("created_at"),
       supabase.from("extracted_financials").select("*").eq("case_id", id),
@@ -551,6 +568,7 @@ function CaseViewInner() {
       supabase.from("bank_statement_data").select("*").eq("case_id", id).order("month"),
       supabase.from("gst_return_data").select("*").eq("case_id", id).order("period"),
       supabase.from("accumn_api_orders").select("*").eq("case_id", id).order("created_at", { ascending: false }),
+      (supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> }).from("cibil_report_data").select("*").eq("case_id", id).order("created_at", { ascending: false }),
     ]);
     if (!c.data) { navigate("/", { replace: true }); return; }
     setCc(c.data);
@@ -560,14 +578,18 @@ function CaseViewInner() {
     setBankData(bk.data ?? []);
     setGstData(gs.data ?? []);
     setAccumnOrders((ao.data ?? []) as Tables<"accumn_api_orders">[]);
+    setCibilData((cr as { data: CibilReportRow[] | null }).data ?? []);
 
-    // Load Accumn GST analytical report (not in generated TS types)
+    // Load Accumn GST analytical report + BSA report (not in generated TS types)
     const dbRaw = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
-    const { data: accumnRow } = await (dbRaw.from("gst_accumn_reports")
-      .select("report_data")
-      .eq("case_id", id)
-      .maybeSingle() as Promise<{ data: { report_data: AccumnReport } | null }>);
+    const [{ data: accumnRow }, { data: bsaRow }, { data: triRow }] = await Promise.all([
+      dbRaw.from("gst_accumn_reports").select("report_data").eq("case_id", id).maybeSingle() as Promise<{ data: { report_data: AccumnReport } | null }>,
+      dbRaw.from("bsa_report_data").select("*").eq("case_id", id).order("created_at", { ascending: false }).limit(1).maybeSingle() as Promise<{ data: BsaReportRow | null }>,
+      dbRaw.from("triangulation_data").select("*").eq("case_id", id).maybeSingle() as Promise<{ data: { id: string; case_id: string; report_data: TriangulationData; period_covered: string | null; created_at: string } | null }>,
+    ]);
     setAccumnData(accumnRow?.report_data ?? null);
+    setBsaData(bsaRow ?? null);
+    setTriangulationData(triRow ?? null);
 
     // Load linked company MCA profile + directors
     const companyId = (c.data as unknown as { company_id?: string }).company_id;
@@ -805,6 +827,59 @@ function CaseViewInner() {
         if (error) throw error;
         toast.success("GST re-extraction queued");
 
+      } else if (doc.doc_class === "projections") {
+        await supabase.from("financial_documents")
+          .update({ extraction_status: "running", extraction_error: null })
+          .eq("id", doc.id);
+        const ext = doc.file_name.split(".").pop()?.toLowerCase() ?? "";
+        const isExcelFile = ["xlsx", "xls", "csv"].includes(ext);
+        if (isExcelFile) {
+          const { data: { session: retrySession } } = await supabase.auth.getSession();
+          const retryRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-analysis`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${retrySession?.access_token ?? ""}`,
+              "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+            },
+            body: JSON.stringify({ case_id: cc.id, user_id: user.id, document_ids: [doc.id] }),
+          });
+          if (!retryRes.ok) throw new Error(`trigger-analysis HTTP ${retryRes.status}`);
+        } else {
+          const { error } = await supabase.functions.invoke("extract-projections", {
+            body: { case_id: cc.id, user_id: user.id, document_id: doc.id },
+          });
+          if (error) throw error;
+        }
+        toast.success("Projections re-extraction queued");
+
+      } else if (doc.doc_class === "provisional") {
+        await supabase.from("financial_documents")
+          .update({ extraction_status: "running", extraction_error: null })
+          .eq("id", doc.id);
+        const ext = doc.file_name.split(".").pop()?.toLowerCase() ?? "";
+        const isExcelFile = ["xlsx", "xls", "csv"].includes(ext);
+        if (isExcelFile) {
+          const { data: { session: retrySession } } = await supabase.auth.getSession();
+          const retryRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-analysis`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${retrySession?.access_token ?? ""}`,
+              "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+            },
+            body: JSON.stringify({ case_id: cc.id, user_id: user.id, document_ids: [doc.id] }),
+          });
+          if (!retryRes.ok) throw new Error(`trigger-analysis HTTP ${retryRes.status}`);
+        } else {
+          // Fire and poll — conversion happens server-side inside the edge function
+          supabase.functions.invoke("extract-provisional", {
+            body: { case_id: cc.id, user_id: user.id, document_id: doc.id },
+          }).catch(() => {});
+        }
+        await pollExtractionStatus(doc.id, new AbortController().signal);
+        toast.success("Provisional re-extraction complete");
+
       } else if (FINANCIAL_CLASSES_SET.has(doc.doc_class)) {
         await supabase.from("financial_documents")
           .update({ extraction_status: "running", extraction_error: null })
@@ -826,13 +901,7 @@ function CaseViewInner() {
           throw new Error(errMsg);
         }
 
-        if (doc.doc_class === "provisional") {
-          await pollExtractionStatus(doc.id, new AbortController().signal);
-          await convertExtractedToProvisional(cc.id, doc.id);
-          toast.success("Provisional re-extraction complete");
-        } else {
-          toast.success("Analysis re-queued");
-        }
+        toast.success("Analysis re-queued");
       }
 
       await reload();
@@ -892,7 +961,27 @@ function CaseViewInner() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  if (!cc) return <TerminalLayout><div className="text-muted-foreground">LOADING CASE...</div></TerminalLayout>;
+  const articulationChecks = useMemo(() => runArticulationChecks(extracted), [extracted]);
+  const derivedCFSeries    = useMemo(() => buildDerivedCashFlowSeries(extracted), [extracted]);
+  // Map "stmtType:label:fy" → worst failing check for inline row highlighting
+  const checkByRowKey = useMemo(() => {
+    const map = new Map<string, ArticulationCheck>();
+    for (const check of articulationChecks) {
+      if (check.status === "pass" || check.status === "skip" || check.fiscal_year === null) continue;
+      for (const [prefix, target] of Object.entries(CHECK_RESULT_ROW)) {
+        if (check.id.startsWith(prefix + "_")) {
+          const key = `${target.stmtType}:${target.label}:${check.fiscal_year}`;
+          const existing = map.get(key);
+          if (!existing || (check.status === "fail" && existing.status !== "fail")) {
+            map.set(key, check);
+          }
+        }
+      }
+    }
+    return map;
+  }, [articulationChecks]);
+
+  if (!cc) return <TerminalLayout><div className="text-muted-foreground text-sm">Loading case…</div></TerminalLayout>;
 
 
   const product = PRODUCTS[cc.product_type];
@@ -1418,11 +1507,20 @@ function CaseViewInner() {
           const err = await triggerRes.json().catch(() => ({})) as Record<string, unknown>;
           throw new Error(String(err?.error ?? `Failed to queue analysis (HTTP ${triggerRes.status})`));
         }
+        const triggerJson = await triggerRes.json().catch(() => ({})) as { job_ids?: string[] };
+        const jobId = triggerJson.job_ids?.[0] ?? null;
         setProgress(75);
 
-        // Stage 5: poll extraction_status until background task completes
-        setProgressLabel("Analysing with AI (running in background)...");
-        const tick = setInterval(() => setProgress((p) => (p < 95 ? p + 1 : p)), 800);
+        // Stage 5: poll extraction_status + show real job stage from extraction_jobs
+        setProgressLabel("Queued — waiting for extraction engine...");
+        const tick = setInterval(async () => {
+          setProgress((p) => (p < 95 ? p + 0.5 : p));
+          if (jobId) {
+            const { data: job } = await supabase.from("extraction_jobs").select("status").eq("id", jobId).single();
+            if (job?.status === "running") setProgressLabel("Engine running — reading tables...");
+            else if (job?.status === "completed" || job?.status === "failed") setProgressLabel("Finalising...");
+          }
+        }, 2000);
         try {
           await pollExtractionStatus(doc.id, abort.signal);
         } finally {
@@ -2017,7 +2115,7 @@ function CaseViewInner() {
     } finally { setBusy(false); }
   };
 
-  const runNarrative = async () => {
+  const runNarrative = async (analystNotes?: string) => {
     // Capture user-entered data before edge function overwrites ic_note
     const preservedPartners       = (cc.ic_note as Record<string, unknown> | null)?.["partners"] as PartnerEntry[] | undefined;
     const preservedProjComment    = (cc.ic_note as Record<string, unknown> | null)?.["projections_comment"] as string | undefined;
@@ -2043,9 +2141,24 @@ function CaseViewInner() {
       window.dispatchEvent(new CustomEvent("ai-token-usage", {
         detail: { status: "loading", label: "IC Note", max_tokens: 8192 },
       }));
-      const { data: narData, error } = await supabase.functions.invoke("generate-narrative", { body: { case_id: cc.id } });
+      // Re-index structured data into pgvector so RAG has fresh embeddings
+      supabase.functions.invoke("vectorize-case-data", { body: { case_id: cc.id } }).catch(() => {});
+      const { data: narData, error } = await supabase.functions.invoke("generate-narrative", {
+        body: { case_id: cc.id, ...(analystNotes ? { analyst_notes_for_ic: analystNotes } : {}) },
+      });
       clearInterval(tick);
-      if (error) throw error;
+      if (error) {
+        const ctx = (error as { context?: Response }).context;
+        if (ctx) {
+          try {
+            const body = await ctx.json() as { error?: string };
+            if (body?.error) throw new Error(body.error);
+          } catch (parseErr) {
+            if (parseErr instanceof Error) throw parseErr;
+          }
+        }
+        throw error;
+      }
       setProgress(100);
       setProgressLabel("Complete");
       if (narData?.usage) {
@@ -2063,19 +2176,19 @@ function CaseViewInner() {
       toast.success("IC Note draft generated");
       // Re-merge user-entered data that the edge function may have overwritten
       if (preservedPartners?.length || preservedProjComment || preservedProvisional?.length) {
-        const { data: fresh } = await supabase.from("credit_cases").select("ic_note").eq("id", cc.id).single();
-        if (fresh?.ic_note) {
-          await supabase.from("credit_cases").update({
-            ic_note: {
-              ...(fresh.ic_note as Record<string, unknown>),
-              ...(preservedPartners?.length     ? { partners:            preservedPartners   } : {}),
-              ...(preservedProjComment          ? { projections_comment: preservedProjComment } : {}),
-              ...(preservedProvisional?.length  ? { provisional:         preservedProvisional } : {}),
-            } as Json,
-          }).eq("id", cc.id);
-        }
+        const mergedNote = {
+          ...(narData?.ic_note as Record<string, unknown> ?? {}),
+          ...(preservedPartners?.length     ? { partners:            preservedPartners   } : {}),
+          ...(preservedProjComment          ? { projections_comment: preservedProjComment } : {}),
+          ...(preservedProvisional?.length  ? { provisional:         preservedProvisional } : {}),
+        };
+        await supabase.from("credit_cases").update({ ic_note: mergedNote as Json }).eq("id", cc.id);
       }
       await reload();
+      // Apply ic_note AFTER reload so this wins over any stale DB read
+      if (narData?.ic_note) {
+        setCc(prev => prev ? { ...prev, ic_note: narData.ic_note as Json, status: "ic_review" as never } : prev);
+      }
       setTab("ic_note");
     } catch (e) {
       clearInterval(tick);
@@ -2083,6 +2196,46 @@ function CaseViewInner() {
     } finally {
       setTimeout(() => { setBusy(false); setProgress(0); setProgressLabel(""); }, 800);
     }
+  };
+
+  const patchIcSection = async (sectionId: string, markdown: string) => {
+    if (!cc) return;
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const next = {
+      ...current,
+      sections: { ...((current.sections as Record<string, unknown>) ?? {}), [sectionId]: { markdown } },
+    };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const addIcComment = async (sectionId: string, text: string) => {
+    if (!cc || !user) return;
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const existing = (current.comments as unknown[]) ?? [];
+    const comment = {
+      id: crypto.randomUUID(),
+      section_id: sectionId,
+      text,
+      author_email: user.email ?? "",
+      created_at: new Date().toISOString(),
+      resolved: false,
+    };
+    const next = { ...current, comments: [...existing, comment] };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const resolveIcComment = async (commentId: string) => {
+    if (!cc) return;
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const existing = (current.comments as Array<Record<string, unknown>>) ?? [];
+    const next = {
+      ...current,
+      comments: existing.map(c => c.id === commentId ? { ...c, resolved: true } : c),
+    };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
   };
 
   const handleIcNoteImport = async (file: File) => {
@@ -2145,8 +2298,8 @@ function CaseViewInner() {
     green: "PASS", amber: "CAUTION", red: "FAIL", na: "—",
   };
 
-  const inputCls = "w-full bg-input border border-border px-2 py-1.5 text-sm text-primary focus:outline-none focus:border-primary";
-  const labelCls = "terminal-label block mb-1";
+  const inputCls = "w-full bg-background border border-border rounded-md px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-colors";
+  const labelCls = "block text-sm font-medium text-foreground mb-1";
   const sHd = (k: keyof typeof hd) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setHd(p => ({ ...p, [k]: e.target.value }));
 
@@ -2185,18 +2338,18 @@ function CaseViewInner() {
 
   // Reusable entity selector bar — rendered at top of any tab panel
   const entityBar = hasPartner ? (
-    <div className="flex border border-border -mx-3 mb-4" style={{ marginTop: "-0.75rem" }}>
+    <div className="flex gap-1 bg-muted/30 rounded-lg p-1 -mx-1 mb-4 border border-border" style={{ marginTop: "-0.25rem" }}>
       {([
-        ["main",    cc.client_name,     "MAIN COMPANY"],
-        ["partner", partnerCompanyName, "PARTNER COMPANY"],
+        ["main",    cc.client_name,     "Main Company"],
+        ["partner", partnerCompanyName, "Partner Company"],
       ] as const).map(([k, name, label]) => (
         <button
           key={k}
           onClick={() => setEntity(k)}
-          className={`flex-1 py-2.5 text-xs tracking-widest font-bold border-r border-border flex flex-col items-center gap-0.5 transition-colors ${entity === k ? "bg-primary text-primary-foreground" : "text-primary/50 hover:bg-surface"}`}
+          className={`flex-1 py-2 px-3 text-sm font-medium rounded-md flex flex-col items-center gap-0.5 transition-colors ${entity === k ? "bg-white text-foreground shadow-sm border border-border" : "text-muted-foreground hover:text-foreground hover:bg-white/50"}`}
         >
-          <span className="text-[9px] opacity-70 tracking-widest">{label}</span>
-          <span className="truncate max-w-[220px]">{name.toUpperCase()}</span>
+          <span className="text-xs text-muted-foreground">{label}</span>
+          <span className="truncate max-w-[220px] font-semibold">{name}</span>
         </button>
       ))}
     </div>
@@ -2428,22 +2581,29 @@ function CaseViewInner() {
       setProgress(70);
 
       setProgressLabel("Queuing AI analysis…");
-      const { data: { session } } = await supabase.auth.getSession();
-      const fnH = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${session?.access_token ?? ""}`,
-        "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-      };
-      const triggerRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-analysis`, {
-        method: "POST", headers: fnH,
-        body: JSON.stringify({
-          case_id: cc.id, document_ids: [doc.id], user_id: user.id,
-          ...(excelText ? { excel_texts: { [doc.id]: excelText } } : {}),
-        }),
-      });
-      if (!triggerRes.ok) {
-        const err = await triggerRes.json().catch(() => ({})) as Record<string, unknown>;
-        throw new Error(String(err?.error ?? `Trigger failed HTTP ${triggerRes.status}`));
+      if (isExcel) {
+        const { data: { session } } = await supabase.auth.getSession();
+        const fnH = {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${session?.access_token ?? ""}`,
+          "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+        };
+        const triggerRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-analysis`, {
+          method: "POST", headers: fnH,
+          body: JSON.stringify({
+            case_id: cc.id, document_ids: [doc.id], user_id: user.id,
+            ...(excelText ? { excel_texts: { [doc.id]: excelText } } : {}),
+          }),
+        });
+        if (!triggerRes.ok) {
+          const err = await triggerRes.json().catch(() => ({})) as Record<string, unknown>;
+          throw new Error(String(err?.error ?? `Trigger failed HTTP ${triggerRes.status}`));
+        }
+      } else {
+        const { error: fnErr } = await supabase.functions.invoke("extract-projections", {
+          body: { case_id: cc.id, user_id: user.id, document_id: doc.id },
+        });
+        if (fnErr) throw new Error(fnErr.message);
       }
       setProgress(75); setProgressLabel("Extracting projections with AI…");
       const tick = setInterval(() => setProgress(p => p < 95 ? p + 1 : p), 800);
@@ -2472,12 +2632,74 @@ function CaseViewInner() {
     }
   };
 
+  const handleProvisionalUpload = async (file: File) => {
+    if (!user) return;
+    setBusy(true); setProgress(0); setProgressLabel("Uploading provisional statement…");
+    let uploadedDocId: string | null = null;
+    let uploadedPath:  string | null = null;
+    try {
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "bin";
+      const isImage = ["jpg","jpeg","png","webp"].includes(ext);
+      const fileType = isImage ? "image" : "pdf";
+
+      const path = `${user.id}/${cc.id}/${Date.now()}-${file.name}`;
+      uploadedPath = path;
+      setProgressLabel(`Uploading ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+      await uploadWithProgress("case-files", path, file, pct => setProgress(Math.round(pct * 0.5)));
+      setProgress(55);
+
+      setProgressLabel("Registering document…");
+      const { data: doc, error: dErr } = await supabase.from("financial_documents").insert({
+        case_id: cc.id, user_id: user.id, file_path: path, file_name: file.name,
+        file_type: fileType as never, doc_class: "provisional" as never,
+        fiscal_year: null, extraction_status: "pending",
+      }).select().single();
+      if (dErr || !doc) throw new Error(dErr?.message ?? "Register failed");
+      uploadedDocId = doc.id;
+      setProgress(65);
+
+      // Fire the edge function — it handles extraction + conversion server-side.
+      // Do NOT await the invoke directly; instead poll for status so the client
+      // stays alive even if the HTTP response takes longer than the gateway timeout.
+      setProgress(70); setProgressLabel("Extracting provisional financials with AI…");
+      supabase.functions.invoke("extract-provisional", {
+        body: { case_id: cc.id, user_id: user.id, document_id: doc.id },
+      }).catch(() => {}); // swallow invoke errors — status poll will surface failures
+
+      const tick = setInterval(() => setProgress(p => p < 95 ? p + 1 : p), 800);
+      const abort = new AbortController();
+      try {
+        await pollExtractionStatus(doc.id, abort.signal);
+      } finally {
+        clearInterval(tick);
+      }
+
+      setProgress(100); setProgressLabel("Done");
+      toast.success("Provisional financials extracted");
+      await reload();
+      setTab("provisional");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Upload failed";
+      toast.error(msg);
+      if (uploadedDocId) {
+        await supabase.from("financial_documents")
+          .update({ extraction_status: "failed", extraction_error: msg.slice(0, 500) })
+          .eq("id", uploadedDocId);
+      } else if (uploadedPath) {
+        await supabase.storage.from("case-files").remove([uploadedPath]);
+      }
+      await reload();
+    } finally {
+      setTimeout(() => { setBusy(false); setProgress(0); setProgressLabel(""); }, 800);
+    }
+  };
+
   const topBar = (
     <div className="flex items-center justify-between w-full">
-      <div className="flex items-center gap-2 text-[10px] text-muted-foreground tracking-widest min-w-0">
-        <span className="text-primary font-bold">{cc.case_code}</span>
+      <div className="flex items-center gap-2 text-sm text-muted-foreground min-w-0">
+        <span className="text-primary font-semibold">{cc.case_code}</span>
         <span>·</span>
-        <span className="truncate">{cc.client_name}</span>
+        <span className="truncate text-foreground">{cc.client_name}</span>
       </div>
       <div className="flex items-center gap-3 shrink-0">
         <CollabAvatarStack />
@@ -2493,8 +2715,8 @@ function CaseViewInner() {
       {editingHeader ? (
         <>
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 mb-3">
-          <Panel title="EDIT CASE — CLIENT & DEAL INFO" ticker={cc.case_code} className="xl:col-span-8"
-            actions={<button type="button" onClick={() => setEditingHeader(false)} className="text-[10px] border border-border text-foreground/60 px-3 py-1 hover:text-foreground">[CANCEL]</button>}
+          <Panel title="Edit Case" ticker={cc.case_code} className="xl:col-span-8"
+            actions={<button type="button" onClick={() => setEditingHeader(false)} className="text-sm text-muted-foreground hover:text-foreground border border-border rounded-md px-3 py-1.5 transition-colors">Cancel</button>}
           >
             <form onSubmit={saveHeader} className="space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2522,12 +2744,12 @@ function CaseViewInner() {
                     type="button"
                     onClick={runEditWebEnrich}
                     disabled={editWebEnriching || (!hd.client_name.trim() && !hd.website.trim())}
-                    className="w-full border border-primary/40 bg-primary/5 text-primary px-4 py-2 text-xs tracking-widest font-bold hover:bg-primary/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                    className="w-full border border-primary/30 bg-primary/5 text-primary px-4 py-2 text-sm font-medium rounded-md hover:bg-primary/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
                   >
-                    {editWebEnriching ? "SEARCHING WEB & FILLING FORM…" : "WEB SEARCH & AUTO-FILL ALL FIELDS"}
+                    {editWebEnriching ? "Searching web and filling form…" : "Web Search & Auto-fill All Fields"}
                   </button>
                   {!hd.client_name.trim() && !hd.website.trim() && (
-                    <p className="text-[10px] text-foreground/40 mt-1 tracking-wider">Enter client name or website above first</p>
+                    <p className="text-xs text-muted-foreground mt-1">Enter client name or website above first</p>
                   )}
                 </div>
 
@@ -2549,7 +2771,7 @@ function CaseViewInner() {
                     disabled={editMcaImporting}
                     className="w-full border border-border bg-surface-2 text-muted-foreground px-4 py-2 text-xs tracking-widest font-bold hover:border-primary hover:text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
                   >
-                    {editMcaImporting ? "IMPORTING MCA EXCEL…" : "↑ IMPORT CORPOSITORY / MCA EXCEL  (auto-fills company + directors)"}
+                    {editMcaImporting ? "Importing MCA Excel…" : "↑ Import Corpository / MCA Excel (auto-fills company + directors)"}
                   </button>
                   {editMcaProfile && (
                     <p className="text-[10px] text-success mt-1 tracking-wider">
@@ -2625,8 +2847,8 @@ function CaseViewInner() {
               </div>
 
               {/* ── Partner / Group Company ───────────────────────────── */}
-              <div className="border border-border bg-surface/40 px-3 py-2.5 space-y-2">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">▶ PARTNER / GROUP COMPANY</div>
+              <div className="rounded-lg border border-border bg-muted/20 px-4 py-3 space-y-3">
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Partner / Group Company</div>
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
@@ -2635,7 +2857,7 @@ function CaseViewInner() {
                   >
                     <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${hd.has_partner ? "left-[22px]" : "left-0.5"}`} />
                   </button>
-                  <span className="text-xs tracking-widest font-bold text-foreground/80">DOES THIS DEAL INVOLVE A PARTNER / GROUP COMPANY?</span>
+                  <span className="text-sm text-foreground">Does this deal involve a partner or group company?</span>
                 </div>
                 {hd.has_partner && (
                   <div>
@@ -2646,16 +2868,16 @@ function CaseViewInner() {
                       value={hd.partner_company_name}
                       onChange={sHd("partner_company_name")}
                     />
-                    <p className="text-[10px] text-muted-foreground mt-1 tracking-wide">
-                      Partner financials and analysis are available in the PARTNER tab.
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Partner financials and analysis are available in the Partner tab.
                     </p>
                   </div>
                 )}
               </div>
 
               {/* ── Assign To ─────────────────────────────────────────── */}
-              <div className="border border-border bg-surface/40 px-3 py-2.5 space-y-2">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">▶ ASSIGN TO</div>
+              <div className="rounded-lg border border-border bg-muted/20 px-4 py-3 space-y-3">
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Assign To</div>
 
                 {teamMembers.length > 0 && (
                   <div>
@@ -2725,32 +2947,32 @@ function CaseViewInner() {
                       {!teamMembers.find(m => m.email === hd.assign_email) && " · invite will be sent on save"}
                     </p>
                     <button type="button" onClick={() => setHd(h => ({ ...h, assign_email: "", assign_name: "", assign_role: "analyst" }))}
-                      className="text-[9px] text-muted-foreground/50 hover:text-destructive tracking-widest">CLEAR ✕</button>
+                      className="text-xs text-muted-foreground hover:text-destructive transition-colors">Clear ×</button>
                   </div>
                 )}
               </div>
 
-              <button type="submit" className="bg-primary text-primary-foreground px-4 py-2 text-sm tracking-widest font-bold hover:opacity-90">
-                [UPDATE CASE →]
+              <button type="submit" className="bg-primary text-primary-foreground px-6 py-2.5 rounded-md text-sm font-semibold hover:bg-primary/90 transition-colors">
+                Update Case
               </button>
             </form>
           </Panel>
           <div className="xl:col-span-4 flex flex-col gap-3">
-            <Panel title="PRODUCT RULES" ticker={PRODUCTS[hd.product_type as ProductType]?.short ?? "—"} status="warn">
-              <div className="space-y-3 text-xs">
+            <Panel title="Product Rules" ticker={PRODUCTS[hd.product_type as ProductType]?.short ?? "—"} status="warn">
+              <div className="space-y-3">
                 <div>
-                  <div className="terminal-label">LEGAL NATURE</div>
-                  <div className="text-primary mt-1">{PRODUCTS[hd.product_type as ProductType]?.legalNature}</div>
+                  <div className="text-xs text-muted-foreground mb-0.5">Legal Nature</div>
+                  <div className="text-sm text-foreground">{PRODUCTS[hd.product_type as ProductType]?.legalNature}</div>
                 </div>
                 <div>
-                  <div className="terminal-label">RETURN MECHANISM</div>
-                  <div className="text-primary mt-1">{PRODUCTS[hd.product_type as ProductType]?.returnMechanism}</div>
+                  <div className="text-xs text-muted-foreground mb-0.5">Return Mechanism</div>
+                  <div className="text-sm text-foreground">{PRODUCTS[hd.product_type as ProductType]?.returnMechanism}</div>
                 </div>
                 <div>
-                  <div className="terminal-label">SOP RULES</div>
-                  <ul className="mt-1 space-y-1">
+                  <div className="text-xs text-muted-foreground mb-1">SOP Rules</div>
+                  <ul className="space-y-1.5">
                     {PRODUCTS[hd.product_type as ProductType]?.rules.map((r, i) => (
-                      <li key={i} className="text-foreground/80 flex gap-2"><span className="text-warning">▸</span><span>{r}</span></li>
+                      <li key={i} className="text-sm text-foreground flex gap-2"><span className="w-1.5 h-1.5 rounded-full bg-primary/60 mt-1.5 shrink-0" /><span>{r}</span></li>
                     ))}
                   </ul>
                 </div>
@@ -2758,7 +2980,7 @@ function CaseViewInner() {
             </Panel>
 
             {/* AI Document Scan for edit case */}
-            <Panel title="AI DOCUMENT SCAN" ticker="CLAUDE/4.6" status="live">
+            <Panel title="AI Document Scan" ticker="Claude 4.6" status="live">
               <div className="space-y-3 text-xs">
                 <p className="text-foreground/60 leading-relaxed">
                   Upload a company profile, loan application, CMA, or any relevant document.
@@ -2784,29 +3006,29 @@ function CaseViewInner() {
                   {editScanFileQueue.length > 0 ? (
                     <div className="px-3 py-2">
                       <div className="flex items-center gap-2 mb-1.5">
-                        <span className="terminal-label text-primary">
-                          {editScanFileQueue.length} FILE{editScanFileQueue.length > 1 ? "S" : ""}
+                        <span className="text-xs font-semibold text-foreground">
+                          {editScanFileQueue.length} file{editScanFileQueue.length > 1 ? "s" : ""}
                         </span>
-                        <span className="text-foreground/40 text-[10px]">· drop more to add</span>
+                        <span className="text-xs text-muted-foreground">· drop more to add</span>
                       </div>
                       <div className="space-y-1 max-h-28 overflow-y-auto">
                         {editScanFileQueue.map(item => (
-                          <div key={item.id} className="flex items-center gap-1.5 text-[10px]">
+                          <div key={item.id} className="flex items-center gap-1.5 text-xs">
                             <span className={
                               item.status === "done"      ? "text-green-500" :
                               item.status === "error"     ? "text-red-500"   :
                               item.status === "uploading" ? "text-primary"   :
-                              item.status === "duplicate" ? "text-yellow-500": "text-foreground/30"
+                              item.status === "duplicate" ? "text-yellow-500": "text-muted-foreground/40"
                             }>
                               {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "uploading" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
                             </span>
-                            <span className="truncate flex-1 text-primary">{item.name}</span>
-                            <span className="text-foreground/40 shrink-0">{item.size}</span>
+                            <span className="truncate flex-1 text-foreground">{item.name}</span>
+                            <span className="text-muted-foreground shrink-0">{item.size}</span>
                             {item.status === "uploading" && (
                               <span className="text-primary shrink-0 w-8 text-right">{item.uploadPct}%</span>
                             )}
                             {item.status === "duplicate" && (
-                              <span className="text-yellow-500 shrink-0 text-[9px] tracking-widest">ALREADY EXISTS</span>
+                              <span className="text-amber-500 shrink-0 text-xs">Duplicate</span>
                             )}
                           </div>
                         ))}
@@ -2814,9 +3036,9 @@ function CaseViewInner() {
                     </div>
                   ) : (
                     <div className="px-3 py-5 text-center">
-                      <div className="text-primary text-lg mb-1">⬆</div>
-                      <div className="terminal-label">DROP FILES OR CLICK TO BROWSE</div>
-                      <div className="text-foreground/40 mt-1">PDF · Image · Multiple OK</div>
+                      <div className="text-muted-foreground text-2xl mb-2">⬆</div>
+                      <div className="text-sm font-medium text-foreground">Drop files here or click to browse</div>
+                      <div className="text-xs text-muted-foreground mt-1">PDF · Image · Multiple files OK</div>
                     </div>
                   )}
                 </div>
@@ -2845,9 +3067,9 @@ function CaseViewInner() {
                     <button
                       type="button"
                       onClick={resetEditScan}
-                      className="w-full border border-border text-foreground/50 py-1 text-xs tracking-widest hover:border-red-500 hover:text-red-400 transition-colors"
+                      className="w-full border border-border text-muted-foreground py-1.5 text-sm rounded-md hover:border-red-300 hover:text-red-500 transition-colors"
                     >
-                      [CANCEL]
+                      Cancel
                     </button>
                   </div>
                 )}
@@ -2855,8 +3077,8 @@ function CaseViewInner() {
                 {editScanResult && (
                   <div className="space-y-2">
                     {editScanResult.summary && (
-                      <div className="border border-border p-2 bg-input/30">
-                        <div className="terminal-label mb-1">AI SUMMARY</div>
+                      <div className="rounded-lg border border-border p-3 bg-muted/20">
+                        <div className="text-xs font-semibold text-muted-foreground mb-1.5">AI Summary</div>
                         <p className="text-foreground/80 leading-relaxed">{editScanResult.summary}</p>
                         {editScanResult.confidence != null && (
                           <div className="mt-1.5 flex items-center gap-2">
@@ -2871,15 +3093,15 @@ function CaseViewInner() {
                         )}
                       </div>
                     )}
-                    <div className="terminal-label">EXTRACTED FIELDS</div>
-                    <div className="space-y-0.5 max-h-48 overflow-y-auto pr-1">
+                    <div className="text-xs font-semibold text-muted-foreground mb-1">Extracted Fields</div>
+                    <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
                       {EDIT_SCANNABLE_FIELDS.map(({ key, label }) => {
                         const val = editScanResult[key];
                         if (val == null || val === "") return null;
                         return (
-                          <div key={key} className="flex gap-2">
-                            <span className="text-foreground/40 shrink-0 w-28">{label}</span>
-                            <span className="text-primary truncate">{String(val)}</span>
+                          <div key={key} className="flex gap-2 text-sm">
+                            <span className="text-muted-foreground shrink-0 w-28">{label}</span>
+                            <span className="text-foreground truncate">{String(val)}</span>
                           </div>
                         );
                       })}
@@ -2887,16 +3109,16 @@ function CaseViewInner() {
                     <button
                       type="button"
                       onClick={applyEditScanned}
-                      className="w-full bg-primary text-primary-foreground py-1.5 text-xs tracking-widest font-bold hover:opacity-90"
+                      className="w-full bg-primary text-primary-foreground py-2 rounded-md text-sm font-semibold hover:bg-primary/90 transition-colors"
                     >
-                      [APPLY TO FORM]
+                      Apply to Form
                     </button>
                     <button
                       type="button"
                       onClick={() => { setEditScanResult(null); setEditScanFileQueue([]); }}
-                      className="w-full border border-border text-foreground/50 py-1 text-xs tracking-widest hover:border-primary/50"
+                      className="w-full border border-border text-muted-foreground py-2 rounded-md text-sm hover:bg-muted/30 transition-colors"
                     >
-                      DISCARD
+                      Discard
                     </button>
                   </div>
                 )}
@@ -2908,7 +3130,7 @@ function CaseViewInner() {
         {/* MCA profile + directors — shown below grid when Excel imported */}
         {editMcaProfile && (
           <div className="space-y-3 mt-3">
-            <Panel title="MCA / CORPOSITORY PROFILE" ticker={editMcaProfile.cin ?? "IMPORTED"} status="live">
+            <Panel title="MCA / Corpository Profile" ticker={editMcaProfile.cin ?? "Imported"} status="live">
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 text-xs">
                 {[
                   { label: "CIN",                value: editMcaProfile.cin },
@@ -2930,29 +3152,29 @@ function CaseViewInner() {
                   { label: "LAST AGM",           value: editMcaProfile.date_of_last_agm },
                 ].filter(f => f.value).map(f => (
                   <div key={f.label}>
-                    <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">{f.label}</div>
-                    <div className="text-primary font-mono">{f.value}</div>
+                    <div className="text-xs text-muted-foreground mb-0.5">{f.label}</div>
+                    <div className="text-sm text-foreground font-mono">{f.value}</div>
                   </div>
                 ))}
                 {editMcaProfile.raw_address && (
                   <div className="col-span-2 sm:col-span-3 lg:col-span-5">
-                    <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">REGISTERED ADDRESS</div>
-                    <div className="text-primary">{editMcaProfile.raw_address}</div>
+                    <div className="text-xs text-muted-foreground mb-0.5">Registered Address</div>
+                    <div className="text-sm text-foreground">{editMcaProfile.raw_address}</div>
                   </div>
                 )}
               </div>
             </Panel>
 
             {editMcaProfile.directors.length > 0 && (
-              <Panel title="DIRECTORS" ticker={`${editMcaProfile.directors.length} DIRECTORS`} status="live">
+              <Panel title="Directors" ticker={`${editMcaProfile.directors.length} directors`} status="live">
                 <div className="overflow-x-auto">
-                  <table className="text-[11px] font-mono border-collapse" style={{ minWidth: "2400px" }}>
+                  <table className="text-xs font-mono border-collapse" style={{ minWidth: "2400px" }}>
                     <thead>
-                      <tr className="border-b border-border bg-surface/60 text-[9px] tracking-widest text-muted-foreground">
-                        {["NAME","DIN","PAN","DIN STATUS","DSC STATUS","DOB","AGE","GENDER","NATIONALITY",
-                          "DESIGNATION","CATEGORY","APPOINTED CURRENT","ORIGINALLY APPOINTED",
-                          "CESSATION","% SHAREHOLDING","EMAIL","PHONE","REMARKS","ADDRESS"].map(h => (
-                          <th key={h} className="text-left py-2 px-3 font-normal whitespace-nowrap border-r border-border/30">{h}</th>
+                      <tr className="border-b border-border bg-muted/30">
+                        {["Name","DIN","PAN","DIN Status","DSC Status","DOB","Age","Gender","Nationality",
+                          "Designation","Category","Appointed Current","Originally Appointed",
+                          "Cessation","% Shareholding","Email","Phone","Remarks","Address"].map(h => (
+                          <th key={h} className="text-left py-2 px-3 font-medium text-muted-foreground whitespace-nowrap border-r border-border/30">{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -2969,25 +3191,25 @@ function CaseViewInner() {
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.din || "—"}</td>
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.pan || "—"}</td>
                             <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
-                              {d.din_status ? <span className={`text-[9px] font-bold tracking-widest ${d.din_status.toLowerCase() === "approved" ? "text-success" : "text-muted-foreground"}`}>{d.din_status.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                              {d.din_status ? <span className={`text-xs font-medium ${d.din_status.toLowerCase() === "approved" ? "text-green-600" : "text-muted-foreground"}`}>{d.din_status}</span> : <span className="text-muted-foreground">—</span>}
                             </td>
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dsc_status || "—"}</td>
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.dob || "—"}</td>
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.age || "—"}</td>
                             <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
-                              {d.gender ? <span className={`text-[9px] font-bold tracking-widest ${d.gender.toLowerCase() === "female" ? "text-accent" : "text-primary"}`}>{d.gender.toUpperCase()}</span> : <span className="text-muted-foreground">—</span>}
+                              {d.gender ? <span className={`text-xs font-medium ${d.gender.toLowerCase() === "female" ? "text-purple-600" : "text-foreground"}`}>{d.gender}</span> : <span className="text-muted-foreground">—</span>}
                             </td>
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.nationality || "—"}</td>
                             <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-primary">{role || "—"}</td>
                             <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
-                              {cat && cat !== "-" ? <span className="text-accent text-[9px] tracking-widest">{cat}</span> : <span className="text-muted-foreground">—</span>}
+                              {cat && cat !== "-" ? <span className="text-xs text-muted-foreground">{cat}</span> : <span className="text-muted-foreground">—</span>}
                             </td>
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.appointed_current || "—"}</td>
                             <td className="py-2 px-3 text-muted-foreground whitespace-nowrap border-r border-border/20">{d.originally_appointed || "—"}</td>
                             <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
                               {d.cessation_date && d.cessation_date !== "-"
-                                ? <span className="text-[9px] font-bold tracking-widest text-destructive">{d.cessation_date}</span>
-                                : <span className="text-[9px] text-success font-bold tracking-widest">ACTIVE</span>}
+                                ? <span className="text-xs font-medium text-red-600">{d.cessation_date}</span>
+                                : <span className="inline-block px-1.5 py-0.5 rounded text-xs font-medium bg-green-50 text-green-700 border border-green-200">Active</span>}
                             </td>
                             <td className="py-2 px-3 border-r border-border/20 whitespace-nowrap">
                               {d.shareholding ? <span className="text-muted-foreground">{d.shareholding}</span> : "—"}
@@ -3015,18 +3237,19 @@ function CaseViewInner() {
         /* ── Header (always visible) + optional detail panel below ─────────── */
         <div className="space-y-3 mb-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3">
-            <Panel title="CASE" ticker={cc.case_code} className="sm:col-span-2 xl:col-span-4"
-              actions={<button onClick={openHeaderEdit} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[EDIT]</button>}
+            <Panel title="Case" ticker={cc.case_code} className="sm:col-span-2 xl:col-span-4"
+              actions={<button onClick={openHeaderEdit} className="text-sm text-muted-foreground hover:text-foreground transition-colors">Edit</button>}
             >
-              <div className="text-2xl text-primary glow font-bold">{cc.client_name}</div>
-              <div className="terminal-label mt-1">{product.label} · {cc.industry || "—"}</div>
+              <div className="text-2xl font-bold text-foreground">{cc.client_name}</div>
+              <div className="text-sm text-muted-foreground mt-1">{product.label} · {cc.industry || "—"}</div>
               {(cc as unknown as { company_id?: string }).company_id ? (
-                <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                <div className="mt-2 flex items-center gap-2 flex-wrap">
                   <button
                     onClick={() => navigate(`/companies/${(cc as unknown as { company_id: string }).company_id}`)}
-                    className="inline-flex items-center gap-1 text-[9px] tracking-widest border border-success/40 text-success bg-success/10 px-1.5 py-0.5 hover:bg-success/20 transition-colors"
+                    className="inline-flex items-center gap-1.5 text-xs border border-green-300 text-green-700 bg-green-50 px-2 py-1 rounded hover:bg-green-100 transition-colors"
                   >
-                    ● MASTER DATA LINKED
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                    Master Data Linked
                   </button>
                   <button
                     onClick={async () => {
@@ -3034,56 +3257,65 @@ function CaseViewInner() {
                       await reload();
                       toast.success("Company unlinked");
                     }}
-                    className="text-[9px] tracking-widest text-muted-foreground hover:text-destructive transition-colors"
+                    className="text-xs text-muted-foreground hover:text-destructive transition-colors"
                   >
-                    [UNLINK]
+                    Unlink
                   </button>
                 </div>
               ) : (
-                <div className="mt-1.5 text-[9px] tracking-widest text-muted-foreground/40">— NOT LINKED TO MASTER DATA</div>
+                <div className="mt-2 text-xs text-muted-foreground/60">Not linked to master data</div>
               )}
             </Panel>
-            <Panel title="STATUS" className="xl:col-span-3">
-              <div className={`inline-block px-3 py-1 text-xs font-bold tracking-widest bg-${statusMeta.color} text-${statusMeta.color}-foreground`}>
+            <Panel title="Status" className="xl:col-span-3">
+              <div className={`inline-block px-3 py-1.5 text-sm font-semibold rounded-md bg-${statusMeta.color}/10 text-${statusMeta.color}-700 border border-${statusMeta.color}/20`}>
                 {statusMeta.label}
               </div>
-              <div className="terminal-label mt-2">Stage {statusMeta.pipeline} of 7</div>
+              <div className="text-xs text-muted-foreground mt-2">Stage {statusMeta.pipeline} of 7</div>
             </Panel>
-            <Panel title="DEAL TERMS" className="xl:col-span-5"
-              actions={<button onClick={openHeaderEdit} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[EDIT]</button>}
+            <Panel title="Deal Terms" className="xl:col-span-5"
+              actions={<button onClick={openHeaderEdit} className="text-sm text-muted-foreground hover:text-foreground transition-colors">Edit</button>}
             >
-              <div className="grid grid-cols-3 gap-3 text-sm">
-                <div><div className="terminal-label">AMOUNT</div><div className="text-primary">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")} Cr</div></div>
-                <div><div className="terminal-label">TENURE</div><div className="text-primary">{cc.tenure_months ?? "—"}M</div></div>
-                <div><div className="terminal-label">IRR</div><div className="text-primary">{cc.expected_irr ?? "—"}%</div></div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <div className="text-xs text-muted-foreground mb-0.5">Amount</div>
+                  <div className="text-base font-semibold text-foreground">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")} Cr</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground mb-0.5">Tenure</div>
+                  <div className="text-base font-semibold text-foreground">{cc.tenure_months ?? "—"} months</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground mb-0.5">IRR</div>
+                  <div className="text-base font-semibold text-foreground">{cc.expected_irr ?? "—"}%</div>
+                </div>
               </div>
             </Panel>
           </div>
 
           <Panel
-            title="COMPANY DETAILS"
+            title="Company Details"
             ticker={cc.case_code}
             actions={
               <div className="flex items-center gap-2">
                 {coDetailTab === "company" && linkedCompany && (
-                  <button onClick={openEditCo} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[EDIT]</button>
+                  <button onClick={openEditCo} className="text-sm text-muted-foreground hover:text-foreground transition-colors">Edit</button>
                 )}
                 {coDetailTab === "directors" && linkedCompany && (
-                  <button onClick={() => openEditDir()} className="text-[10px] text-foreground/40 hover:text-primary tracking-widest">[+ ADD DIRECTOR]</button>
+                  <button onClick={() => openEditDir()} className="text-sm text-primary hover:text-primary/80 transition-colors font-medium">+ Add Director</button>
                 )}
-                <div className="flex border border-border">
+                <div className="flex rounded-md border border-border overflow-hidden">
                   <button
                     onClick={() => setCoDetailTab("company")}
-                    className={`px-3 py-1 text-[9px] tracking-widest font-bold transition-colors ${coDetailTab === "company" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-primary"}`}
+                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${coDetailTab === "company" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-muted/50"}`}
                   >
-                    COMPANY
+                    Company
                   </button>
                   {linkedCompany && (
                     <button
                       onClick={() => setCoDetailTab("directors")}
-                      className={`px-3 py-1 text-[9px] tracking-widest font-bold border-l border-border transition-colors ${coDetailTab === "directors" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-primary"}`}
+                      className={`px-3 py-1.5 text-xs font-medium border-l border-border transition-colors ${coDetailTab === "directors" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-muted/50"}`}
                     >
-                      DIRECTORS {linkedDirs.length > 0 ? `(${linkedDirs.length})` : ""}
+                      Directors {linkedDirs.length > 0 ? `(${linkedDirs.length})` : ""}
                     </button>
                   )}
                 </div>
@@ -3092,7 +3324,7 @@ function CaseViewInner() {
           >
             {coDetailTab === "company" && (
               <>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3">
                   {([
                     ["Legal Constitution",  cc.legal_constitution],
                     ["Industry / Sector",   cc.industry],
@@ -3101,38 +3333,38 @@ function CaseViewInner() {
                     ["Website",             cc.website],
                   ] as const).map(([label, val]) => val != null && val !== "" ? (
                     <div key={label}>
-                      <div className="terminal-label">{label}</div>
-                      <div className="text-primary mt-0.5">{String(val)}</div>
+                      <div className="text-xs text-muted-foreground mb-0.5">{label}</div>
+                      <div className="text-sm text-foreground font-medium">{String(val)}</div>
                     </div>
                   ) : null)}
                 </div>
 
                 {linkedCompany && (linkedCompany.mca_cin || linkedCompany.mca_pan) && (
                   <div className="border-t border-border/40 mt-3 pt-3">
-                    <div className="text-[9px] tracking-widest text-muted-foreground mb-3">MCA / CORPOSITORY PROFILE</div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-xs">
+                    <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">MCA / Corpository Profile</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3">
                       {([
                         ["CIN",                  linkedCompany.mca_cin],
                         ["PAN",                  linkedCompany.mca_pan],
                         ["LEI",                  linkedCompany.mca_lei],
-                        ["CATEGORY",             linkedCompany.mca_category],
-                        ["SUB CATEGORY",         linkedCompany.mca_sub_category],
-                        ["COMPANY TYPE",         linkedCompany.mca_type],
-                        ["AUTH. CAPITAL",        linkedCompany.mca_authorized_capital],
-                        ["PAID UP CAPITAL",      linkedCompany.mca_paid_up_capital],
-                        ["STATUS",               linkedCompany.mca_status],
-                        ["NSE SECTOR",           linkedCompany.mca_nse_sector],
-                        ["SECTOR",               linkedCompany.mca_sector],
-                        ["PRODUCTS/SERVICES",    linkedCompany.mca_products_services],
-                        ["EMAIL",                linkedCompany.mca_email],
-                        ["TELEPHONE",            linkedCompany.mca_telephone],
-                        ["INCORPORATION DATE",   linkedCompany.mca_date_of_incorp],
-                        ["LAST BALANCE SHEET",   linkedCompany.mca_date_last_bs],
-                        ["LAST AGM",             linkedCompany.mca_date_last_agm],
+                        ["Category",             linkedCompany.mca_category],
+                        ["Sub Category",         linkedCompany.mca_sub_category],
+                        ["Company Type",         linkedCompany.mca_type],
+                        ["Authorised Capital",   linkedCompany.mca_authorized_capital],
+                        ["Paid Up Capital",      linkedCompany.mca_paid_up_capital],
+                        ["Status",               linkedCompany.mca_status],
+                        ["NSE Sector",           linkedCompany.mca_nse_sector],
+                        ["Sector",               linkedCompany.mca_sector],
+                        ["Products / Services",  linkedCompany.mca_products_services],
+                        ["Email",                linkedCompany.mca_email],
+                        ["Telephone",            linkedCompany.mca_telephone],
+                        ["Incorporation Date",   linkedCompany.mca_date_of_incorp],
+                        ["Last Balance Sheet",   linkedCompany.mca_date_last_bs],
+                        ["Last AGM",             linkedCompany.mca_date_last_agm],
                       ] as const).filter(([, v]) => v).map(([label, val]) => (
                         <div key={label}>
-                          <div className="terminal-label">{label}</div>
-                          <div className="text-primary mt-0.5 font-mono">{val}</div>
+                          <div className="text-xs text-muted-foreground mb-0.5">{label}</div>
+                          <div className="text-sm text-foreground font-medium font-mono">{val}</div>
                         </div>
                       ))}
                     </div>
@@ -3145,7 +3377,7 @@ function CaseViewInner() {
                 )}
 
                 {(cc.end_use || cc.collateral_summary || cc.strategic_rationale || cc.promoter_details || cc.analyst_notes) && (
-                  <div className="border-t border-border/40 mt-3 pt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-xs">
+                  <div className="border-t border-border/40 mt-4 pt-4 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
                     {([
                       ["End Use of Funds",    cc.end_use],
                       ["Collateral Summary",  cc.collateral_summary],
@@ -3154,8 +3386,8 @@ function CaseViewInner() {
                       ["Analyst Notes",       cc.analyst_notes],
                     ] as const).map(([label, val]) => val ? (
                       <div key={label}>
-                        <div className="terminal-label">{label}</div>
-                        <div className="text-foreground/90 mt-0.5 leading-relaxed whitespace-pre-wrap">{val}</div>
+                        <div className="text-xs font-medium text-muted-foreground mb-1">{label}</div>
+                        <div className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{val}</div>
                       </div>
                     ) : null)}
                   </div>
@@ -3169,12 +3401,12 @@ function CaseViewInner() {
                   <thead>
                     <tr className="border-b border-border bg-surface/60">
                       {[
-                        "","NAME","DIN","PAN","DIN STATUS","DSC STATUS",
-                        "DOB","AGE","GENDER","NATIONALITY",
-                        "DESIGNATION","CATEGORY","APPOINTED CURRENT","ORIGINALLY APPOINTED",
-                        "CESSATION","% SHAREHOLDING","EMAIL","PHONE","REMARKS","ADDRESS",
+                        "","Name","DIN","PAN","DIN Status","DSC Status",
+                        "DOB","Age","Gender","Nationality",
+                        "Designation","Category","Appointed (Current)","Originally Appointed",
+                        "Cessation","% Shareholding","Email","Phone","Remarks","Address",
                       ].map(h => (
-                        <th key={h} className="text-left py-2 px-3 text-[9px] tracking-widest text-muted-foreground font-normal whitespace-nowrap border-r border-border/30">{h}</th>
+                        <th key={h} className="text-left py-2 px-3 text-xs font-medium text-muted-foreground whitespace-nowrap border-r border-border/30">{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -3183,13 +3415,13 @@ function CaseViewInner() {
                       <tr key={i} className="border-b border-border/20 hover:bg-surface/40 transition-colors align-top">
                         <td className="py-2 px-2 whitespace-nowrap border-r border-border/20">
                           <div className="flex gap-1">
-                            <button onClick={() => openEditDir(d)} className="text-[9px] border border-border/60 text-muted-foreground hover:text-primary hover:border-primary/40 px-1.5 py-0.5 transition-colors">✎</button>
-                            <button onClick={() => deleteDir(String(d.id))} className="text-[9px] border border-border/60 text-muted-foreground hover:text-destructive hover:border-destructive/40 px-1.5 py-0.5 transition-colors">✕</button>
+                            <button onClick={() => openEditDir(d)} className="text-xs border border-border rounded text-muted-foreground hover:text-primary hover:border-primary/40 px-1.5 py-0.5 transition-colors">✎</button>
+                            <button onClick={() => deleteDir(String(d.id))} className="text-xs border border-border rounded text-muted-foreground hover:text-destructive hover:border-destructive/40 px-1.5 py-0.5 transition-colors">✕</button>
                           </div>
                         </td>
                         <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
                           <div className="text-primary font-medium">{d.name}</div>
-                          {d.dob && <div className="text-muted-foreground text-[9px] mt-0.5">DOB: {d.dob}</div>}
+                          {d.dob && <div className="text-muted-foreground text-xs mt-0.5">DOB: {d.dob}</div>}
                         </td>
                         <td className="py-2 px-3 font-mono text-primary/80 whitespace-nowrap border-r border-border/20">{d.din || "—"}</td>
                         <td className="py-2 px-3 font-mono text-primary/80 whitespace-nowrap border-r border-border/20">{d.pan || "—"}</td>
@@ -3211,7 +3443,7 @@ function CaseViewInner() {
                             <>
                               <td className="py-2 px-3 whitespace-nowrap border-r border-border/20 text-primary">{role}</td>
                               <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
-                                {cat && cat !== "-" ? <span className="text-accent text-[9px] tracking-widest">{cat}</span> : <span className="text-muted-foreground">—</span>}
+                                {cat && cat !== "-" ? <span className="text-xs text-muted-foreground">{cat}</span> : <span className="text-muted-foreground">—</span>}
                               </td>
                             </>
                           );
@@ -3220,8 +3452,8 @@ function CaseViewInner() {
                         <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">{d.originally_appointed || "—"}</td>
                         <td className="py-2 px-3 whitespace-nowrap border-r border-border/20">
                           {d.cessation_date && d.cessation_date !== "-"
-                            ? <span className="text-destructive">{d.cessation_date}</span>
-                            : <span className="text-success text-[9px] tracking-widest">ACTIVE</span>}
+                            ? <span className="text-destructive text-xs">{d.cessation_date}</span>
+                            : <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-green-50 text-green-700 border border-green-200">Active</span>}
                         </td>
                         <td className="py-2 px-3 border-r border-border/20 whitespace-nowrap">
                           {d.shareholding ? (() => {
@@ -3259,18 +3491,21 @@ function CaseViewInner() {
 
       {/* AI proactive alert banner */}
       {aiAlert && (
-        <div className="flex items-start gap-3 bg-warning/8 border border-warning/30 px-3 py-2 mb-2 text-[11px] font-mono">
-          <span className="text-warning font-bold shrink-0 mt-px">◈ AI NOTICE</span>
-          <span className="text-warning/90 flex-1 leading-snug">{aiAlert}</span>
+        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-3 text-sm">
+          <svg className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <span className="text-amber-800 flex-1 leading-snug font-medium">AI Notice:</span>
+          <span className="text-amber-700 flex-1 leading-snug">{aiAlert}</span>
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => { window.dispatchEvent(new CustomEvent("toggle-analyst-chat")); }}
-              className="text-[10px] tracking-widest border border-warning/40 text-warning px-2 py-0.5 hover:bg-warning/10 transition-colors"
-            >→ ASK AI</button>
+              className="text-xs font-medium border border-amber-300 text-amber-700 px-3 py-1 rounded hover:bg-amber-100 transition-colors"
+            >Ask AI</button>
             <button
               onClick={() => { setAiAlert(null); sessionStorage.setItem(`ai-alert-dismissed-${id}`, "1"); }}
-              className="text-warning/40 hover:text-warning transition-colors text-sm leading-none px-1"
-            >✕</button>
+              className="text-amber-400 hover:text-amber-700 transition-colors text-lg leading-none px-1"
+            >×</button>
           </div>
         </div>
       )}
@@ -3279,106 +3514,102 @@ function CaseViewInner() {
       {/* Tabs */}
       <div className="sticky top-[132px] z-30 bg-background -mx-3 px-3">
         <div className="overflow-x-auto mb-3">
-        <div className="flex border border-border bg-card min-w-max">
+        <div className="flex gap-1 bg-muted/40 rounded-lg p-1 min-w-max border border-border">
           {([
-            ["upload",      "1 · UPLOAD"],
-            ["review",      "2 · REVIEW"],
-            ["provisional", "3 · PROVISIONAL"],
-            ["ratios",      "4 · RATIOS"],
-            ["projections", "5 · PROJ"],
-            ["bank",        "6 · BANK"],
-            ["gst",         "7 · GST"],
-            ["ic_note",     "8 · IC NOTE"],
+            ["review",      "Review"],
+            ["provisional", "Provisional"],
+            ["ratios",      "Ratios"],
+            ["projections", "Projections"],
+            ["bank",           "Bank"],
+            ["gst",            "GST"],
+            ["cibil",          "CIBIL"],
+            ["triangulation",  "Triangulation"],
+            ["ic_note",        "IC Note"],
           ] as const).map(([k, l]) => (
             <button
               key={k}
               onClick={() => setTab(k)}
-              className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-border whitespace-nowrap flex items-center gap-1 ${tab === k ? "bg-primary text-primary-foreground" : "text-primary/70 hover:bg-surface"}`}
+              className={`px-3 sm:px-4 py-2 text-sm font-medium rounded-md whitespace-nowrap flex items-center gap-1.5 transition-colors ${tab === k ? "bg-white text-foreground shadow-sm border border-border" : "text-muted-foreground hover:text-foreground hover:bg-white/50"}`}
             >{l}<TabPresenceDots tabKey={k} /></button>
           ))}
           {hasPartner && (
             <button
-              onClick={() => setTabRaw("partner")}
-              className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-border whitespace-nowrap flex items-center gap-1 font-bold ${tab === "partner" ? "bg-warning text-black" : "text-warning/70 hover:bg-surface"}`}
-            >◈ PARTNER</button>
+              onClick={() => { setTabRaw("partner"); window.scrollTo({ top: 0 }); }}
+              className={`px-3 sm:px-4 py-2 text-sm font-medium rounded-md whitespace-nowrap flex items-center gap-1.5 transition-colors ${tab === "partner" ? "bg-amber-500 text-white shadow-sm" : "text-amber-600 hover:bg-amber-50"}`}
+            >Partner</button>
           )}
         </div>
         </div>
         {/* Partner sub-tab bar — visible only when PARTNER tab is active */}
         {tab === "partner" && (
           <div className="overflow-x-auto mb-3">
-            <div className="flex border border-warning/40 bg-warning/5 min-w-max">
-              <div className="px-3 py-2 text-[9px] tracking-widest text-warning font-bold border-r border-warning/30 flex items-center shrink-0 max-w-[180px] truncate">
-                {partnerCompanyName.toUpperCase()}
+            <div className="flex items-center gap-1 bg-amber-50 rounded-lg p-1 border border-amber-200 min-w-max">
+              <div className="px-3 py-1.5 text-xs font-semibold text-amber-700 border-r border-amber-200 flex items-center shrink-0 max-w-[200px] truncate mr-1">
+                {partnerCompanyName}
               </div>
-              {(["upload", "review", "ratios", "bank", "gst"] as const).map(k => (
+              {(["review", "ratios", "bank", "gst"] as const).map(k => (
                 <button
                   key={k}
                   onClick={() => setPartnerSubTab(k)}
-                  className={`px-3 sm:px-4 py-2 text-xs tracking-widest border-r border-warning/20 whitespace-nowrap transition-colors ${
-                    partnerSubTab === k ? "bg-warning text-black font-bold" : "text-warning/60 hover:bg-warning/10"
+                  className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors capitalize ${
+                    partnerSubTab === k ? "bg-amber-500 text-white shadow-sm" : "text-amber-600 hover:bg-amber-100"
                   }`}
-                >{k.toUpperCase()}</button>
+                >{k === "ic_note" ? "IC Note" : k.charAt(0).toUpperCase() + k.slice(1)}</button>
               ))}
             </div>
           </div>
         )}
       </div>
 
-      {(tab === "upload" || (tab === "partner" && partnerSubTab === "upload")) && (() => {
-        const activeDocs = (tab === "partner") ? partnerDocs : (!hasPartner || entity === "main") ? mainDocs : partnerDocs;
-        return (
-        <Panel title="UPLOAD FINANCIAL STATEMENTS" ticker="PDF / IMG / XLSX">
-          {hasPartner && tab !== "partner" && entityBar}
-          {extractError && (
-            <div className="mb-3 border border-destructive/50 bg-destructive/10 px-3 py-2 space-y-1">
-            <div className="flex items-center justify-between gap-2 border-b border-destructive/20 pb-1 mb-1.5">
-                <span className="text-destructive font-bold text-xs tracking-widest">✕ {extractError.title.toUpperCase()}</span>
-                <button
-                  onClick={() => setExtractError(null)}
-                  className="text-destructive hover:bg-destructive/20 px-1.5 py-0.5 border border-destructive/30 text-[10px] font-bold transition-colors"
-                >[CLOSE]</button>
-              </div>
-              {extractError.detail && (
-                <div className="text-destructive/80 text-[11px] tracking-wide">{extractError.detail}</div>
-              )}
-              {extractError.action && (
-                <div className="text-warning text-[11px] tracking-wide">▸ {extractError.action}</div>
-              )}
-            </div>
-          )}
-          <UploadGrid onUpload={(f, cls, fy) => handleUpload(f, cls, fy)} onCancel={handleCancelUpload} onDelete={handleDeleteDoc} onEdit={handleEditDoc} onRetry={handleRetry} busy={busy} docs={activeDocs} progress={progress} progressLabel={progressLabel} />
-        </Panel>
-        );
-      })()}
 
       {(tab === "review" || (tab === "partner" && partnerSubTab === "review")) && (
         <div className="space-y-3">
+          {/* Upload panel — always visible at top of Review tab */}
+          {(() => {
+            const activeDocs = (tab === "partner") ? partnerDocs : (!hasPartner || entity === "main") ? mainDocs : partnerDocs;
+            return (
+              <Panel title="Upload Financial Statements" ticker="PDF / XLSX / Image">
+                {hasPartner && tab !== "partner" && entityBar}
+                {extractError && (
+                  <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-red-700 font-semibold text-sm">{extractError.title}</span>
+                      <button onClick={() => setExtractError(null)} className="text-red-400 hover:text-red-700 text-lg leading-none px-1 transition-colors">×</button>
+                    </div>
+                    {extractError.detail && <div className="text-red-600 text-sm">{extractError.detail}</div>}
+                    {extractError.action && <div className="text-amber-700 text-xs">↳ {extractError.action}</div>}
+                  </div>
+                )}
+                <UploadGrid onUpload={(f, cls, fy) => handleUpload(f, cls, fy)} onCancel={handleCancelUpload} onDelete={handleDeleteDoc} onEdit={handleEditDoc} onRetry={handleRetry} busy={busy} docs={activeDocs} extracted={extracted} progress={progress} progressLabel={progressLabel} />
+              </Panel>
+            );
+          })()}
+
           <div className="flex items-center gap-2 sticky top-[168px] z-20 bg-background -mx-3 px-3 pt-1 pb-2 border-b border-border/30">
             <input ref={finExcelInputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFinancialExcel(f); e.target.value = ""; }} />
             <button
               onClick={() => finExcelInputRef.current?.click()}
               disabled={importingFinExcel}
-              className="text-[10px] tracking-widest border border-primary/40 text-primary/70 hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5"
-            >{importingFinExcel ? "IMPORTING…" : "⬆ IMPORT FINANCIAL EXCEL"}</button>
+              className="text-xs border border-primary/40 rounded text-primary hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+            >{importingFinExcel ? "Importing…" : "⬆ Import Financial Excel"}</button>
             <button
               onClick={downloadFinancialTemplate}
-              className="text-[10px] tracking-widest border border-accent/50 text-accent px-3 py-1.5 hover:bg-accent/10 flex items-center gap-1"
-            >⬇ TEMPLATE</button>
-            <span className="text-[9px] text-muted-foreground/50 tracking-wide">Supports Balance Sheet · P&L · Cash Flow sheets</span>
+              className="text-xs border border-border rounded text-muted-foreground px-3 py-1.5 hover:text-foreground hover:border-primary/50 flex items-center gap-1 transition-colors"
+            >⬇ Template</button>
+            <span className="text-xs text-muted-foreground">Supports Balance Sheet · P&L · Cash Flow sheets</span>
             <div className="ml-auto flex items-center gap-1">
               <button
                 onClick={performUndo}
                 disabled={undoStack.length === 0}
                 title="Undo (Ctrl+Z)"
-                className="text-[9px] tracking-widest border border-border px-2 py-1 text-muted-foreground hover:text-primary hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >↩ UNDO {undoStack.length > 0 && <span className="text-[8px] opacity-60">({undoStack.length})</span>}</button>
+                className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >↩ Undo {undoStack.length > 0 && <span className="text-[10px] opacity-60">({undoStack.length})</span>}</button>
               <button
                 onClick={performRedo}
                 disabled={redoStack.length === 0}
                 title="Redo (Ctrl+Y)"
-                className="text-[9px] tracking-widest border border-border px-2 py-1 text-muted-foreground hover:text-primary hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >↪ REDO {redoStack.length > 0 && <span className="text-[8px] opacity-60">({redoStack.length})</span>}</button>
+                className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >↪ Redo {redoStack.length > 0 && <span className="text-[10px] opacity-60">({redoStack.length})</span>}</button>
             </div>
           </div>
 
@@ -3397,18 +3628,81 @@ function CaseViewInner() {
               );
             }
 
-            return viewExtracted.length === 0 ? (
-            <Panel title="NO EXTRACTION YET"><div className="text-muted-foreground text-xs">Upload documents in the UPLOAD tab or import a financial Excel above.</div></Panel>
-          ) : (() => {
-            const extracted = viewExtracted;
+            const hasFinancialDocs = mainDocs.some(d =>
+              ["all_in_one","profit_loss","balance_sheet","cash_flow","provisional"].includes(d.doc_class ?? "")
+            );
+            const reviewEmptyState = (
+              <div className="flex flex-col items-center justify-center gap-4 py-12">
+                {hasFinancialDocs ? (
+                  <div className="flex flex-col items-center gap-3 text-center max-w-sm">
+                    <span className="text-xl text-warning">⚠</span>
+                    <span className="text-sm font-semibold text-amber-700">No Financial Tables Detected</span>
+                    <span className="text-sm text-muted-foreground leading-relaxed">
+                      A file was uploaded but no Balance Sheet, P&amp;L, or Cash Flow tables were found.
+                      Make sure you upload the <strong>audited financial statements</strong> PDF — not a proposal, pitch deck, or cover letter.
+                    </span>
+                    <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="text-sm text-primary border border-primary/40 rounded hover:bg-primary/10 px-3 py-1.5 transition-colors mt-1">
+                      ↑ Upload Correct File
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <label
+                      onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add("!border-primary","bg-primary/5"); }}
+                      onDragLeave={e => { e.currentTarget.classList.remove("!border-primary","bg-primary/5"); }}
+                      onDrop={e => {
+                        e.preventDefault();
+                        e.currentTarget.classList.remove("!border-primary","bg-primary/5");
+                        const f = e.dataTransfer.files[0];
+                        if (f) handleUpload(f, "all_in_one" as DocClass, null);
+                      }}
+                      className="flex flex-col items-center justify-center gap-3 w-full max-w-md border-2 border-dashed border-border rounded px-8 py-10 cursor-pointer transition-colors hover:border-primary/50 hover:bg-surface"
+                    >
+                      <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls" className="hidden"
+                        onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f, "all_in_one" as DocClass, null); e.target.value = ""; }} />
+                      <span className="text-2xl text-muted-foreground">⬆</span>
+                      <span className="text-sm font-semibold text-foreground">Drop PDF or Excel here</span>
+                      <span className="text-xs text-muted-foreground">or click to browse · auto-detects all statement types</span>
+                    </label>
+                    <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="text-sm text-muted-foreground hover:text-primary border border-border rounded hover:border-primary/50 px-3 py-1.5 transition-colors">
+                      ↑ Scroll to Upload
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+            const extracted = viewExtracted.filter(r => r.statement_type !== "projections");
+            if (extracted.length === 0) return reviewEmptyState;
             // Standard label order per type for consistent row ordering
+            const AUTOFIX_TARGET: Record<string, { stmtType: string; label: string }> = {
+              pl_gross:   { stmtType: "profit_loss",   label: "Gross Profit" },
+              pl_ebitda:  { stmtType: "profit_loss",   label: "EBITDA" },
+              pl_ebit:    { stmtType: "profit_loss",   label: "EBIT" },
+              pl_pbt:     { stmtType: "profit_loss",   label: "Profit Before Tax" },
+              pl_pat:     { stmtType: "profit_loss",   label: "PAT" },
+              bs_balance: { stmtType: "balance_sheet", label: "Total Assets" },
+              cf_net:     { stmtType: "cash_flow",     label: "Net Change in Cash" },
+              cf_close:   { stmtType: "cash_flow",     label: "Closing Cash" },
+            };
             const STD_ORDER: Record<string, string[]> = {
               profit_loss: ["Turnover","Cost of Goods Sold","Gross Profit","Operating Expenses","EBITDA","Depreciation","EBIT","Interest Expense","Profit Before Tax","Tax","PAT"],
               balance_sheet: ["Share Capital","Reserves & Surplus","Net Worth","Long Term Borrowings","Short Term Borrowings","Total Debt","Trade Payables","Other Current Liabilities","Current Liabilities","Total Liabilities","Fixed Assets (Net)","Inventory","Trade Receivables","Cash & Bank","Other Current Assets","Current Assets","Total Assets","Capital Employed"],
-              cash_flow: ["Cash from Operations","Cash from Investing","Cash from Financing","Net Change in Cash","Opening Cash","Closing Cash"],
+              cash_flow: [
+                "Net Profit Before Tax","Depreciation & Amortisation","Profit/Loss on Asset Sale",
+                "Profit/Loss on Investments","Interest/Investment Income","Interest Expense",
+                "Operating Profit Before WC Changes",
+                "Change in Trade Payables","Change in Short-term Borrowings","Change in Provisions",
+                "Change in Other Current Liabilities","Change in ST Loans & Advances",
+                "Change in Other Current Assets","Change in Trade Receivables","Change in Inventories",
+                "Cash from Operations","Taxes Paid","Net Cash from Operations",
+                "Purchase of Fixed Assets","Change in LT Loans & Advances","Change in Non-Current Investments",
+                "Change in Fixed Deposits","Proceeds from Equity","Dividends/Interest Received",
+                "Cash from Investing","Interest Paid","Funds Borrowed","Dividend Paid","Cash from Financing",
+                "Net Change in Cash","Opening Cash","Closing Cash",
+              ],
               projections: ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt"],
             };
-            const stmtTypes = Array.from(new Set(extracted.map(r => r.statement_type)));
+            const stmtTypes = Array.from(new Set(extracted.map(r => r.statement_type))).filter(t => t !== "projections");
             return stmtTypes.map(type => {
               const typeRows = extracted.filter(r => r.statement_type === type).sort((a, b) => a.fiscal_year - b.fiscal_year);
               const years = typeRows.map(r => r.fiscal_year);
@@ -3416,6 +3710,13 @@ function CaseViewInner() {
               const abbr = unitAbbr(unit);
               const allConfirmed = typeRows.every(r => r.confirmed);
               const anyLow = typeRows.some(r => (r.line_items as unknown as LineItem[]).some(i => i.confidence < 80 && !i.label.startsWith("__")));
+              const stmtIssues = articulationChecks.filter(c => {
+                if (c.status === "pass" || c.status === "skip") return false;
+                return (type === "balance_sheet" && (c.category === "within_bs" || c.category === "cross_stmt")) ||
+                       (type === "profit_loss"   && c.category === "within_pl") ||
+                       (type === "cash_flow"     && c.category === "within_cf");
+              });
+              const stmtHasFail = stmtIssues.some(c => c.status === "fail");
               // Build ordered union of labels, respecting sort_order if present
               const allItems = typeRows[0] ? (typeRows[0].line_items as unknown as LineItem[]).filter(i => !i.label.startsWith("__")) : [];
               const hasOrder = allItems.some(i => i.sort_order !== undefined);
@@ -3507,10 +3808,17 @@ function CaseViewInner() {
                   {/* ── Panel with table body only ───────────────────────────── */}
                   <Panel
                     title={`${type.replace(/_/g," ").toUpperCase()}${unit ? `  ·  ${fmtUnit(unit)}` : ""}`}
-                    status={anyLow ? "warn" : allConfirmed ? "live" : "idle"}
-                    ticker={allConfirmed ? "ALL CONFIRMED" : `${years.length} YEAR${years.length !== 1 ? "S" : ""}`}
+                    status={stmtHasFail ? "idle" : stmtIssues.length > 0 ? "warn" : anyLow ? "warn" : allConfirmed ? "live" : "idle"}
+                    ticker={stmtIssues.length > 0
+                      ? `${stmtIssues.length} issue${stmtIssues.length > 1 ? "s" : ""}`
+                      : allConfirmed ? "ALL CONFIRMED" : `${years.length} YEAR${years.length !== 1 ? "S" : ""}`}
                     actions={
                       <div className="flex gap-1.5 items-center">
+                        {stmtIssues.length > 0 && (
+                          <span className={`text-[10px] font-semibold ${stmtHasFail ? "text-destructive" : "text-warning"}`}>
+                            {stmtHasFail ? `✗ ${stmtIssues.filter(c => c.status === "fail").length} hard` : `△ ${stmtIssues.length} warn`}
+                          </span>
+                        )}
                         {!allConfirmed && (
                           <button
                             onClick={() => Promise.all(typeRows.filter(r => !r.confirmed).map(r => confirmExtraction(r.id)))}
@@ -3519,8 +3827,8 @@ function CaseViewInner() {
                         )}
                         <button
                           onClick={() => { if (window.confirm(`Delete ALL ${type.replace(/_/g," ").toUpperCase()} data (${years.length} year${years.length !== 1 ? "s" : ""})?`)) Promise.all(typeRows.map(r => deleteExtractedRow(r.id))); }}
-                          className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10 hover:border-destructive hover:text-destructive tracking-widest"
-                        >[DELETE]</button>
+                          className="text-xs border border-red-200 rounded text-red-500 px-2 py-0.5 hover:bg-red-50 hover:text-red-700 transition-colors"
+                        >Delete</button>
                       </div>
                     }
                   >
@@ -3566,6 +3874,14 @@ function CaseViewInner() {
                             const isGrandTotal  = GRAND_TOTAL_LABELS.has(label);
                             const isSubTotal    = !isGrandTotal && COMPUTED_LABELS.has(label);
                             const isLeaf        = !isSection && !isGrandTotal && !isSubTotal;
+
+                            // ── Articulation check status for this row ───────
+                            const rowIssue: "fail" | "warn" | null = (() => {
+                              const hits = years.map(fy => checkByRowKey.get(`${type}:${label}:${fy}`)).filter(Boolean) as ArticulationCheck[];
+                              if (hits.some(c => c.status === "fail")) return "fail";
+                              if (hits.some(c => c.status === "warn")) return "warn";
+                              return null;
+                            })();
 
                             const isDragging = dragRow?.stmtType === type && dragRow?.label === label;
 
@@ -3628,18 +3944,26 @@ function CaseViewInner() {
                             if (isGrandTotal) {
                               return (
                                 <tr key={label} {...dragProps}
-                                  className="border-t-2 border-primary/40 bg-primary/5 group"
+                                  className={`border-t-2 group ${rowIssue === "fail" ? "border-destructive/50 bg-destructive/5" : rowIssue === "warn" ? "border-warning/50 bg-warning/5" : "border-primary/40 bg-primary/5"}`}
                                 >
                                   <td className="py-1.5 pr-3 pl-2 font-bold text-primary tracking-wide">
-                                    {label}
+                                    <span className="flex items-center gap-1.5">
+                                      {label}
+                                      {rowIssue && (
+                                        <span className={`text-[9px] font-bold ${rowIssue === "fail" ? "text-destructive" : "text-warning"}`}>
+                                          {rowIssue === "fail" ? "✗" : "△"}
+                                        </span>
+                                      )}
+                                    </span>
                                   </td>
                                   {years.map(fy => {
                                     const fyRow = typeRows.find(r => r.fiscal_year === fy);
                                     const item = fyRow ? (fyRow.line_items as unknown as LineItem[]).find(i => i.label === label) : undefined;
                                     const val = item ? (item.override_value ?? item.value) : null;
                                     const isEditingVal = editingCell?.field === "value" && editingCell.stmtType === type && editingCell.fy === fy && editingCell.label === label;
+                                    const cellChk = checkByRowKey.get(`${type}:${label}:${fy}`);
                                     return (
-                                      <td key={fy} className="text-right tabular-nums pr-2 font-bold text-primary text-[12px]">
+                                      <td key={fy} className={`text-right tabular-nums pr-2 font-bold text-[12px] ${cellChk ? (cellChk.status === "fail" ? "text-destructive" : "text-warning") : "text-primary"}`}>
                                         {isEditingVal ? (
                                           <input autoFocus type="number" defaultValue={val ?? ""} step={unitStep(unit)}
                                             onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
@@ -3648,9 +3972,10 @@ function CaseViewInner() {
                                           />
                                         ) : (
                                           <span className="cursor-pointer hover:opacity-70"
+                                            title={cellChk ? cellChk.hint : undefined}
                                             onClick={() => { setEditingCell({ stmtType: type, fy, label, field: "value" }); setEditing(`${type}.${fy}.${label}`); }}>
                                             {val != null ? val.toLocaleString("en-IN") : <span className="text-muted-foreground font-normal">—</span>}
-                                            {abbr && val != null && <span className="text-[9px] text-primary/50 ml-0.5 font-normal">{abbr}</span>}
+                                            {abbr && val != null && <span className="text-[9px] opacity-50 ml-0.5 font-normal">{abbr}</span>}
                                           </span>
                                         )}
                                       </td>
@@ -3670,9 +3995,9 @@ function CaseViewInner() {
                               });
                               return (
                                 <tr key={label} {...dragProps}
-                                  className={`border-b border-border/50 bg-surface/50 group font-semibold ${isLockedAny ? "ring-1 ring-inset ring-accent/30" : ""}`}
+                                  className={`border-b group font-semibold ${rowIssue === "fail" ? "border-destructive/40 bg-destructive/5" : rowIssue === "warn" ? "border-warning/40 bg-warning/5" : "border-border/50 bg-surface/50"} ${isLockedAny ? "ring-1 ring-inset ring-accent/30" : ""}`}
                                 >
-                                  <td className="py-1 pr-3 pl-4 text-foreground/80 border-l-2 border-primary/30">
+                                  <td className={`py-1 pr-3 pl-4 border-l-2 ${rowIssue === "fail" ? "border-destructive/60 text-destructive" : rowIssue === "warn" ? "border-warning/60 text-warning" : "border-primary/30 text-foreground/80"}`}>
                                     <span className="text-muted-foreground/40 mr-1 cursor-grab text-[9px]">⠿</span>
                                     {isEditingLabel ? (
                                       <input autoFocus defaultValue={label}
@@ -3681,8 +4006,15 @@ function CaseViewInner() {
                                         className="w-full bg-input border border-primary px-1 text-primary text-xs"
                                       />
                                     ) : (
-                                      <span className="cursor-pointer hover:text-primary"
-                                        onClick={() => setEditingCell({ stmtType: type, fy: years[0] ?? 0, label, field: "label" })}>{label}</span>
+                                      <span className="cursor-pointer hover:text-primary inline-flex items-center gap-1.5"
+                                        onClick={() => setEditingCell({ stmtType: type, fy: years[0] ?? 0, label, field: "label" })}>
+                                        {label}
+                                        {rowIssue && (
+                                          <span className={`text-[9px] font-bold ${rowIssue === "fail" ? "text-destructive" : "text-warning"}`}>
+                                            {rowIssue === "fail" ? "✗" : "△"}
+                                          </span>
+                                        )}
+                                      </span>
                                     )}
                                   </td>
                                   {years.map(fy => {
@@ -3691,8 +4023,9 @@ function CaseViewInner() {
                                     const val = item ? (item.override_value ?? item.value) : null;
                                     const isLocked = !!item?.locked;
                                     const isEditingVal = editingCell?.field === "value" && editingCell.stmtType === type && editingCell.fy === fy && editingCell.label === label;
+                                    const cellChk = checkByRowKey.get(`${type}:${label}:${fy}`);
                                     return (
-                                      <td key={fy} className="text-right tabular-nums pr-2 text-foreground/90">
+                                      <td key={fy} className={`text-right tabular-nums pr-2 ${cellChk ? (cellChk.status === "fail" ? "text-destructive font-bold" : "text-warning font-semibold") : "text-foreground/90"}`}>
                                         {isEditingVal ? (
                                           <input autoFocus type="number" defaultValue={val ?? ""} step={unitStep(unit)}
                                             onBlur={e => { setEditingCell(null); setEditing(null); updateCellValue(type, fy, label, e.target.value); }}
@@ -3701,7 +4034,7 @@ function CaseViewInner() {
                                           />
                                         ) : (
                                           <span className={`cursor-pointer hover:text-primary italic ${isLocked ? "text-accent" : ""}`}
-                                            title={isLocked ? "Pinned — formula suspended. Clear value to restore auto-calculation." : "auto-calculated — click to override"}
+                                            title={cellChk ? cellChk.hint : isLocked ? "Pinned — formula suspended. Clear value to restore auto-calculation." : "auto-calculated — click to override"}
                                             onClick={() => { setEditingCell({ stmtType: type, fy, label, field: "value" }); setEditing(`${type}.${fy}.${label}`); }}>
                                             {isLocked && <span className="text-[9px] mr-0.5 opacity-60">⚑</span>}
                                             {val != null ? val.toLocaleString("en-IN") : <span className="text-muted-foreground font-normal">—</span>}
@@ -3802,29 +4135,146 @@ function CaseViewInner() {
                     className="mt-2 text-[10px] border border-dashed border-border/60 text-muted-foreground hover:border-primary hover:text-primary px-3 py-1 w-full tracking-widest"
                   >+ ADD ROW</button>
 
+                  {/* ── Validation issues detail panel ──────────────────── */}
+                  {stmtIssues.length > 0 && (() => {
+                    const fmtChk = (v: number | null) => v == null ? "—" : `${v.toLocaleString("en-IN")}${abbr ? ` ${abbr}` : ""}`;
+                    return (
+                      <div className="mt-3 border border-border/50 divide-y divide-border/20">
+                        <div className="px-3 py-1.5 bg-surface/60 flex items-center gap-2">
+                          <span className="text-[8px] tracking-widest font-bold text-muted-foreground">VALIDATION ISSUES</span>
+                          {stmtIssues.some(c => c.status === "fail") && (
+                            <span className="text-[9px] text-destructive font-bold bg-destructive/10 px-1.5 py-0.5">
+                              ✗ {stmtIssues.filter(c => c.status === "fail").length} HARD
+                            </span>
+                          )}
+                          {stmtIssues.some(c => c.status === "warn") && (
+                            <span className="text-[9px] text-warning font-bold bg-warning/10 px-1.5 py-0.5">
+                              △ {stmtIssues.filter(c => c.status === "warn").length} WARN
+                            </span>
+                          )}
+                        </div>
+                        {stmtIssues.map(check => {
+                          const prefix = Object.keys(AUTOFIX_TARGET).find(p => check.id.startsWith(p + "_"));
+                          const target = prefix ? AUTOFIX_TARGET[prefix] : null;
+                          const canFix = !!target && check.expected != null && check.fiscal_year != null;
+                          return (
+                            <div key={check.id}
+                              className={`px-3 py-2.5 ${check.status === "fail" ? "border-l-2 border-destructive" : "border-l-2 border-warning"}`}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
+                                    <span className={`text-[8px] font-bold tracking-widest px-1.5 py-0.5 ${check.status === "fail" ? "text-destructive bg-destructive/10" : "text-warning bg-warning/10"}`}>
+                                      {check.status === "fail" ? "✗ HARD" : "△ WARN"}
+                                    </span>
+                                    {check.fiscal_year && (
+                                      <span className="text-[9px] text-muted-foreground border border-border px-1.5 py-0.5">FY{check.fiscal_year}</span>
+                                    )}
+                                    <span className="text-[10px] font-semibold text-foreground">{check.name}</span>
+                                  </div>
+                                  <div className="grid grid-cols-3 gap-x-4 mb-1.5 text-[10px] font-mono">
+                                    <div>
+                                      <div className="text-[8px] tracking-widest text-muted-foreground mb-0.5">EXPECTED</div>
+                                      <div className="text-foreground font-semibold">{fmtChk(check.expected)}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-[8px] tracking-widest text-muted-foreground mb-0.5">EXTRACTED</div>
+                                      <div className={`font-semibold ${check.status === "fail" ? "text-destructive" : "text-warning"}`}>{fmtChk(check.actual)}</div>
+                                    </div>
+                                    <div>
+                                      <div className="text-[8px] tracking-widest text-muted-foreground mb-0.5">GAP</div>
+                                      <div className={`font-bold ${(check.gap ?? 0) > 0 ? "text-warning" : "text-destructive"}`}>
+                                        {check.gap != null ? `${check.gap > 0 ? "+" : ""}${check.gap.toLocaleString("en-IN")}${abbr ? ` ${abbr}` : ""}` : "—"}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div className="text-[9px] text-muted-foreground/60 italic leading-snug">{check.hint}</div>
+                                </div>
+                                {canFix && target && (
+                                  <button
+                                    onClick={() => updateCellValue(target.stmtType, check.fiscal_year!, target.label, String(check.expected!))}
+                                    className="shrink-0 mt-0.5 text-[9px] tracking-widest border border-primary/50 text-primary hover:bg-primary/10 px-2 py-1 font-bold transition-colors"
+                                    title={`Set ${target.label} = ${fmtChk(check.expected)}`}
+                                  >AUTO-FIX</button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* ── Balance sheet imbalance detail ──────────────────── */}
                   {type === "balance_sheet" && (() => {
                     const imbalances = years.flatMap(fy => {
                       const fyRow = typeRows.find(r => r.fiscal_year === fy);
                       if (!fyRow) return [];
                       const items = fyRow.line_items as unknown as LineItem[];
-                      const get = (lbl: string) => { const lo = lbl.toLowerCase(); const it = items.find(i => i.label.toLowerCase() === lo); return it ? (it.override_value ?? it.value) : null; };
-                      const assets = get("Total Assets") ?? get("Assets Total") ?? get("Total (Assets)") ?? get("Grand Total Assets");
-                      const liab   = get("Total Equity & Liabilities") ?? get("Total Liabilities & Equity") ?? get("Total Liabilities") ?? get("Liabilities Total");
-                      if (assets == null || liab == null) return [];
-                      const diff = assets - liab;
+                      const gv = (lbl: string) => { const lo = lbl.toLowerCase(); const it = items.find(i => i.label.toLowerCase() === lo); return it ? (it.override_value ?? it.value) : null; };
+                      const assets    = gv("Total Assets") ?? gv("Assets Total") ?? gv("Grand Total Assets");
+                      const netWorth  = gv("Net Worth");
+                      const totalDebt = gv("Total Debt");
+                      const currLiab  = gv("Current Liabilities");
+                      const liabSide  = (netWorth ?? 0) + (totalDebt ?? 0) + (currLiab ?? 0);
+                      if (assets == null) return [];
+                      const diff = assets - liabSide;
                       if (Math.abs(diff) < 0.01) return [];
-                      return [{ fy, diff }];
+                      return [{ fy, diff, assets, netWorth, totalDebt, currLiab, liabSide }];
                     });
                     if (imbalances.length === 0) return null;
+                    const fmtN = (v: number | null) => v == null ? "—" : `${v.toLocaleString("en-IN")}${abbr ? ` ${abbr}` : ""}`;
                     return (
-                      <div className="mt-2 border border-destructive/50 bg-destructive/10 px-3 py-2 space-y-1">
-                        <div className="text-[9px] tracking-widest text-destructive font-bold">⚠ BALANCE SHEET NOT BALANCING</div>
-                        {imbalances.map(({ fy, diff }) => (
-                          <div key={fy} className="text-[10px] text-destructive/80">
-                            FY{fy}: Assets − Liabilities = {diff > 0 ? "+" : ""}{diff.toLocaleString("en-IN")}{abbr ? ` ${abbr}` : ""}
+                      <div className="mt-3 border border-destructive/40 divide-y divide-destructive/10">
+                        <div className="px-3 py-1.5 flex items-center gap-2 border-b border-destructive/20">
+                          <span className="text-[9px] tracking-widest text-destructive font-bold">✗ BALANCE SHEET NOT BALANCING</span>
+                        </div>
+                        {imbalances.map(({ fy, diff, assets, netWorth, totalDebt, currLiab, liabSide }) => (
+                          <div key={fy} className="px-3 py-2.5">
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[9px] border border-destructive/40 text-destructive px-1.5 py-0.5 font-bold">FY{fy}</span>
+                                <span className={`text-[9px] font-bold ${diff > 0 ? "text-warning" : "text-destructive"}`}>
+                                  GAP: {diff > 0 ? "+" : ""}{fmtN(diff)}
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => updateCellValue("balance_sheet", fy, "Total Assets", String(liabSide))}
+                                className="text-[9px] tracking-widest border border-primary/50 text-primary hover:bg-primary/10 px-2 py-0.5 font-bold transition-colors"
+                                title={`Set Total Assets = Net Worth + Total Debt + Current Liabilities = ${fmtN(liabSide)}`}
+                              >AUTO-FIX</button>
+                            </div>
+                            <div className="text-[10px] font-mono space-y-0.5">
+                              <div className="flex justify-between py-0.5 border-b border-border/30">
+                                <span className={`font-semibold ${diff !== 0 ? "text-destructive" : "text-foreground"}`}>Total Assets</span>
+                                <span className={`font-semibold tabular-nums ${diff !== 0 ? "text-destructive" : "text-foreground"}`}>{fmtN(assets)}</span>
+                              </div>
+                              <div className="text-[8px] tracking-widest text-muted-foreground/50 pt-1 pb-0.5">EQUITY + LIABILITIES</div>
+                              {netWorth != null && (
+                                <div className="flex justify-between pl-2 text-muted-foreground">
+                                  <span>Net Worth</span><span className="tabular-nums text-foreground">{fmtN(netWorth)}</span>
+                                </div>
+                              )}
+                              {totalDebt != null && (
+                                <div className="flex justify-between pl-2 text-muted-foreground">
+                                  <span>+ Total Debt</span><span className="tabular-nums text-foreground">{fmtN(totalDebt)}</span>
+                                </div>
+                              )}
+                              {currLiab != null && (
+                                <div className="flex justify-between pl-2 text-muted-foreground">
+                                  <span>+ Current Liabilities</span><span className="tabular-nums text-foreground">{fmtN(currLiab)}</span>
+                                </div>
+                              )}
+                              <div className="flex justify-between pt-0.5 border-t border-border/40 font-semibold">
+                                <span className="text-muted-foreground">Sum (E+L)</span>
+                                <span className="tabular-nums text-foreground">{fmtN(liabSide)}</span>
+                              </div>
+                            </div>
+                            <div className="mt-1.5 text-[9px] text-muted-foreground/60 italic">
+                              AUTO-FIX sets Total Assets = {fmtN(liabSide)} to close the gap.
+                            </div>
                           </div>
                         ))}
-                        <div className="text-[9px] text-muted-foreground/60 mt-1">Check totals or adjust line items to bring both sides into balance.</div>
                       </div>
                     );
                   })()}
@@ -3833,13 +4283,13 @@ function CaseViewInner() {
                 </div>
               );
             });
-          })()})()}
+          })()}
           {/* ── Add Statement Box ──────────────────────────────────────────── */}
           {addStmtForm ? (
-            <Panel title="NEW STATEMENT BOX" ticker="MANUAL ENTRY" status="warn">
+            <Panel title="Manual Entry" ticker="New Statement" status="warn">
               <div className="flex gap-3 items-end flex-wrap">
                 <div>
-                  <label className="terminal-label block mb-1">Statement Type</label>
+                  <label className="block text-sm font-medium text-foreground mb-1">Statement Type</label>
                   <select
                     value={addStmtForm.type}
                     onChange={e => setAddStmtForm(f => f && ({ ...f, type: e.target.value as StatementType }))}
@@ -3851,7 +4301,7 @@ function CaseViewInner() {
                   </select>
                 </div>
                 <div>
-                  <label className="terminal-label block mb-1">Fiscal Year</label>
+                  <label className="block text-sm font-medium text-foreground mb-1">Fiscal Year</label>
                   <input
                     type="number"
                     autoFocus
@@ -3866,7 +4316,7 @@ function CaseViewInner() {
                   />
                 </div>
                 <div>
-                  <label className="terminal-label block mb-1">Unit</label>
+                  <label className="block text-sm font-medium text-foreground mb-1">Unit</label>
                   <input
                     placeholder="e.g. Crores"
                     value={addStmtForm.unit}
@@ -3893,6 +4343,10 @@ function CaseViewInner() {
               className="w-full text-[10px] border border-dashed border-border text-muted-foreground hover:border-primary hover:text-primary py-2.5 tracking-widest"
             >+ ADD STATEMENT BOX</button>
           )}
+          {derivedCFSeries.length > 0 && !extracted.some(r => r.statement_type === "cash_flow") && (
+            <DerivedCashFlowPanel series={derivedCFSeries} unit={extracted.find(r => r.unit)?.unit ?? null} />
+          )}
+
           {extracted.some((r) => r.confirmed) && (
             <div className="flex flex-col gap-1.5">
               {ratiosOutdated && (
@@ -3904,9 +4358,9 @@ function CaseViewInner() {
               <button
                 onClick={runRatios}
                 disabled={busy}
-                className={`px-4 py-2 text-xs tracking-widest font-bold disabled:opacity-50 transition-colors ${ratiosOutdated ? "bg-warning text-warning-foreground" : "bg-primary text-primary-foreground"}`}
+                className={`px-5 py-2.5 rounded-md text-sm font-semibold disabled:opacity-50 transition-colors ${ratiosOutdated ? "bg-amber-500 text-white hover:bg-amber-600" : "bg-primary text-primary-foreground hover:bg-primary/90"}`}
               >
-                {busy ? "COMPUTING..." : ratiosOutdated ? "[↻ DATA CHANGED — RE-RUN RATIOS →]" : "[GENERATE RATIO ANALYSIS →]"}
+                {busy ? "Computing…" : ratiosOutdated ? "↻ Data Changed — Re-run Ratios" : "Generate Ratio Analysis"}
               </button>
             </div>
           )}
@@ -3931,7 +4385,7 @@ function CaseViewInner() {
             }
             if (labelOrder.length === 0) return null;
             return (
-              <Panel title="AUTO-DERIVED FIELDS" ticker="CALC" status="warn">
+              <Panel title="Auto-derived Fields" ticker="Calculated" status="warn">
                 <div className="text-[9px] text-warning/80 mb-2 tracking-wider">
                   ▸ Not in uploaded documents — auto-calculated from extracted data. Review before use.
                 </div>
@@ -3979,7 +4433,7 @@ function CaseViewInner() {
 
           {extracted.length > 0 ? (
             <DownloadBar onTemplate={downloadFinancialTemplate} onExcel={async () => {
-              const stmtTypes = Array.from(new Set(extracted.map(r => r.statement_type)));
+              const stmtTypes = Array.from(new Set(extracted.map(r => r.statement_type))).filter(t => t !== "projections");
               const sheets = stmtTypes.map(type => {
                 const rows: (string | number | null)[][] = [["FY", "Unit", "Line Item", "Extracted Value", "Override Value", "Confidence", "Reviewed"]];
                 for (const row of extracted.filter(r => r.statement_type === type)) {
@@ -4000,12 +4454,12 @@ function CaseViewInner() {
       {tab === "ratios" && (
         <div className="space-y-3">
           {hasPartner && (
-            <Panel title="COMPANY" ticker="ENTITY SELECT">
+            <Panel title="Company" ticker="Entity">
               {entityBar}
             </Panel>
           )}
           {ratios.length === 0 ? (
-            <Panel title="NO RATIOS"><div className="text-muted-foreground text-xs">Confirm extracted financials and run ratio analysis.</div></Panel>
+            <Panel title="No Ratios"><div className="text-muted-foreground text-sm">Confirm extracted financials and run ratio analysis.</div></Panel>
           ) : (
             <>
               {ratioGroups.map((cat) => (
@@ -4060,7 +4514,7 @@ function CaseViewInner() {
                 </Panel>
               ))}
               {/* ── AI Credit Analysis ─────────────────────────────────────── */}
-              <Panel title="AI CREDIT ANALYSIS" ticker="INSIGHTS" status={ratioAnalysisLoading ? "warn" : ratioAnalysis ? "live" : "idle"}>
+              <Panel title="AI Credit Analysis" ticker="Insights" status={ratioAnalysisLoading ? "warn" : ratioAnalysis ? "live" : "idle"}>
                 {!ratioAnalysis && !ratioAnalysisLoading && (
                   <div className="flex items-center justify-between gap-4">
                     <p className="text-[10px] text-muted-foreground leading-relaxed">
@@ -4069,27 +4523,27 @@ function CaseViewInner() {
                     </p>
                     <button
                       onClick={generateRatioAnalysis}
-                      className="shrink-0 bg-primary text-primary-foreground px-4 py-2 text-xs tracking-widest font-bold hover:bg-primary/80"
+                      className="shrink-0 bg-primary text-primary-foreground px-5 py-2.5 rounded-md text-sm font-semibold hover:bg-primary/90 transition-colors"
                     >
-                      [GENERATE AI ANALYSIS →]
+                      Generate AI Analysis
                     </button>
                   </div>
                 )}
                 {ratioAnalysisLoading && (
                   <div className="space-y-3 py-2">
-                    <div className="flex justify-between text-[11px] tracking-widest">
-                      <span className="text-primary">▸ {ratioAiLabel || "ANALYSING"}</span>
-                      <span className="text-primary font-bold tabular-nums">{ratioAiProgress}%</span>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-primary">▸ {ratioAiLabel || "Analysing…"}</span>
+                      <span className="text-primary font-semibold tabular-nums">{ratioAiProgress}%</span>
                     </div>
-                    <div className="h-2 bg-input border border-border overflow-hidden">
+                    <div className="h-2 bg-muted rounded-full overflow-hidden">
                       <div
-                        className="h-full bg-primary transition-all duration-300 ease-out"
-                        style={{ width: `${ratioAiProgress}%`, boxShadow: "0 0 8px hsl(var(--primary))" }}
+                        className="h-full bg-primary rounded-full transition-all duration-300 ease-out"
+                        style={{ width: `${ratioAiProgress}%` }}
                       />
                     </div>
-                    <div className="grid grid-cols-5 gap-1 text-[8px] text-muted-foreground/50 tracking-widest">
-                      {["RATIO DATA","TRENDS","CATEGORIES","RISK FLAGS","DRAFTING"].map((s, i) => (
-                        <div key={s} className={`text-center py-1 border border-border/30 ${ratioAiProgress >= (i + 1) * 20 ? "text-primary border-primary/40 bg-primary/5" : ""}`}>{s}</div>
+                    <div className="grid grid-cols-5 gap-1 text-[10px] text-muted-foreground">
+                      {["Ratio Data","Trends","Categories","Risk Flags","Drafting"].map((s, i) => (
+                        <div key={s} className={`text-center py-1 rounded border border-border/30 ${ratioAiProgress >= (i + 1) * 20 ? "text-primary border-primary/40 bg-primary/5 font-medium" : ""}`}>{s}</div>
                       ))}
                     </div>
                   </div>
@@ -4102,26 +4556,26 @@ function CaseViewInner() {
 
                     {/* Overall observation */}
                     <div>
-                      <div className="terminal-label mb-2">OVERALL FINANCIAL HEALTH</div>
-                      <p className="text-xs text-foreground/85 leading-relaxed">{ratioAnalysis.overall_observation}</p>
+                      <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Overall Financial Health</div>
+                      <p className="text-sm text-foreground leading-relaxed">{ratioAnalysis.overall_observation}</p>
                     </div>
 
                     {/* Category insights */}
                     <div className="grid grid-cols-1 gap-3">
                       {[
-                        { key: "profitability_insight", label: "PROFITABILITY" },
-                        { key: "liquidity_insight",     label: "LIQUIDITY" },
-                        { key: "solvency_insight",      label: "SOLVENCY & COVERAGE" },
-                        { key: "efficiency_insight",    label: "EFFICIENCY & TURNOVER" },
-                        { key: "expense_insight",       label: "COST STRUCTURE" },
-                        { key: "r_score_insight",       label: "R' SCORE (DISTRESS RISK)" },
+                        { key: "profitability_insight", label: "Profitability" },
+                        { key: "liquidity_insight",     label: "Liquidity" },
+                        { key: "solvency_insight",      label: "Solvency & Coverage" },
+                        { key: "efficiency_insight",    label: "Efficiency & Turnover" },
+                        { key: "expense_insight",       label: "Cost Structure" },
+                        { key: "r_score_insight",       label: "R-Score (Distress Risk)" },
                       ].map(({ key, label }) => {
                         const text = ratioAnalysis[key as keyof RatioAnalysisResult] as string;
                         if (!text) return null;
                         return (
-                          <div key={key} className="border-l-2 border-border/40 pl-3">
-                            <div className="terminal-label text-[9px] mb-1">{label}</div>
-                            <p className="text-[11px] text-foreground/80 leading-relaxed">{text}</p>
+                          <div key={key} className="border-l-2 border-border/60 pl-3">
+                            <div className="text-xs font-medium text-muted-foreground mb-0.5">{label}</div>
+                            <p className="text-sm text-foreground leading-relaxed">{text}</p>
                           </div>
                         );
                       })}
@@ -4130,18 +4584,18 @@ function CaseViewInner() {
                     {/* Risk factors */}
                     {ratioAnalysis.risk_factors?.length > 0 && (
                       <div>
-                        <div className="terminal-label mb-2">RISK FACTORS</div>
+                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Risk Factors</div>
                         <div className="space-y-2">
                           {ratioAnalysis.risk_factors.map((rf, i) => (
-                            <div key={i} className="flex gap-3 items-start border border-border/30 bg-surface px-3 py-2">
-                              <span className={`shrink-0 text-[9px] font-bold tracking-widest px-1.5 py-0.5 ${
-                                rf.severity === "HIGH"   ? "bg-destructive/15 text-destructive border border-destructive/30" :
-                                rf.severity === "MEDIUM" ? "bg-warning/15 text-warning border border-warning/30" :
-                                                           "bg-muted/30 text-muted-foreground border border-border"
-                              }`}>{rf.severity}</span>
+                            <div key={i} className="flex gap-3 items-start rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+                              <span className={`shrink-0 text-xs font-semibold px-2 py-0.5 rounded ${
+                                rf.severity === "HIGH"   ? "bg-red-50 text-red-700 border border-red-200" :
+                                rf.severity === "MEDIUM" ? "bg-amber-50 text-amber-700 border border-amber-200" :
+                                                           "bg-muted text-muted-foreground border border-border"
+                              }`}>{rf.severity === "HIGH" ? "High" : rf.severity === "MEDIUM" ? "Medium" : "Low"}</span>
                               <div>
-                                <div className="text-[9px] text-muted-foreground tracking-widest mb-0.5">{rf.category.toUpperCase()}</div>
-                                <p className="text-[11px] text-foreground/80 leading-relaxed">{rf.description}</p>
+                                <div className="text-xs text-muted-foreground mb-0.5">{rf.category}</div>
+                                <p className="text-sm text-foreground leading-relaxed">{rf.description}</p>
                               </div>
                             </div>
                           ))}
@@ -4152,12 +4606,12 @@ function CaseViewInner() {
                     {/* Positive factors */}
                     {ratioAnalysis.positive_factors?.length > 0 && (
                       <div>
-                        <div className="terminal-label mb-2">POSITIVE INDICATORS</div>
-                        <div className="space-y-1">
+                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Positive Indicators</div>
+                        <div className="space-y-1.5">
                           {ratioAnalysis.positive_factors.map((pf, i) => (
-                            <div key={i} className="flex gap-2 text-[11px]">
-                              <span className="text-success shrink-0 mt-0.5">✓</span>
-                              <span className="text-foreground/80 leading-relaxed">{pf}</span>
+                            <div key={i} className="flex gap-2 text-sm">
+                              <span className="text-green-600 shrink-0 mt-0.5">✓</span>
+                              <span className="text-foreground leading-relaxed">{pf}</span>
                             </div>
                           ))}
                         </div>
@@ -4167,12 +4621,12 @@ function CaseViewInner() {
                     {/* Data accuracy notes */}
                     {ratioAnalysis.data_accuracy_notes?.length > 0 && (
                       <div>
-                        <div className="terminal-label mb-2">DATA ACCURACY NOTES</div>
-                        <div className="space-y-1">
+                        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Data Accuracy Notes</div>
+                        <div className="space-y-1.5">
                           {ratioAnalysis.data_accuracy_notes.map((note, i) => (
-                            <div key={i} className="flex gap-2 text-[11px]">
-                              <span className="text-accent shrink-0 mt-0.5">▲</span>
-                              <span className="text-foreground/70 leading-relaxed">{note}</span>
+                            <div key={i} className="flex gap-2 text-sm">
+                              <span className="text-amber-500 shrink-0 mt-0.5">▲</span>
+                              <span className="text-foreground leading-relaxed">{note}</span>
                             </div>
                           ))}
                         </div>
@@ -4182,9 +4636,9 @@ function CaseViewInner() {
                     <button
                       onClick={() => { setRatioAnalysis(null); generateRatioAnalysis(); }}
                       disabled={ratioAnalysisLoading}
-                      className="text-[10px] text-muted-foreground hover:text-primary tracking-widest disabled:opacity-50"
+                      className="text-sm text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
                     >
-                      [REGENERATE]
+                      Regenerate
                     </button>
                   </div>
                 )}
@@ -4238,7 +4692,7 @@ function CaseViewInner() {
       {tab === "projections" && (
         <div className="space-y-3">
           {hasPartner && (
-            <Panel title="COMPANY" ticker="ENTITY SELECT">
+            <Panel title="Company" ticker="Entity">
               {entityBar}
             </Panel>
           )}
@@ -4249,15 +4703,11 @@ function CaseViewInner() {
             progress={progress}
             progressLabel={progressLabel}
             onGenerateNote={runNarrative}
-            projComment={
-              ic?.projections_comment ??
-              (cc.analyst_notes?.startsWith("[PROJECTIONS COMMENT]\n")
-                ? cc.analyst_notes.slice("[PROJECTIONS COMMENT]\n".length)
-                : "")
-            }
-            onSaveComment={saveProjectionsComment}
             onUpload={handleProjectionUpload}
             onDirectImport={handleDirectProjImport}
+            docs={docs.filter(d => d.doc_class === "projections")}
+            onDelete={handleDeleteDoc}
+            onRetry={handleRetry}
           />
           {extracted.some(r => r.statement_type === "projections") ? (
             <DownloadBar onTemplate={downloadProjectionsTemplate} onExcel={async () => {
@@ -4266,10 +4716,21 @@ function CaseViewInner() {
               const projYears = Array.from(new Set(projRows.map(r => r.fiscal_year))).sort();
               const liVal = (items: LineItem[], label: string) => { const it = items.find(i=>i.label===label); if(!it) return null; return it.override_value??it.value; };
               const getHist = (fy: number): LineItem[] => { const r: LineItem[] = []; const s = new Set<string>(); for (const row of histRows.filter(x=>x.fiscal_year===fy)) for (const it of (row.line_items as unknown as LineItem[])??[]) if(!s.has(it.label)){r.push(it);s.add(it.label);} return r; };
+              const PROJ_EXCEL_ALIAS: Record<string, string[]> = {
+                "Projected Turnover":   ["Projected Turnover", "Revenue", "Total Income", "Turnover"],
+                "Projected EBITDA":     ["Projected EBITDA", "EBITDA"],
+                "Projected PAT":        ["Projected PAT", "PAT"],
+                "Projected Net Worth":  ["Projected Net Worth", "Net Worth"],
+                "Projected Total Debt": ["Projected Total Debt", "Total Debt"],
+              };
               const projLabels = ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt"];
+              const liValAliased = (items: LineItem[], aliases: string[]): number | null => {
+                for (const lb of aliases) { const v = liVal(items, lb); if (v !== null) return v; }
+                return null;
+              };
               const hdr: (string|number|null)[] = ["Metric", ...projYears.map(y=>`FY${y} (P)`)];
               const rows: (string|number|null)[][] = [hdr];
-              for (const lb of projLabels) rows.push([lb, ...projYears.map(y => liVal((projRows.find(r=>r.fiscal_year===y)?.line_items??[]) as unknown as LineItem[], lb) ?? "—")]);
+              for (const lb of projLabels) rows.push([lb, ...projYears.map(y => liValAliased((projRows.find(r=>r.fiscal_year===y)?.line_items??[]) as unknown as LineItem[], PROJ_EXCEL_ALIAS[lb] ?? [lb]) ?? "—")]);
               const unit = extracted.find(r=>r.unit)?.unit ?? "";
               await dlExcel([{ name: "Projections", rows }, { name: "Meta", rows: [["Unit", unit], ["Case", cc.case_code], ["Client", cc.client_name]] }], `${cc.case_code}_projections.xlsx`);
             }} />
@@ -4282,10 +4743,24 @@ function CaseViewInner() {
       {tab === "provisional" && (
         <>
           {hasPartner && (
-            <Panel title="COMPANY" ticker="ENTITY SELECT">
+            <Panel title="Company" ticker="Entity">
               {entityBar}
             </Panel>
           )}
+          <Panel title="Provisional Document Upload" ticker="PDF · MIS" status="idle">
+            <CompactUploadGrid
+              onUpload={(f) => handleProvisionalUpload(f)}
+              onDelete={handleDeleteDoc}
+              onRetry={handleRetry}
+              busy={busy}
+              docs={docs.filter(d => d.doc_class === "provisional")}
+              progress={progress}
+              progressLabel={progressLabel}
+              showClass={false}
+              showFy={false}
+              hint={["Upload provisional / MIS financial statement PDF", "P&L and Balance Sheet will be extracted automatically"]}
+            />
+          </Panel>
           <ProvisionalTab
             cc={cc}
             periods={ic?.provisional ?? []}
@@ -4314,7 +4789,7 @@ function CaseViewInner() {
           {/* ── IC Note PDF import ─────────────────────────────────────────── */}
           <input ref={icImportFileRef} type="file" className="hidden" accept=".pdf"
             onChange={e => { const f = e.target.files?.[0]; if (f) handleIcNoteImport(f); e.target.value = ""; }} />
-          <Panel title="IC NOTE PDF IMPORT" ticker="MISTRAL OCR · OPTIONAL" status="idle">
+          <Panel title="IC Note PDF Import" ticker="OCR · Optional" status="idle">
             <div className="space-y-2">
               <div className="text-[10px] text-muted-foreground tracking-wide">
                 Upload an existing IC appraisal / credit assessment PDF — Mistral will extract all sections, risks, CPs and SWOT automatically.
@@ -4329,182 +4804,43 @@ function CaseViewInner() {
               ) : (
                 <button
                   onClick={() => icImportFileRef.current?.click()}
-                  className="text-[10px] border border-border px-3 py-1.5 hover:border-primary hover:text-primary transition-colors tracking-widest"
+                  className="text-sm border border-border rounded px-3 py-1.5 hover:border-primary hover:text-primary transition-colors"
                 >
-                  ⬆ IMPORT IC NOTE PDF
+                  ⬆ Import IC Note PDF
                 </button>
               )}
             </div>
           </Panel>
-          {(!ic || !ic.sections) ? (
-            <Panel title="NO IC NOTE">
-              <div className="space-y-3">
-                <div className="text-muted-foreground text-xs">No IC note generated yet. Compute ratios first, then click generate below.</div>
-                {ratios.length === 0 && (
-                  <div className="text-[10px] text-warning/80 border border-warning/30 bg-warning/5 px-3 py-2">
-                    ⚠ No ratios found — run ratio analysis first (RATIOS tab) before generating the IC note.
-                  </div>
-                )}
-                <button
-                  onClick={runNarrative}
-                  disabled={busy || ratios.length === 0}
-                  className="bg-primary text-primary-foreground px-4 py-2 text-xs tracking-widest font-bold disabled:opacity-50"
-                >
-                  {busy ? `${progressLabel || "GENERATING…"} ${progress}%` : "[GENERATE 12-SECTION IC NOTE →]"}
-                </button>
-                {busy && (
-                  <div className="space-y-1">
-                    <div className="h-1.5 bg-border rounded-full overflow-hidden">
-                      <div className="h-full bg-primary transition-all duration-500" style={{ width: `${progress}%` }} />
-                    </div>
-                    <div className="text-[10px] text-muted-foreground tracking-widest">{progressLabel}</div>
-                  </div>
-                )}
-              </div>
-            </Panel>
-          ) : (
-            <>
-              <div className="border border-warning bg-warning/10 px-3 py-2 text-warning text-xs tracking-widest">
-                ⚠ {AI_DRAFT_BANNER}
-              </div>
-              {IC_SECTIONS.map((s) => {
-                const aiMd = ic.sections?.[s.id]?.markdown || "";
-                if (s.id === "executive_summary") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICSummaryPanel cc={cc} ratios={ratios} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                if (s.id === "historical_financial") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICHistoricalTables extracted={extracted} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                if (s.id === "projections") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICProjectionsTable extracted={extracted} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                if (s.id === "key_ratios") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICRatioTable ratios={ratios} />
-                  </Panel>
-                );
-                if (s.id === "client_promoter") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICClientProfile cc={cc} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                if (s.id === "investment_structure") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICInvestmentStructure cc={cc} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                if (s.id === "rehbar_funding_history") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICRehbarHistory cc={cc} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                if (s.id === "visit_reference") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICVisitReference cc={cc} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                if (s.id === "product_specifics") return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <ICProductSpecifics cc={cc} />
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-                return (
-                  <Panel key={s.id} title={`${s.roman}. ${s.title}`} ticker="DRAFT">
-                    <BulletOnlyMd text={aiMd} />
-                  </Panel>
-                );
-              })}
-              <Panel title="RISK REGISTER" ticker="X.MIT">
-                <div className="overflow-x-auto">
-                <table className="w-full text-xs min-w-[360px]">
-                  <thead className="text-muted-foreground border-b border-border">
-                    <tr><th className="text-left py-1">CATEGORY</th><th className="text-left">RISK</th><th className="text-left">MITIGANT</th><th>SEV</th></tr>
-                  </thead>
-                  <tbody>
-                    {ic.risks?.map((r: { category: string; risk: string; mitigant: string; severity: string }, i: number) => (
-                      <tr key={i} className="border-b border-border/30">
-                        <td className="py-1 text-accent uppercase">{r.category}</td>
-                        <td className="text-foreground/90">{r.risk}</td>
-                        <td className="text-foreground/70">{r.mitigant}</td>
-                        <td className={r.severity === "high" ? "text-destructive" : r.severity === "medium" ? "text-warning" : "text-success"}>
-                          {r.severity?.toUpperCase()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                </div>
-              </Panel>
-              <Panel title="CONDITIONS PRECEDENT" ticker="CP">
-                <ul className="text-xs space-y-1">
-                  {ic.conditions_precedent?.map((c, i) => (
-                    <li key={i} className="flex gap-2"><span className="text-warning">▸</span><span>{c}</span></li>
-                  ))}
-                </ul>
-              </Panel>
 
-              {ic.swot && (
-                <Panel title="SWOT ANALYSIS" ticker="XIII · STRATEGIC">
-                  <div className="grid grid-cols-2 gap-2">
-                    {/* Strengths */}
-                    <div className="border border-success/30 bg-success/5 p-3 space-y-1.5">
-                      <div className="text-[9px] tracking-widest text-success font-bold mb-2">+ STRENGTHS</div>
-                      {ic.swot.strengths?.map((s, i) => (
-                        <div key={i} className="flex gap-2 text-xs">
-                          <span className="text-success font-bold shrink-0 mt-px">+</span>
-                          <span className="text-foreground/90">{s}</span>
-                        </div>
-                      ))}
-                    </div>
-                    {/* Weaknesses */}
-                    <div className="border border-destructive/30 bg-destructive/5 p-3 space-y-1.5">
-                      <div className="text-[9px] tracking-widest text-destructive font-bold mb-2">− WEAKNESSES</div>
-                      {ic.swot.weaknesses?.map((w, i) => (
-                        <div key={i} className="flex gap-2 text-xs">
-                          <span className="text-destructive font-bold shrink-0 mt-px">−</span>
-                          <span className="text-foreground/90">{w}</span>
-                        </div>
-                      ))}
-                    </div>
-                    {/* Opportunities */}
-                    <div className="border border-accent/30 bg-accent/5 p-3 space-y-1.5">
-                      <div className="text-[9px] tracking-widest text-accent font-bold mb-2">+ OPPORTUNITIES</div>
-                      {ic.swot.opportunities?.map((o, i) => (
-                        <div key={i} className="flex gap-2 text-xs">
-                          <span className="text-accent font-bold shrink-0 mt-px">+</span>
-                          <span className="text-foreground/90">{o}</span>
-                        </div>
-                      ))}
-                    </div>
-                    {/* Threats */}
-                    <div className="border border-warning/30 bg-warning/5 p-3 space-y-1.5">
-                      <div className="text-[9px] tracking-widest text-warning font-bold mb-2">▲ THREATS</div>
-                      {ic.swot.threats?.map((t, i) => (
-                        <div key={i} className="flex gap-2 text-xs">
-                          <span className="text-warning font-bold shrink-0 mt-px">▲</span>
-                          <span className="text-foreground/90">{t}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </Panel>
-              )}
+          {/* Generate progress (shown while busy) */}
+          {busy && (
+            <div className="border border-border px-4 py-3 space-y-1">
+              <div className="h-1.5 bg-border rounded-full overflow-hidden">
+                <div className="h-full bg-primary transition-all duration-500" style={{ width: `${progress}%` }} />
+              </div>
+              <div className="text-[10px] text-muted-foreground tracking-widest">{progressLabel} {progress}%</div>
+            </div>
+          )}
+
+          {/* ── IC Note Document ────────────────────────────────────────────── */}
+          <ICNoteDocument
+            cc={cc}
+            extracted={activeExtracted}
+            ratios={ratios}
+            ic={(ic ?? {}) as IcNoteShape}
+            userEmail={user?.email ?? ""}
+            busy={busy}
+            onGenerate={(notes) => runNarrative(notes)}
+            onPatchSection={patchIcSection}
+            onAddComment={addIcComment}
+            onResolveComment={resolveIcComment}
+          />
+
+          {/* PDF download (only when note exists) */}
+          {ic?.sections && (
+            <>
               <ICFinalRecommendation cc={cc} ratios={ratios} extracted={extracted} ic={ic!} />
-              <DownloadBar onPdf={() => dlPdf(buildIcNoteHtml(cc, extracted, ratios, ic!), `${cc.case_code} IC Note`)} />
+              <DownloadBar onPdf={() => dlPdfIc(buildIcNoteHtmlFull(cc, extracted, ratios, ic!), `${cc.case_code} IC Note`)} />
             </>
           )}
         </div>
@@ -4613,6 +4949,7 @@ function CaseViewInner() {
             data={activeBankData}
             docs={tab === "partner" ? partnerDocs : docs}
             user={user!}
+            bsaData={bsaData}
             onReload={reload}
           />
           {tab === "bank" && <DownloadBar onTemplate={downloadBankTemplate} />}
@@ -4640,6 +4977,25 @@ function CaseViewInner() {
           />
           {tab === "gst" && <DownloadBar onTemplate={downloadGstTemplate} />}
         </>
+      )}
+
+      {tab === "cibil" && (
+        <CibilTab
+          cc={cc}
+          data={docs}
+          cibilData={cibilData}
+          user={user!}
+          onReload={reload}
+        />
+      )}
+
+      {tab === "triangulation" && (
+        <TriangulationTab
+          cc={cc}
+          data={triangulationData}
+          user={user!}
+          onReload={reload}
+        />
       )}
 
       {/* ── Text viewer popover ────────────────────────────────────────── */}
@@ -4757,15 +5113,12 @@ function CaseViewInner() {
 }
 
 // ─── Bank Statement Tab ───────────────────────────────────────────────────────
-function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; data: Tables<"bank_statement_data">[]; docs: DocRow[]; user: { id: string }; onReload: () => Promise<void> }) {
+function BankStatementTab({ cc, data, docs, user, bsaData, onReload }: { cc: CaseRow; data: Tables<"bank_statement_data">[]; docs: DocRow[]; user: { id: string }; bsaData: BsaReportRow | null; onReload: () => Promise<void> }) {
   const [busy, setBusy]         = useState(false);
   const [progress, setProgress] = useState(0);
   const [label, setLabel]       = useState("");
-  const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
-  const [queueRunning, setQueueRunning] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
   const [editCell, setEditCell] = useState<{ id: string; field: string; value: string } | null>(null);
-  const fileRef                 = useRef<HTMLInputElement>(null);
+  const [bsaBusy, setBsaBusy]   = useState(false);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
   const fmtN = (v: number | null) => v == null ? null : v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
@@ -4809,30 +5162,6 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
   const totalBounce = data.reduce((s, r) => s + (r.bounce_inward ?? 0), 0);
   const bounceRate  = data.length && totalBounce ? ((totalBounce / data.length)).toFixed(1) : null;
   const bankName    = data[0]?.bank_name;
-
-  const addBankFiles = (files: File[]) => {
-    setFileQueue(q => {
-      const existingNames = new Set([...q.map(i => i.name), ...docs.map(d => d.file_name)]);
-      return [...q, ...files.map(f => ({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file: f, name: f.name,
-        size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
-        status: (existingNames.has(f.name) ? "duplicate" : "pending") as QueueStatus,
-      }))];
-    });
-  };
-
-  const processBankQueue = async () => {
-    const pending = fileQueue.filter(i => i.status === "pending");
-    if (!pending.length) return;
-    setQueueRunning(true);
-    for (const item of pending) {
-      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "processing" } : qi));
-      await handleUpload(item.file);
-      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done" } : qi));
-    }
-    setQueueRunning(false);
-  };
 
   const handleUpload = async (file: File) => {
     setBusy(true); setProgress(5); setLabel("Reading file…");
@@ -4936,6 +5265,23 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
     }
   };
 
+  const deleteDoc = async (doc: DocRow) => {
+    await supabase.from("financial_documents").delete().eq("id", doc.id);
+    await onReload();
+  };
+
+  const retryDoc = async (doc: DocRow) => {
+    await supabase.from("financial_documents").update({ extraction_status: "pending", extraction_error: null }).eq("id", doc.id);
+    const { data: { session } } = await supabase.auth.getSession();
+    const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${session?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
+    await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-bank-extraction`, {
+      method: "POST", headers,
+      body: JSON.stringify({ case_id: cc.id, user_id: user.id, document_ids: [doc.id] }),
+    });
+    toast.success("Re-running extraction");
+    await onReload();
+  };
+
   const deleteAll = async () => {
     if (!window.confirm("Delete all bank statement data for this case?")) return;
     await supabase.from("bank_statement_data").delete().eq("case_id", cc.id);
@@ -4943,112 +5289,107 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
     toast.success("Bank statement data deleted");
   };
 
+  const handleBsaUpload = async (file: File) => {
+    setBsaBusy(true);
+    try {
+      const parsed = await parseBsaExcel(file);
+      const path = `${user.id}/${cc.id}/bsa-${Date.now()}-${file.name}`;
+      const { data: { session } } = await supabase.auth.getSession();
+      const uploadUrl = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/case-files/${path.split("/").map(encodeURIComponent).join("/")}`;
+      const uploadRes = await fetch(uploadUrl, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${session?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY, "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      });
+      if (!uploadRes.ok) throw new Error(`Upload failed HTTP ${uploadRes.status}`);
+      const { data: docRow, error: docErr } = await supabase.from("financial_documents").insert({
+        case_id: cc.id, user_id: user.id, file_path: path, file_name: file.name,
+        file_type: "excel" as never, doc_class: "bank_statement" as never, extraction_status: "extracted",
+      }).select().single();
+      if (docErr || !docRow) throw new Error(docErr?.message ?? "Doc register failed");
+      const dbRaw = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+      const { error: upsertErr } = await (dbRaw.from("bsa_report_data").upsert({
+        case_id: cc.id, document_id: docRow.id, user_id: user.id,
+        report_data: parsed,
+        company_name: parsed.exec_summary.company_name,
+        period_covered: parsed.exec_summary.period_covered,
+        bank_names: parsed.exec_summary.accounts.map(a => a.bank),
+        abb: parsed.exec_summary.abb,
+        total_net_credits: parsed.exec_summary.total_net_credits,
+        total_net_debits: parsed.exec_summary.total_net_debits,
+      }, { onConflict: "case_id,document_id" }) as Promise<{ error: Error | null }>);
+      if (upsertErr) throw new Error("BSA upsert failed: " + upsertErr.message);
+      toast.success("BSA report imported");
+      await onReload();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "BSA import failed");
+    } finally {
+      setBsaBusy(false);
+    }
+  };
+
+  const deleteBsa = async () => {
+    if (!bsaData || !window.confirm("Delete BSA report data?")) return;
+    const dbRaw = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+    await (dbRaw.from("bsa_report_data").delete().eq("id", bsaData.id) as Promise<unknown>);
+    toast.success("BSA report deleted");
+    await onReload();
+  };
+
+  const bankDocs = docs.filter(d => d.doc_class === "bank_statement");
+
   return (
     <div className="space-y-3">
       {/* Upload */}
-      <Panel title="BANK STATEMENT UPLOAD" ticker="AI EXTRACTION" status={data.length > 0 ? "live" : "idle"}
+      <Panel title="Bank Statement Upload" ticker="AI Extraction" status={data.length > 0 ? "live" : "idle"}
         actions={
           <div className="flex gap-2">
             {failedDocs.length > 0 && (
-              <button onClick={retryFailed} className="text-[10px] border border-warning/40 text-warning/70 px-2 py-0.5 hover:bg-warning/10">
-                [↺ RETRY {failedDocs.length} FAILED]
+              <button onClick={retryFailed} className="text-sm text-amber-600 hover:text-amber-800 border border-amber-200 rounded px-2 py-1 hover:bg-amber-50 transition-colors">
+                Retry {failedDocs.length} failed
               </button>
             )}
-            {data.length > 0 && <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button>}
+            {data.length > 0 && <button onClick={deleteAll} className="text-sm text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1 hover:bg-red-50 transition-colors">Delete All</button>}
           </div>
         }
       >
-        <div className="space-y-3">
-          <input ref={fileRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
-            onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addBankFiles(files); e.target.value = ""; }} />
-
-          {/* Drop zone */}
-          <div
-            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={e => { e.preventDefault(); setDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) addBankFiles(files); }}
-            onClick={() => !(busy || queueRunning) && fileRef.current?.click()}
-            className={`border-2 border-dashed cursor-pointer px-4 py-3 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
-          >
-            <span className="text-primary font-bold">⬆ DROP BANK STATEMENTS OR CLICK</span>
-            <span className="text-muted-foreground ml-1">· Multiple months OK · PDF · Excel · Image</span>
-          </div>
-
-          {/* Queue */}
-          {fileQueue.length > 0 && (
-            <div className="border border-border">
-              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-surface/40">
-                <span className="terminal-label text-[10px]">
-                  {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""}
-                  {fileQueue.filter(i => i.status === "pending").length > 0 && ` · ${fileQueue.filter(i => i.status === "pending").length} PENDING`}
-                </span>
-                <div className="flex gap-2">
-                  {fileQueue.some(i => i.status === "pending") && !busy && !queueRunning && (
-                    <button onClick={processBankQueue}
-                      className="bg-primary text-primary-foreground px-3 py-0.5 text-[10px] tracking-widest font-bold hover:opacity-90">
-                      [EXTRACT {fileQueue.filter(i => i.status === "pending").length} FILE{fileQueue.filter(i => i.status === "pending").length > 1 ? "S" : ""}]
-                    </button>
-                  )}
-                  <button onClick={() => setFileQueue([])} className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground">CLEAR</button>
-                </div>
-              </div>
-              <div className="divide-y divide-border/30">
-                {fileQueue.map(item => (
-                  <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : item.status === "duplicate" ? "text-warning" : "text-muted-foreground"}>
-                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
-                    </span>
-                    <span className="truncate flex-1 text-primary">{item.name}</span>
-                    <span className="text-foreground/40 shrink-0">{item.size}</span>
-                    {item.status === "duplicate" && (
-                      <button
-                        onClick={() => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "pending" as QueueStatus } : qi))}
-                        className="text-warning text-[9px] tracking-widest shrink-0 border border-warning/40 px-1.5 py-0.5 hover:text-foreground hover:border-foreground/40 transition-colors"
-                      >RE-EXTRACT</button>
-                    )}
-                    {item.status === "pending" && (
-                      <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Progress */}
-          {busy && (
-            <div className="space-y-1">
-              <div className="flex justify-between text-[10px] text-muted-foreground"><span>{label}</span><span>{progress}%</span></div>
-              <div className="h-1.5 bg-border"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
-            </div>
-          )}
-        </div>
+        <UploadGrid
+          onUpload={(f) => handleUpload(f)}
+          onDelete={deleteDoc}
+          onRetry={retryDoc}
+          busy={busy}
+          docs={bankDocs}
+          progress={progress}
+          progressLabel={label}
+          lockedClass="bank_statement"
+          hint={["Multiple months OK — drop all at once to extract in parallel", "PDF, Excel, or image formats supported"]}
+        />
       </Panel>
 
       {data.length > 0 && (
         <>
           {/* Summary KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <Panel title="AVG MONTHLY CREDITS" ticker={bankName ?? "BANK"}>
+            <Panel title="Avg Monthly Credits" ticker={bankName ?? "Bank"}>
               <div className="text-xl font-bold text-success">₹{fmt(avgCredits)}</div>
-              <div className="terminal-label mt-1">per month</div>
+              <div className="text-xs text-muted-foreground mt-1">per month</div>
             </Panel>
-            <Panel title="AVG MONTHLY DEBITS">
+            <Panel title="Avg Monthly Debits">
               <div className="text-xl font-bold text-destructive">₹{fmt(avgDebits)}</div>
-              <div className="terminal-label mt-1">per month</div>
+              <div className="text-xs text-muted-foreground mt-1">per month</div>
             </Panel>
-            <Panel title="AVG BALANCE (AMB)" status={avgBalance && avgBalance > 0 ? "live" : "idle"}>
+            <Panel title="Avg Balance (AMB)" status={avgBalance && avgBalance > 0 ? "live" : "idle"}>
               <div className="text-xl font-bold text-primary">₹{fmt(avgBalance)}</div>
-              <div className="terminal-label mt-1">average monthly balance</div>
+              <div className="text-xs text-muted-foreground mt-1">average monthly balance</div>
             </Panel>
-            <Panel title="INWARD BOUNCES" status={totalBounce > 0 ? "idle" : "live"}>
+            <Panel title="Inward Bounces" status={totalBounce > 0 ? "idle" : "live"}>
               <div className={`text-xl font-bold ${totalBounce > 0 ? "text-destructive" : "text-success"}`}>{totalBounce}</div>
-              <div className="terminal-label mt-1">{bounceRate ? `${bounceRate}/month avg` : "nil"}</div>
+              <div className="text-xs text-muted-foreground mt-1">{bounceRate ? `${bounceRate}/month avg` : "nil"}</div>
             </Panel>
           </div>
 
           {/* Monthly table */}
-          <Panel title="MONTHLY BANK ANALYSIS" ticker={`${data.length} MONTHS`}>
+          <Panel title="Monthly Bank Analysis" ticker={`${data.length} months`}>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-muted-foreground border-b border-border">
@@ -5092,7 +5433,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
 
           {/* Chart */}
           {data.length >= 2 && (
-            <Panel title="CREDITS vs DEBITS TREND" ticker="MONTHLY CASH FLOW">
+            <Panel title="Credits vs Debits Trend" ticker="Monthly Cash Flow">
               <div className="h-52">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={data.map(r => ({ month: r.month.slice(5), credits: r.total_credits, debits: r.total_debits, balance: r.avg_balance }))} margin={{ top: 4, right: 20, left: 0, bottom: 0 }}>
@@ -5122,7 +5463,7 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
             }
             if (avgBalance && avgBalance < 0) obs.push({ text: "Negative average balance detected — possible overdraft usage", cls: "text-destructive" });
             return obs.length > 0 ? (
-              <Panel title="BANK ANALYSIS INSIGHTS" ticker="AUTO">
+              <Panel title="Bank Analysis Insights" ticker="Auto">
                 <div className="space-y-1.5">
                   {obs.map((o, i) => <div key={i} className={`text-xs flex gap-2 ${o.cls}`}><span>▸</span><span>{o.text}</span></div>)}
                 </div>
@@ -5131,6 +5472,220 @@ function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseRow; dat
           })()}
         </>
       )}
+
+      {/* ── BSA Import (Perfios Consolidated Excel) ── */}
+      <Panel
+        title="Bank Statement Analysis (BSA)" ticker="Perfios Excel"
+        status={bsaData ? "live" : "idle"}
+        actions={bsaData ? (
+          <button onClick={deleteBsa} className="text-[9px] tracking-widest text-destructive/70 border border-destructive/30 px-2 py-0.5 hover:bg-destructive/10">
+            DELETE BSA
+          </button>
+        ) : undefined}
+      >
+        {!bsaData ? (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">Import a Perfios Consolidated BSA Excel (.xlsx) to display pre-computed banking analytics.</p>
+            <label className={`flex items-center gap-2 text-[10px] tracking-widest px-3 py-1.5 border transition-colors cursor-pointer ${bsaBusy ? "border-muted text-muted-foreground opacity-40 cursor-not-allowed" : "border-primary text-primary hover:bg-primary hover:text-primary-foreground"}`}>
+              <input type="file" accept=".xlsx,.xls" className="hidden" disabled={bsaBusy}
+                onChange={async e => { const f = e.target.files?.[0]; if (f) { e.target.value = ""; await handleBsaUpload(f); } }} />
+              {bsaBusy ? "IMPORTING…" : "↑ IMPORT BSA EXCEL"}
+            </label>
+            <p className="text-[9px] text-muted-foreground/60">Expects sheets: Exec Summary, Flags, CAM Analysis, Trade Credits, Trade Debits, Irregularity Indicators</p>
+          </div>
+        ) : (() => {
+          const bsa = bsaData.report_data;
+          const es = bsa.exec_summary;
+          const fmtC = (v: number | null | undefined) => v == null ? "—" : `₹${v.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+          const fmtL = (v: number | null | undefined) => v == null ? "—" : `₹${(v / 100000).toLocaleString("en-IN", { maximumFractionDigits: 2 })}L`;
+
+          return (
+            <div className="space-y-4">
+              {/* Header */}
+              <div className="flex flex-wrap gap-4 items-start">
+                <div>
+                  <div className="text-[9px] tracking-widest text-muted-foreground">COMPANY</div>
+                  <div className="text-sm font-semibold">{es.company_name || "—"}</div>
+                  <div className="text-[9px] text-muted-foreground mt-0.5">{es.period_covered}</div>
+                </div>
+                <div>
+                  <div className="text-[9px] tracking-widest text-muted-foreground">ACCOUNTS</div>
+                  {es.accounts.map((a, i) => (
+                    <div key={i} className="text-xs text-muted-foreground">{a.bank} · {a.account_no}</div>
+                  ))}
+                </div>
+              </div>
+
+              {/* KPI Grid */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div className="border border-border/40 p-2">
+                  <div className="text-[9px] tracking-widest text-muted-foreground">ABB</div>
+                  <div className="text-lg font-bold text-primary">{fmtL(es.abb)}</div>
+                  <div className="text-[9px] text-muted-foreground">avg bank balance</div>
+                </div>
+                <div className="border border-border/40 p-2">
+                  <div className="text-[9px] tracking-widest text-muted-foreground">NET CREDITS</div>
+                  <div className="text-lg font-bold text-success">{fmtL(es.total_net_credits)}</div>
+                  <div className="text-[9px] text-muted-foreground">{es.months_analyzed} months</div>
+                </div>
+                <div className="border border-border/40 p-2">
+                  <div className="text-[9px] tracking-widest text-muted-foreground">NET DEBITS</div>
+                  <div className="text-lg font-bold text-destructive">{fmtL(es.total_net_debits)}</div>
+                  <div className="text-[9px] text-muted-foreground">{es.months_analyzed} months</div>
+                </div>
+                <div className="border border-border/40 p-2">
+                  <div className="text-[9px] tracking-widest text-muted-foreground">BOUNCES</div>
+                  <div className={`text-lg font-bold ${es.total_bounces > 0 ? "text-destructive" : "text-success"}`}>{es.total_bounces}</div>
+                  <div className="text-[9px] text-muted-foreground">{es.irregularity_count} irregularities</div>
+                </div>
+              </div>
+
+              {/* Flags */}
+              {bsa.flags.length > 0 && (
+                <div>
+                  <div className="text-[9px] tracking-widest text-muted-foreground mb-1.5">FLAGS · {bsa.flags.length}</div>
+                  <div className="space-y-1">
+                    {bsa.flags.map(f => (
+                      <div key={f.sn} className="flex gap-2 text-xs border border-warning/30 bg-warning/5 p-1.5">
+                        <span className="text-warning font-bold shrink-0">{f.sn}.</span>
+                        <div>
+                          <span className="font-medium text-warning/90">{f.flag}</span>
+                          {f.description && <span className="text-muted-foreground ml-1">— {f.description}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Monthly BSA table */}
+              {bsa.monthly_data.length > 0 && (
+                <div>
+                  <div className="text-[9px] tracking-widest text-muted-foreground mb-1.5">MONTHLY SUMMARY · {bsa.monthly_data.length} MONTHS</div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead className="text-muted-foreground border-b border-border">
+                        <tr>
+                          <th className="text-left py-1 pr-3">MONTH</th>
+                          <th className="text-right pr-3">NET CREDITS</th>
+                          <th className="text-right pr-3">NET DEBITS</th>
+                          <th className="text-right pr-3">AVG BALANCE</th>
+                          <th className="text-right pr-3">MIN BAL</th>
+                          <th className="text-right pr-3">MAX BAL</th>
+                          <th className="text-center">BOUNCES</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bsa.monthly_data.map(m => {
+                          const net = m.net_credits != null && m.net_debits != null ? m.net_credits - m.net_debits : null;
+                          return (
+                            <tr key={m.month} className="border-b border-border/30">
+                              <td className="py-0.5 pr-3 font-medium">{m.month}</td>
+                              <td className="text-right pr-3 tabular-nums text-success">{m.net_credits != null ? fmtC(m.net_credits) : "—"}</td>
+                              <td className="text-right pr-3 tabular-nums text-destructive">{m.net_debits != null ? fmtC(m.net_debits) : "—"}</td>
+                              <td className="text-right pr-3 tabular-nums text-primary">{fmtC(m.avg_eod_balance)}</td>
+                              <td className="text-right pr-3 tabular-nums text-muted-foreground">{fmtC(m.min_eod_balance)}</td>
+                              <td className="text-right pr-3 tabular-nums text-muted-foreground">{fmtC(m.max_eod_balance)}</td>
+                              <td className={`text-center font-bold ${m.inward_bounces > 0 ? "text-destructive" : "text-muted-foreground"}`}>{m.inward_bounces || "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* BSA Chart */}
+              {bsa.monthly_data.filter(m => m.net_credits != null).length >= 2 && (
+                <div className="h-48">
+                  <div className="text-[9px] tracking-widest text-muted-foreground mb-1">CREDITS vs DEBITS · BSA</div>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={bsa.monthly_data.map(m => ({ month: m.month.slice(0, 3), credits: m.net_credits, debits: m.net_debits, balance: m.avg_eod_balance }))} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                      <XAxis dataKey="month" tick={{ fill: "#6b7280", fontSize: 9 }} />
+                      <YAxis tick={{ fill: "#6b7280", fontSize: 9 }} width={54} tickFormatter={v => `${(v/100000).toFixed(0)}L`} />
+                      <RTooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937", fontSize: 10 }} formatter={(v: number) => [`₹${(v/100000).toFixed(2)}L`, ""]} />
+                      <Bar dataKey="credits" name="Net Credits" fill="#22c55e" opacity={0.8} radius={[2,2,0,0]} />
+                      <Bar dataKey="debits" name="Net Debits" fill="#ef4444" opacity={0.8} radius={[2,2,0,0]} />
+                      <Line type="monotone" dataKey="balance" name="Avg Balance" stroke="#60a5fa" strokeWidth={1.5} dot={false} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              {/* Trade Credits / Debits */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {bsa.trade_credits.length > 0 && (
+                  <div>
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-1.5">TOP CREDIT PARTIES</div>
+                    <table className="w-full text-xs">
+                      <thead className="text-muted-foreground border-b border-border">
+                        <tr>
+                          <th className="text-left py-0.5 pr-2">#</th>
+                          <th className="text-left pr-2">PARTY</th>
+                          <th className="text-right">AMOUNT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bsa.trade_credits.slice(0, 10).map(p => (
+                          <tr key={p.rank} className="border-b border-border/20">
+                            <td className="py-0.5 pr-2 text-muted-foreground">{p.rank}</td>
+                            <td className="pr-2 truncate max-w-[120px]" title={p.name}>{p.name}</td>
+                            <td className="text-right text-success tabular-nums">{fmtL(p.amount)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {bsa.trade_debits.length > 0 && (
+                  <div>
+                    <div className="text-[9px] tracking-widest text-muted-foreground mb-1.5">TOP DEBIT PARTIES</div>
+                    <table className="w-full text-xs">
+                      <thead className="text-muted-foreground border-b border-border">
+                        <tr>
+                          <th className="text-left py-0.5 pr-2">#</th>
+                          <th className="text-left pr-2">PARTY</th>
+                          <th className="text-right">AMOUNT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bsa.trade_debits.slice(0, 10).map(p => (
+                          <tr key={p.rank} className="border-b border-border/20">
+                            <td className="py-0.5 pr-2 text-muted-foreground">{p.rank}</td>
+                            <td className="pr-2 truncate max-w-[120px]" title={p.name}>{p.name}</td>
+                            <td className="text-right text-destructive tabular-nums">{fmtL(p.amount)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Irregularity Indicators */}
+              {bsa.irregularities.filter(i => i.identified).length > 0 && (
+                <div>
+                  <div className="text-[9px] tracking-widest text-muted-foreground mb-1.5">IRREGULARITY INDICATORS (TRIGGERED)</div>
+                  <div className="space-y-1">
+                    {bsa.irregularities.filter(i => i.identified).map(i => (
+                      <div key={i.sn} className="flex gap-2 text-xs border border-destructive/30 bg-destructive/5 p-1.5">
+                        <span className="text-destructive font-bold shrink-0">{i.sn}.</span>
+                        <div>
+                          <span className="font-medium text-destructive/90">{i.indicator}</span>
+                          {i.triggers != null && <span className="text-muted-foreground ml-1">({i.triggers} triggers)</span>}
+                          {i.description && <div className="text-muted-foreground text-[10px]">{i.description}</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Panel>
     </div>
   );
 }
@@ -5179,10 +5734,10 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
       {/* Header */}
       <div className="flex items-center justify-between px-0.5">
         <div className="flex items-center gap-3">
-          <span className="text-[9px] font-bold tracking-[0.2em] text-accent border border-accent/40 px-1.5 py-0.5">ACCUMN</span>
-          <span className="terminal-label text-xs">GST ANALYTICAL REPORT</span>
+          <span className="text-xs font-bold text-primary border border-primary/40 rounded px-2 py-0.5">Accumn</span>
+          <span className="text-sm font-medium text-foreground">GST Analytical Report</span>
           {data.company_profile?.gstin && (
-            <span className="text-[10px] text-muted-foreground font-mono">{data.company_profile.gstin}</span>
+            <span className="text-xs text-muted-foreground font-mono">{data.company_profile.gstin}</span>
           )}
           {hasFlags && (
             <span className={`text-[9px] font-bold tracking-widest ${highFlags > 0 ? "text-destructive" : "text-warning"}`}>
@@ -5191,8 +5746,8 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
           )}
         </div>
         {onClear && (
-          <button onClick={onClear} className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground hover:border-foreground/40 transition-colors">
-            [RE-EXTRACT]
+          <button onClick={onClear} className="text-xs border border-border rounded text-muted-foreground px-2 py-1 hover:text-foreground hover:border-foreground/40 transition-colors">
+            Re-extract
           </button>
         )}
       </div>
@@ -5217,23 +5772,23 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
 
       {/* Company Profile */}
       {data.company_profile && Object.values(data.company_profile).some(Boolean) && (
-        <Panel title="COMPANY PROFILE" ticker="GSTIN DETAILS">
+        <Panel title="Company Profile" ticker="GST Details">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-xs">
-            {data.company_profile.name && (<div><div className="terminal-label">COMPANY</div><div className="font-medium mt-0.5">{data.company_profile.name}</div></div>)}
-            {data.company_profile.gstin && (<div><div className="terminal-label">GSTIN</div><div className="font-mono font-medium mt-0.5 text-accent">{data.company_profile.gstin}</div></div>)}
-            {data.company_profile.pan && (<div><div className="terminal-label">PAN</div><div className="font-mono font-medium mt-0.5">{data.company_profile.pan}</div></div>)}
-            {data.company_profile.state && (<div><div className="terminal-label">STATE</div><div className="font-medium mt-0.5">{data.company_profile.state}</div></div>)}
-            {data.company_profile.constitution && (<div><div className="terminal-label">CONSTITUTION</div><div className="font-medium mt-0.5">{data.company_profile.constitution}</div></div>)}
-            {data.company_profile.business_type && (<div><div className="terminal-label">BUSINESS TYPE</div><div className="font-medium mt-0.5">{data.company_profile.business_type}</div></div>)}
-            {data.company_profile.registration_date && (<div><div className="terminal-label">REG. DATE</div><div className="font-medium mt-0.5">{data.company_profile.registration_date}</div></div>)}
-            {data.company_profile.report_date && (<div><div className="terminal-label">REPORT DATE</div><div className="font-medium mt-0.5">{data.company_profile.report_date}</div></div>)}
+            {data.company_profile.name && (<div><div className="text-xs text-muted-foreground mb-0.5">Company</div><div className="text-sm font-medium">{data.company_profile.name}</div></div>)}
+            {data.company_profile.gstin && (<div><div className="text-xs text-muted-foreground mb-0.5">GSTIN</div><div className="font-mono text-sm font-medium text-primary">{data.company_profile.gstin}</div></div>)}
+            {data.company_profile.pan && (<div><div className="text-xs text-muted-foreground mb-0.5">PAN</div><div className="font-mono text-sm font-medium">{data.company_profile.pan}</div></div>)}
+            {data.company_profile.state && (<div><div className="text-xs text-muted-foreground mb-0.5">State</div><div className="text-sm font-medium">{data.company_profile.state}</div></div>)}
+            {data.company_profile.constitution && (<div><div className="text-xs text-muted-foreground mb-0.5">Constitution</div><div className="text-sm font-medium">{data.company_profile.constitution}</div></div>)}
+            {data.company_profile.business_type && (<div><div className="text-xs text-muted-foreground mb-0.5">Business Type</div><div className="text-sm font-medium">{data.company_profile.business_type}</div></div>)}
+            {data.company_profile.registration_date && (<div><div className="text-xs text-muted-foreground mb-0.5">Registration Date</div><div className="text-sm font-medium">{data.company_profile.registration_date}</div></div>)}
+            {data.company_profile.report_date && (<div><div className="text-xs text-muted-foreground mb-0.5">Report Date</div><div className="text-sm font-medium">{data.company_profile.report_date}</div></div>)}
           </div>
         </Panel>
       )}
 
       {/* Sales Summary */}
       {(data.sales_summary?.length ?? 0) > 0 && (
-        <Panel title="SALES SUMMARY" ticker="ADJUSTED REVENUE + MARGINS">
+        <Panel title="Sales Summary" ticker="Adjusted Revenue + Margins">
           <div className="space-y-3">
             {/* Transposed table — periods as columns, metrics as rows */}
             <div className="overflow-x-auto">
@@ -5301,7 +5856,7 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
 
       {/* Customer Category Breakup */}
       {(data.customer_categories?.length ?? 0) > 0 && (
-        <Panel title="CUSTOMER CATEGORY BREAKUP" ticker="B2B / B2C / EXPORT">
+        <Panel title="Customer Category Breakup" ticker="B2B / B2C / Export">
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="text-muted-foreground border-b border-border">
@@ -5335,7 +5890,7 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
 
       {/* Customer / Supplier Concentration */}
       {hasConc && (
-        <Panel title="CONCENTRATION ANALYSIS" ticker="TOP CUSTOMERS / SUPPLIERS">
+        <Panel title="Concentration Analysis" ticker="Top Customers / Suppliers">
           <div className="space-y-2">
             <div className="flex items-center gap-2 flex-wrap">
               <div className="flex gap-0">
@@ -5405,7 +5960,7 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
         const latPeriod = geoPeriods[geoPeriods.length - 1];
         const geoRows = data.geography!.filter(r => r.period === latPeriod).sort((a,b) => b.amount - a.amount);
         return (
-          <Panel title="GEOGRAPHY BREAKUP" ticker={`STATE-WISE SALES · ${latPeriod}`}>
+          <Panel title="Geography Breakup" ticker={`State-wise Sales · ${latPeriod}`}>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-muted-foreground border-b border-border">
@@ -5443,7 +5998,7 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
         const latPeriod = prodPeriods[prodPeriods.length - 1];
         const prodRows = data.product_concentration!.filter(r => r.period === latPeriod).sort((a,b) => b.amount - a.amount);
         return (
-          <Panel title="PRODUCT CONCENTRATION" ticker={`HSN / CHAPTER WISE · ${latPeriod}`}>
+          <Panel title="Product Concentration" ticker={`HSN / Chapter Wise · ${latPeriod}`}>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-muted-foreground border-b border-border">
@@ -5474,7 +6029,7 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
 
       {/* Tax Details */}
       {(data.tax_details?.length ?? 0) > 0 && (
-        <Panel title="TAX DETAILS" ticker="OUTPUT TAX · ITC ANALYSIS">
+        <Panel title="Tax Details" ticker="Output Tax · ITC Analysis">
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="text-muted-foreground border-b border-border">
@@ -5510,7 +6065,7 @@ function AccumnDashboard({ data, onClear }: { data: AccumnReport; onClear?: () =
 
       {/* GSTR Comparison */}
       {(data.gstr_comparison?.length ?? 0) > 0 && (
-        <Panel title="GSTR-1 vs GSTR-3B vs GSTR-9" ticker="RETURN RECONCILIATION">
+        <Panel title="GSTR-1 vs GSTR-3B vs GSTR-9" ticker="Return Reconciliation">
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="text-muted-foreground border-b border-border">
@@ -5585,11 +6140,7 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
   const [busy, setBusy]           = useState(false);
   const [progress, setProgress]   = useState(0);
   const [label, setLabel]         = useState("");
-  const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
-  const [queueRunning, setQueueRunning] = useState(false);
-  const [dragOver, setDragOver]   = useState(false);
   const [editCell, setEditCell]   = useState<{ id: string; field: string; value: string } | null>(null);
-  const fileRef                   = useRef<HTMLInputElement>(null);
 
   // ── Accumn-specific import state ──────────────────────────────────────────
   const [accumnBusy, setAccumnBusy]       = useState(false);
@@ -5597,6 +6148,12 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
   const [accumnLabel, setAccumnLabel]     = useState("");
 
   const accumnFileRef                     = useRef<HTMLInputElement>(null);
+
+  // ── Accumn Excel direct import state ─────────────────────────────────────
+  const [xlsBusy, setXlsBusy]       = useState(false);
+  const [xlsProgress, setXlsProgress] = useState(0);
+  const [xlsLabel, setXlsLabel]     = useState("");
+  const xlsFileRef                  = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
@@ -5730,30 +6287,6 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
     return it?.value ?? null;
   })();
 
-  const addGstFiles = (files: File[]) => {
-    setFileQueue(q => {
-      const existingNames = new Set([...q.map(i => i.name), ...docs.map(d => d.file_name)]);
-      return [...q, ...files.map(f => ({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file: f, name: f.name,
-        size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
-        status: (existingNames.has(f.name) ? "duplicate" : "pending") as QueueStatus,
-      }))];
-    });
-  };
-
-  const processGstQueue = async () => {
-    const pending = fileQueue.filter(i => i.status === "pending");
-    if (!pending.length) return;
-    setQueueRunning(true);
-    for (const item of pending) {
-      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "processing" } : qi));
-      await handleUpload(item.file);
-      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done" } : qi));
-    }
-    setQueueRunning(false);
-  };
-
   const handleUpload = async (file: File) => {
     setBusy(true); setProgress(5); setLabel("Reading file…");
     try {
@@ -5838,6 +6371,23 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
     }
   };
 
+  const deleteGstDoc = async (doc: DocRow) => {
+    await supabase.from("financial_documents").delete().eq("id", doc.id);
+    await onReload();
+  };
+
+  const retryGstDoc = async (doc: DocRow) => {
+    await supabase.from("financial_documents").update({ extraction_status: "pending", extraction_error: null }).eq("id", doc.id);
+    const { data: { session } } = await supabase.auth.getSession();
+    const authH = { "Content-Type": "application/json", "Authorization": `Bearer ${session?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
+    await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-gst`, {
+      method: "POST", headers: authH,
+      body: JSON.stringify({ case_id: cc.id, document_id: doc.id }),
+    });
+    toast.success("Re-running GST extraction");
+    await onReload();
+  };
+
   const deleteAll = async () => {
     if (!window.confirm("Delete all GST return data for this case?")) return;
     await supabase.from("gst_return_data").delete().eq("case_id", cc.id);
@@ -5913,89 +6463,116 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
     }
   };
 
+  const handleAccumnExcelImport = async (file: File) => {
+    setXlsBusy(true); setXlsProgress(5); setXlsLabel("Reading Excel…");
+    try {
+      setXlsProgress(15); setXlsLabel("Parsing Accumn report…");
+      const result = await parseAccumnGstExcel(file);
+
+      setXlsProgress(35); setXlsLabel(`Parsed ${result.periods.length} periods · saving return data…`);
+
+      // Save periodic return rows
+      const rows = result.periods.map(p => ({
+        case_id: cc.id,
+        user_id: user.id,
+        period: p.period,
+        return_type: p.return_type,
+        gstin: p.gstin,
+        taxable_turnover: p.taxable_turnover,
+        exempt_turnover: p.exempt_turnover,
+        total_turnover: p.total_turnover,
+        output_tax: p.output_tax,
+        itc_claimed: p.itc_claimed,
+        net_tax_paid: p.net_tax_paid,
+        filing_date: p.filing_date,
+        filing_status: p.filing_status,
+      }));
+
+      const BATCH = 50;
+      let inserted = 0;
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const batch = rows.slice(i, i + BATCH);
+        const { error } = await supabase.from("gst_return_data").upsert(batch as never, { onConflict: "case_id,period,return_type" });
+        if (error) throw new Error(error.message);
+        inserted += batch.length;
+        setXlsProgress(35 + Math.round((inserted / rows.length) * 50));
+        setXlsLabel(`Saving return data… ${inserted}/${rows.length}`);
+      }
+
+      // Save full AccumnReport to gst_accumn_reports
+      setXlsProgress(88); setXlsLabel("Saving full Accumn report…");
+      const dbRaw = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
+      const { error: rptErr } = await (dbRaw.from("gst_accumn_reports") as unknown as {
+        upsert: (d: unknown, o: unknown) => Promise<{ error: { message: string } | null }>;
+      }).upsert(
+        { case_id: cc.id, user_id: user.id, report_data: result.report },
+        { onConflict: "case_id" },
+      );
+      if (rptErr) throw new Error(rptErr.message);
+
+      setXlsProgress(100); setXlsLabel("Done");
+      toast.success(
+        `Accumn Excel imported — ${result.periods.length} periods` +
+        (result.report.flags && result.report.flags.length > 0 ? ` · ${result.report.flags.length} flag(s)` : "") +
+        (result.company_name ? ` · ${result.company_name}` : "")
+      );
+      await onReload();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Excel import failed");
+    } finally {
+      setTimeout(() => { setXlsBusy(false); setXlsProgress(0); setXlsLabel(""); }, 800);
+    }
+  };
+
   const statusCls = (s: string) => s === "filed" ? "text-success" : s === "late" ? "text-warning" : "text-destructive";
+
+  const gstDocs = docs.filter(d => d.doc_class === "gst_return");
 
   return (
     <div className="space-y-3">
       {/* Upload */}
-      <Panel title="GST RETURNS" ticker="GSTR-1 / GSTR-3B / GSTR-9 · UPLOAD & ANALYSIS" status={data.length > 0 ? "live" : "idle"}
-        actions={data.length > 0 ? <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button> : undefined}
+      <Panel title="GST Returns" ticker="GSTR-1 / GSTR-3B / GSTR-9" status={data.length > 0 ? "live" : "idle"}
+        actions={data.length > 0 ? <button onClick={deleteAll} className="text-sm border border-red-200 rounded text-red-500 px-2 py-1 hover:bg-red-50 transition-colors">Delete All</button> : undefined}
       >
-        <div className="space-y-3">
-          <input ref={fileRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
-            onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addGstFiles(files); e.target.value = ""; }} />
+        <UploadGrid
+          onUpload={(f) => handleUpload(f)}
+          onDelete={deleteGstDoc}
+          onRetry={retryGstDoc}
+          busy={busy}
+          docs={gstDocs}
+          progress={progress}
+          progressLabel={label}
+          lockedClass="gst_return"
+          hint={["GSTR-1 / GSTR-3B / GSTR-9 · Multiple files OK", "PDF, Excel, or image formats supported"]}
+        />
+        {gstin && <div className="text-xs text-accent mt-2">GSTIN: {gstin}</div>}
 
-          {/* Drop zone */}
-          <div
-            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={e => { e.preventDefault(); setDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) addGstFiles(files); }}
-            onClick={() => !(busy || queueRunning) && fileRef.current?.click()}
-            className={`border-2 border-dashed cursor-pointer px-4 py-3 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
-          >
-            <span className="text-primary font-bold">⬆ DROP GST FILE OR CLICK</span>
-            <span className="text-muted-foreground ml-1">· GSTR-1 / GSTR-3B / GSTR-9 · Multiple OK</span>
-          </div>
-          {gstin && <div className="text-[10px] text-accent tracking-wider">GSTIN: {gstin}</div>}
-
-          {/* Queue */}
-          {fileQueue.length > 0 && (
-            <div className="border border-border">
-              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-surface/40">
-                <span className="terminal-label text-[10px]">
-                  {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""}
-                  {fileQueue.filter(i => i.status === "pending").length > 0 && ` · ${fileQueue.filter(i => i.status === "pending").length} PENDING`}
-                </span>
-                <div className="flex gap-2">
-                  {fileQueue.some(i => i.status === "pending") && !busy && !queueRunning && (
-                    <button onClick={processGstQueue}
-                      className="bg-primary text-primary-foreground px-3 py-0.5 text-[10px] tracking-widest font-bold hover:opacity-90">
-                      [EXTRACT {fileQueue.filter(i => i.status === "pending").length} FILE{fileQueue.filter(i => i.status === "pending").length > 1 ? "S" : ""}]
-                    </button>
-                  )}
-                  <button onClick={() => setFileQueue([])} className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground">CLEAR</button>
-                </div>
-              </div>
-              <div className="divide-y divide-border/30">
-                {fileQueue.map(item => (
-                  <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : item.status === "duplicate" ? "text-warning" : "text-muted-foreground"}>
-                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
-                    </span>
-                    <span className="truncate flex-1 text-primary">{item.name}</span>
-                    <span className="text-foreground/40 shrink-0">{item.size}</span>
-                    {item.status === "duplicate" && (
-                      <button
-                        onClick={() => setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "pending" as QueueStatus } : qi))}
-                        className="text-warning text-[9px] tracking-widest shrink-0 border border-warning/40 px-1.5 py-0.5 hover:text-foreground hover:border-foreground/40 transition-colors"
-                      >RE-EXTRACT</button>
-                    )}
-                    {item.status === "pending" && (
-                      <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Progress */}
-          {busy && (
-            <div className="space-y-1">
-              <div className="flex justify-between text-[10px] text-muted-foreground"><span>{label}</span><span>{progress}%</span></div>
-              <div className="h-1.5 bg-border"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
-            </div>
-          )}
+        {/* Accumn Excel direct import — no AI, instant */}
+        <div className="flex items-center gap-3 mt-3 pt-3 border-t border-border/30">
+          <input ref={xlsFileRef} type="file" className="hidden" accept=".xlsx,.xls"
+            onChange={e => { const f = e.target.files?.[0]; if (f) handleAccumnExcelImport(f); e.target.value = ""; }} />
+          <button
+            onClick={() => xlsFileRef.current?.click()}
+            disabled={xlsBusy || busy}
+            className="text-sm border border-accent/40 rounded text-accent hover:bg-accent/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+          >{xlsBusy ? "Importing…" : "⬆ Import Accumn Excel"}</button>
+          <span className="text-xs text-muted-foreground">Accumn GST Analytical Report · .xlsx · direct import, no AI needed</span>
         </div>
+        {xlsBusy && (
+          <div className="space-y-1 mt-2">
+            <div className="flex justify-between text-xs text-muted-foreground"><span>{xlsLabel}</span><span>{xlsProgress}%</span></div>
+            <div className="h-1.5 bg-border rounded"><div className="h-full bg-accent rounded transition-all" style={{ width: `${xlsProgress}%` }} /></div>
+          </div>
+        )}
       </Panel>
 
       {/* ── Accumn PDF Import ─────────────────────────────────────────────── */}
       <Panel
-        title="ACCUMN ANALYTICAL REPORT"
-        ticker="GST ADVISORY PDF · AI EXTRACTION"
+        title="Accumn Analytical Report"
+        ticker="GST Advisory PDF · AI Extraction"
         status={accumnData?.is_accumn ? "live" : "idle"}
         actions={accumnData?.is_accumn ? (
-          <button onClick={clearAccumn} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[CLEAR]</button>
+          <button onClick={clearAccumn} className="text-sm border border-red-200 rounded text-red-500 px-2 py-0.5 hover:bg-red-50 transition-colors">Clear</button>
         ) : undefined}
       >
         <div className="flex items-center gap-2">
@@ -6004,13 +6581,13 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
           <button
             onClick={() => accumnFileRef.current?.click()}
             disabled={accumnBusy}
-            className="text-[10px] tracking-widest border border-primary/40 text-primary/70 hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5"
-          >{accumnBusy ? "IMPORTING…" : "⬆ IMPORT ACCUMN PDF"}</button>
-          <span className="text-[9px] text-muted-foreground/50 tracking-wide">Accumn GST Advisory Report · PDF only</span>
+            className="text-sm border border-primary/40 rounded text-primary hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+          >{accumnBusy ? "Importing…" : "⬆ Import Accumn PDF"}</button>
+          <span className="text-xs text-muted-foreground">Accumn GST Advisory Report · PDF only</span>
           {accumnData?.is_accumn && !accumnBusy && (
             <span className="flex items-center gap-1.5 ml-2">
-              <span className="text-success text-xs">●</span>
-              <span className="text-foreground font-medium text-[10px]">{accumnData.company_profile?.name ?? "Accumn Report"} loaded</span>
+              <span className="text-green-500 text-xs">●</span>
+              <span className="text-foreground font-medium text-sm">{accumnData.company_profile?.name ?? "Accumn Report"} loaded</span>
               {accumnData.company_profile?.gstin && (
                 <span className="text-muted-foreground font-mono text-[10px]">{accumnData.company_profile.gstin}</span>
               )}
@@ -6030,40 +6607,40 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
         <>
           {/* KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <Panel title="TOTAL GST TURNOVER" ticker={`${data.length} PERIODS`}>
+            <Panel title="Total GST Turnover" ticker={`${data.length} periods`}>
               <div className="text-xl font-bold text-primary">₹{fmt(totalTurnover)}</div>
-              <div className="terminal-label mt-1">all periods combined</div>
+              <div className="text-xs text-muted-foreground mt-1">all periods combined</div>
             </Panel>
-            <Panel title="NET TAX PAID">
+            <Panel title="Net Tax Paid">
               <div className="text-xl font-bold text-warning">₹{fmt(totalTax)}</div>
-              <div className="terminal-label mt-1">after ITC utilisation</div>
+              <div className="text-xs text-muted-foreground mt-1">after ITC utilisation</div>
             </Panel>
-            <Panel title="ITC CLAIMED">
+            <Panel title="ITC Claimed">
               <div className="text-xl font-bold text-accent">₹{fmt(totalItc)}</div>
-              <div className="terminal-label mt-1">input tax credit</div>
+              <div className="text-xs text-muted-foreground mt-1">input tax credit</div>
             </Panel>
-            <Panel title="FILING COMPLIANCE" status={notFiledCount > 0 ? "idle" : lateCount > 0 ? "warn" : "live"}>
+            <Panel title="Filing Compliance" status={notFiledCount > 0 ? "idle" : lateCount > 0 ? "warn" : "live"}>
               <div className={`text-xl font-bold ${notFiledCount > 0 ? "text-destructive" : lateCount > 0 ? "text-warning" : "text-success"}`}>
                 {notFiledCount > 0 ? `${notFiledCount} NOT FILED` : lateCount > 0 ? `${lateCount} LATE` : "COMPLIANT"}
               </div>
-              <div className="terminal-label mt-1">{data.length} returns checked</div>
+              <div className="text-xs text-muted-foreground mt-1">{data.length} returns checked</div>
             </Panel>
           </div>
 
           {/* P&L vs GST comparison */}
           {plTurnover && totalTurnover > 0 && (
-            <Panel title="GST TURNOVER vs P&L DECLARED TURNOVER" ticker="CONSISTENCY CHECK" status={Math.abs(totalTurnover - plTurnover) / plTurnover > 0.15 ? "warn" : "live"}>
-              <div className="grid grid-cols-3 gap-4 text-xs">
+            <Panel title="GST Turnover vs P&L Declared Turnover" ticker="Consistency Check" status={Math.abs(totalTurnover - plTurnover) / plTurnover > 0.15 ? "warn" : "live"}>
+              <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <div className="terminal-label">GST TURNOVER</div>
-                  <div className="text-primary font-bold text-lg mt-1">₹{fmt(totalTurnover)}</div>
+                  <div className="text-xs text-muted-foreground mb-0.5">GST Turnover</div>
+                  <div className="text-foreground font-bold text-lg mt-1">₹{fmt(totalTurnover)}</div>
                 </div>
                 <div>
-                  <div className="terminal-label">P&L DECLARED (latest FY)</div>
-                  <div className="text-primary font-bold text-lg mt-1">₹{fmt(plTurnover)}</div>
+                  <div className="text-xs text-muted-foreground mb-0.5">P&L Declared (latest FY)</div>
+                  <div className="text-foreground font-bold text-lg mt-1">₹{fmt(plTurnover)}</div>
                 </div>
                 <div>
-                  <div className="terminal-label">VARIANCE</div>
+                  <div className="text-xs text-muted-foreground mb-0.5">Variance</div>
                   {(() => {
                     const diff = totalTurnover - plTurnover;
                     const pct = (diff / plTurnover * 100).toFixed(1);
@@ -6081,7 +6658,7 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
           )}
 
           {/* Period table */}
-          <Panel title="GST PERIOD-WISE DETAILS" ticker="ALL RETURNS"
+          <Panel title="GST Period-wise Details" ticker="All Returns"
             actions={
               <button onClick={addGstRow}
                 className="text-[10px] tracking-widest border border-primary/40 text-primary/70 hover:bg-primary/10 px-2 py-0.5">
@@ -6137,7 +6714,7 @@ function GstTab({ cc, data, extracted, user, onReload, docs, accumnData }: { cc:
 
           {/* Turnover chart */}
           {data.length >= 2 && (
-            <Panel title="GST TURNOVER TREND" ticker="PERIOD-WISE">
+            <Panel title="GST Turnover Trend" ticker="Period-wise">
               <div className="h-44">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={data.map(r => ({ period: r.period.length > 7 ? r.period : r.period.slice(5), taxable: r.taxable_turnover, tax: r.net_tax_paid }))} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
@@ -6179,34 +6756,80 @@ async function dlExcel(
   XLSX.writeFile(wb, filename);
 }
 
+function dlPdfIc(html: string, title: string) {
+  const win = window.open("", "_blank", "width=1100,height=900");
+  if (!win) return;
+  win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>${buildIcNotePrintCss()}</style></head><body>${html}</body></html>`);
+  win.document.close();
+  setTimeout(() => win.print(), 800);
+}
+
 function dlPdf(html: string, title: string) {
-  const win = window.open("", "_blank", "width=1000,height=800");
+  const win = window.open("", "_blank", "width=1100,height=900");
   if (!win) return;
   win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:"Courier New",monospace;font-size:10px;color:#000;background:#fff;padding:24px 32px}
-    h1{font-size:14px;font-weight:bold;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:16px;letter-spacing:2px;text-transform:uppercase}
-    h2{font-size:11px;font-weight:bold;margin:18px 0 6px;padding:4px 8px;background:#000;color:#fff;letter-spacing:1px;text-transform:uppercase}
-    h3{font-size:10px;font-weight:bold;margin:10px 0 4px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #ccc;padding-bottom:2px}
-    table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:9px}
-    th{text-align:left;border-bottom:2px solid #000;padding:3px 8px;font-weight:bold;text-transform:uppercase;font-size:8px;letter-spacing:0.5px}
-    td{border-bottom:1px dashed #ddd;padding:3px 8px;vertical-align:top}
-    .meta{display:flex;gap:32px;margin-bottom:16px;font-size:9px;border-bottom:1px solid #ccc;padding-bottom:10px}
-    .mi .lbl{font-size:8px;text-transform:uppercase;color:#666;letter-spacing:0.5px}
-    .mi .val{font-weight:bold;font-size:11px}
-    ul{list-style:none;padding:0}
-    li{margin-bottom:3px;padding-left:14px;position:relative;font-size:9px}
-    li::before{content:">";position:absolute;left:0;color:#666}
-    .pass{color:#16a34a;font-weight:bold}
-    .fail{color:#dc2626;font-weight:bold}
-    .caution{color:#d97706;font-weight:bold}
-    .sec{margin-bottom:20px;page-break-inside:avoid}
-    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;margin-bottom:8px}
-    .lbl{font-size:8px;text-transform:uppercase;color:#666;letter-spacing:0.5px;margin-bottom:1px}
-    .val{font-size:10px}
-    .disc{font-size:8px;color:#999;border-top:1px solid #ccc;margin-top:20px;padding-top:8px;font-style:italic}
-    @media print{body{padding:10px 14px}}
-  </style></head><body>${html}<div class="disc">AI-GENERATED DRAFT — REQUIRES ANALYST REVIEW. NO CREDIT RECOMMENDATION IS MADE BY AI. © REHBAR FINANCIAL SERVICES</div></body></html>`);
+    body{font-family:Arial,Helvetica,sans-serif;font-size:10px;color:#111;background:#fff;padding:28px 36px}
+
+    /* ── Cover letterhead ───────────────────── */
+    .letterhead{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #1a1a2e;padding-bottom:10px;margin-bottom:6px}
+    .lh-brand{line-height:1.2}
+    .lh-org{font-size:18px;font-weight:900;letter-spacing:3px;text-transform:uppercase;color:#1a1a2e}
+    .lh-sub{font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#555;margin-top:2px}
+    .lh-right{text-align:right;font-size:8px;color:#555;letter-spacing:0.5px}
+    .doc-title{font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a2e;margin-bottom:4px}
+    .doc-title-bar{background:#1a1a2e;color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:5px 12px;margin-bottom:14px;font-weight:700}
+
+    /* ── Client banner ──────────────────────── */
+    .client-banner{background:#f0f4ff;border-left:4px solid #1a1a2e;padding:8px 14px;margin-bottom:12px}
+    .cb-name{font-size:15px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:#1a1a2e}
+    .cb-case{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:#666;margin-top:2px}
+
+    /* ── Deal meta strip ────────────────────── */
+    .meta{display:flex;gap:0;margin-bottom:16px;border:1px solid #ddd;border-radius:2px;overflow:hidden}
+    .mi{flex:1;padding:6px 10px;border-right:1px solid #ddd}
+    .mi:last-child{border-right:none}
+    .mi .lbl{font-size:7px;text-transform:uppercase;color:#888;letter-spacing:0.8px;margin-bottom:2px}
+    .mi .val{font-weight:700;font-size:11px;color:#1a1a2e}
+
+    /* ── Section headings ───────────────────── */
+    h2{font-size:10px;font-weight:700;margin:20px 0 6px;padding:5px 10px;background:#1a1a2e;color:#fff;letter-spacing:1.2px;text-transform:uppercase;border-radius:1px}
+    h3{font-size:9.5px;font-weight:700;margin:10px 0 4px;text-transform:uppercase;letter-spacing:0.8px;color:#1a1a2e;border-bottom:1px solid #cce;padding-bottom:2px}
+
+    /* ── Tables ─────────────────────────────── */
+    table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:8.5px}
+    th{text-align:left;background:#f5f5f5;border-bottom:2px solid #1a1a2e;border-top:1px solid #ddd;padding:4px 8px;font-weight:700;text-transform:uppercase;font-size:7.5px;letter-spacing:0.5px;color:#1a1a2e}
+    td{border-bottom:1px solid #eee;padding:4px 8px;vertical-align:top}
+    tr:last-child td{border-bottom:none}
+    .lbl{font-size:7.5px;text-transform:uppercase;color:#888;letter-spacing:0.5px;font-weight:600;background:#fafafa}
+
+    /* ── Status badges ──────────────────────── */
+    .pass{color:#16a34a;font-weight:700}
+    .fail{color:#dc2626;font-weight:700}
+    .caution{color:#d97706;font-weight:700}
+
+    /* ── Bullets ────────────────────────────── */
+    ul{list-style:none;padding:0;margin:4px 0 6px}
+    li{margin-bottom:3px;padding-left:16px;position:relative;font-size:9px;line-height:1.5}
+    li::before{content:"▸";position:absolute;left:0;color:#1a1a2e;font-size:8px}
+
+    /* ── SWOT grid ──────────────────────────── */
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 24px;margin-bottom:8px}
+    .swot-box{border:1px solid #ddd;padding:8px 10px;border-radius:2px}
+    .swot-box h3{border:none;padding:0 0 4px 0}
+
+    /* ── Footer ─────────────────────────────── */
+    .disc{font-size:7.5px;color:#aaa;border-top:1px solid #ddd;margin-top:24px;padding-top:8px;font-style:italic;display:flex;justify-content:space-between}
+    .sec{margin-bottom:14px;page-break-inside:avoid}
+    .draft-banner{background:#fff8e1;border:1px solid #f59e0b;color:#92400e;font-size:8px;font-weight:700;letter-spacing:1px;text-align:center;padding:5px;margin-bottom:14px;text-transform:uppercase}
+
+    @media print{body{padding:12px 16px} h2{-webkit-print-color-adjust:exact;print-color-adjust:exact} .meta{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+  </style></head><body>${html}
+  <div class="disc">
+    <span>AI-GENERATED DRAFT — REQUIRES ANALYST REVIEW AND APPROVAL BEFORE SUBMISSION TO IC</span>
+    <span>© REHBAR FIN SERVICES · CONFIDENTIAL</span>
+  </div>
+  </body></html>`);
   win.document.close();
   setTimeout(() => win.print(), 400);
 }
@@ -6314,7 +6937,7 @@ function ICFinalRecommendation({ cc, ratios, extracted, ic }: {
     ) : null;
 
   return (
-    <Panel title="FINAL CREDIT RECOMMENDATION" ticker="IC DECISION" status={redCount >= 3 ? "idle" : amberCount >= 3 || redCount >= 1 ? "warn" : "live"}>
+    <Panel title="Final Credit Recommendation" ticker="IC Decision" status={redCount >= 3 ? "idle" : amberCount >= 3 || redCount >= 1 ? "warn" : "live"}>
       <div className="space-y-4">
         {/* Disclaimer */}
         <div className="text-[9px] text-warning/80 tracking-wider border border-warning/30 bg-warning/5 px-2 py-1.5">
@@ -6460,15 +7083,37 @@ function buildIcNoteHtml(
     `${caption?`<h3>${caption}</h3>`:""}<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c??'—'}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
 
   const KEY_RATIOS = ["dscr","current_ratio","debt_to_equity","interest_coverage","ebitda_margin","roe"];
+  const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" });
 
-  let h = `<h1>${cc.client_name} — IC APPRAISAL NOTE</h1>
+  let h = `
+<div class="letterhead">
+  <div class="lh-brand">
+    <div class="lh-org">Rehbar Fin Services</div>
+    <div class="lh-sub">Ethical Finance · Sharia-Compliant NBFC</div>
+  </div>
+  <div class="lh-right">
+    <div style="font-weight:700;font-size:9px;text-transform:uppercase;letter-spacing:1px">Investment Committee</div>
+    <div>Credit Appraisal Note</div>
+    <div style="margin-top:2px">Date: ${today}</div>
+    <div>Case: ${cc.case_code}</div>
+  </div>
+</div>
+<div class="doc-title-bar">Standard Operating Procedure: IC Credit Appraisal Note</div>
+
+<div class="draft-banner">⚠ AI-Generated Draft — Requires Analyst Review and IC Approval Before Circulation</div>
+
+<div class="client-banner">
+  <div class="cb-name">${cc.client_name}</div>
+  <div class="cb-case">${cc.legal_constitution ?? ""} · ${cc.industry ?? "—"} · Est. ${cc.year_established ?? "—"}</div>
+</div>
+
 <div class="meta">
-  <div class="mi"><div class="lbl">Case</div><div class="val">${cc.case_code}</div></div>
-  <div class="mi"><div class="lbl">Amount</div><div class="val">₹${cc.deal_amount??'—'} Cr</div></div>
-  <div class="mi"><div class="lbl">Tenure</div><div class="val">${cc.tenure_months??'—'}M</div></div>
-  <div class="mi"><div class="lbl">IRR</div><div class="val">${cc.expected_irr??'—'}%</div></div>
   <div class="mi"><div class="lbl">Product</div><div class="val">${product.label}</div></div>
-  <div class="mi"><div class="lbl">Industry</div><div class="val">${cc.industry??'—'}</div></div>
+  <div class="mi"><div class="lbl">Amount</div><div class="val">₹${cc.deal_amount??'—'} Cr</div></div>
+  <div class="mi"><div class="lbl">Tenure</div><div class="val">${cc.tenure_months??'—'} Months</div></div>
+  <div class="mi"><div class="lbl">Expected IRR</div><div class="val">${cc.expected_irr??'—'}%</div></div>
+  <div class="mi"><div class="lbl">Legal Nature</div><div class="val">${product.legalNature??'—'}</div></div>
+  <div class="mi"><div class="lbl">Collection</div><div class="val">${product.returnMechanism??'—'}</div></div>
 </div>`;
 
   // ── I. Executive Summary ──────────────────────────────────────────────────
@@ -6496,33 +7141,37 @@ function buildIcNoteHtml(
   // ── II. Client & Promoter ─────────────────────────────────────────────────
   h += `<div class="sec"><h2>II. Client &amp; Promoter Profile</h2>`;
   h += `<table><tbody>
-    ${tblRow("Client Name", cc.client_name)}
-    ${tblRow("Legal Constitution", cc.legal_constitution)}
-    ${tblRow("Industry / Sector", cc.industry)}
-    ${tblRow("Year Established", cc.year_established)}
-    ${tblRow("Product Applied", product.label)}
-    ${tblRow("Principal Borrower", cc.principal_borrower)}
-    ${tblRow("Website", cc.website)}
+    ${tblRow("Legal Name", cc.client_name)}
+    ${tblRow("Legal Constitution", cc.legal_constitution, "Year Established", cc.year_established)}
+    ${tblRow("Industry / Sector", cc.industry, "Website", cc.website ?? "—")}
+    ${tblRow("Principal Borrower Entity", cc.principal_borrower)}
+    ${cc.mca_cin ? tblRow("CIN (MCA)", cc.mca_cin, "MCA Status", cc.mca_status ?? "—") : ""}
+    ${cc.mca_authorized_capital ? tblRow("Authorised Capital", `₹${cc.mca_authorized_capital}`, "Paid-Up Capital", `₹${cc.mca_paid_up_capital ?? "—"}`) : ""}
   </tbody></table>`;
-  if (cc.promoter_details) h += `<p><b>Promoter Details:</b><br>${cc.promoter_details}</p>`;
-  if (cc.group_summary) h += `<p><b>Group Summary:</b><br>${cc.group_summary}</p>`;
+  if (cc.promoter_details) h += `<h3>Promoter / Director Profile</h3><p style="font-size:9px;line-height:1.6;margin-bottom:6px">${cc.promoter_details}</p>`;
+  if ((cc as Record<string,unknown>).group_summary) h += `<h3>Group Company Summary</h3><p style="font-size:9px;line-height:1.6;margin-bottom:6px">${(cc as Record<string,unknown>).group_summary}</p>`;
   h += bul(ic.sections["client_promoter"]?.markdown??"");
   h += `</div>`;
 
   // ── III. Investment Structure ─────────────────────────────────────────────
   h += `<div class="sec"><h2>III. Proposed Investment Structure</h2>`;
   h += `<table><tbody>
-    ${tblRow("Product", product.label)}
-    ${tblRow("Legal Nature", product.legalNature)}
-    ${tblRow("Return Mechanism", product.returnMechanism)}
-    ${tblRow("Proposed Amount", `₹${cc.deal_amount??'—'} Crores`)}
-    ${tblRow("Tenure", `${cc.tenure_months??'—'} Months`)}
-    ${tblRow("Expected IRR", `${cc.expected_irr??'—'}%`)}
-    ${cc.residual_value!=null?tblRow("Residual Value",`₹${cc.residual_value}`):""}
-    ${cc.security_deposit!=null?tblRow("Security Deposit",`₹${cc.security_deposit}`):""}
+    ${tblRow("Product", product.label, "Legal Nature", product.legalNature)}
+    ${tblRow("Proposed Amount", `₹${cc.deal_amount??'—'} Crores`, "Tenure", `${cc.tenure_months??'—'} Months`)}
+    ${tblRow("Expected IRR", `${cc.expected_irr??'—'}%`, "Return Mechanism", product.returnMechanism)}
+    ${cc.residual_value!=null?tblRow("Residual Value (OL)",`₹${cc.residual_value}`):""}
+    ${cc.security_deposit!=null?tblRow("Security Deposit (OL)",`₹${cc.security_deposit}`):""}
   </tbody></table>`;
-  if (cc.end_use) h += `<p><b>End Use of Funds:</b><br>${cc.end_use}</p>`;
-  if (cc.collateral_summary) h += `<p><b>Collateral / Security:</b><br>${cc.collateral_summary}</p>`;
+  if (cc.end_use) h += `<h3>End Use of Funds</h3><p style="font-size:9px;line-height:1.6;margin-bottom:6px">${cc.end_use}</p>`;
+  if (cc.collateral_summary) h += `<h3>Collateral &amp; Security</h3><p style="font-size:9px;line-height:1.6;margin-bottom:6px">${cc.collateral_summary}</p>`;
+  if ((cc as Record<string,unknown>).strategic_rationale) h += `<h3>Strategic Rationale for Rehbar Funding</h3><p style="font-size:9px;line-height:1.6;margin-bottom:6px">${(cc as Record<string,unknown>).strategic_rationale}</p>`;
+  h += `<h3>Rehbar Product Framework</h3>`;
+  h += `<table><thead><tr><th>Feature</th><th>Operating Lease (Core)</th><th>Finance Lease / TF / PF</th><th>Profit &amp; Loss Sharing</th></tr></thead><tbody>
+    <tr><td>Legal Nature</td><td>Asset rental; RERL retains ownership</td><td>Structured as Term Loan / Inter-Corporate Loan</td><td>Loan with variable return based on performance</td></tr>
+    <tr><td>Taxation</td><td>Monthly rentals attract GST; RERL claims depreciation</td><td>Interest accounting; no GST on EMI principal/interest</td><td>Interest recorded per profit-share calculations</td></tr>
+    <tr><td>Collection</td><td>Proforma (Day 1-2); NACH (10th/15th); e-Invoice post-payment</td><td>Fixed EMI or defined repayment schedule</td><td>Fixed EMI; NACH (10th/15th)</td></tr>
+    <tr><td>Return Mechanism</td><td>Fixed Rental</td><td>Milestone Basis / Monthly EMI</td><td>X% of Gross / Adjusted Net Profit</td></tr>
+  </tbody></table>`;
   h += bul(ic.sections["investment_structure"]?.markdown??"");
   h += `</div>`;
 
@@ -6644,12 +7293,21 @@ function buildIcNoteHtml(
   // ── XII. Product Specifics ────────────────────────────────────────────────
   h += `<div class="sec"><h2>XII. Specific Product Requirements &amp; Exemptions</h2>`;
   h += `<table><tbody>
-    ${tblRow("Product", product.label)}
+    ${tblRow("Applied Product", product.label)}
     ${tblRow("Legal Nature", product.legalNature)}
     ${tblRow("Return Mechanism", product.returnMechanism)}
   </tbody></table>`;
+  h += `<h3>Product-Specific SOP Requirements</h3>`;
   h += `<ul>${product.rules.map(r=>`<li>${r}</li>`).join("")}</ul>`;
-  if (cc.policy_exceptions) h += `<p><b>Policy Exceptions:</b> ${cc.policy_exceptions}</p>`;
+  h += `<h3>SOP Reference — All Products</h3>`;
+  h += `<table><thead><tr><th>Product</th><th>Projections</th><th>DSCR Rule</th><th>Special Requirements</th></tr></thead><tbody>
+    <tr><td>Operating Lease / Finance Lease</td><td>Waived if cumulative deal &lt; ₹100L</td><td>If current-year DSCR covers deal, projections optional</td><td>Employee Car Lease: salary slip + PF/ESI compliance</td></tr>
+    <tr><td>Project Finance (PF)</td><td>Not required</td><td>—</td><td>Project working sheets &amp; timelines mandatory</td></tr>
+    <tr><td>Trade Finance (TF)</td><td>Not required</td><td>—</td><td>Repayment source / liquidity justification mandatory</td></tr>
+    <tr><td>Profit &amp; Loss Sharing (PLS)</td><td>Required</td><td>—</td><td>Client must submit monthly P&amp;L for EMI bifurcation</td></tr>
+    <tr><td>Home Loan (HL)</td><td>Required</td><td>—</td><td>Max LTV 60%; FOIR ≤ 50%</td></tr>
+  </tbody></table>`;
+  if (cc.policy_exceptions) h += `<h3>Policy Exceptions for This Case</h3><p style="font-size:9px;line-height:1.6">${cc.policy_exceptions}</p>`;
   h += bul(ic.sections["product_specifics"]?.markdown??"");
   h += `</div>`;
 
@@ -6676,6 +7334,19 @@ function buildIcNoteHtml(
       h += `<div><h3>${label}</h3><ul>${items.map(i=>`<li>${i}</li>`).join("")}</ul></div>`;
     });
     h += `</div></div>`;
+  }
+
+  // ── Analyst Notes Appendix ────────────────────────────────────────────────
+  const icAny = ic as Record<string, unknown>;
+  const comments = (icAny.comments as Array<{id:string;section_id:string;text:string;author_email:string;resolved:boolean}>) ?? [];
+  const openComments = comments.filter(c => !c.resolved);
+  if (openComments.length > 0) {
+    h += `<div class="sec"><h2>◈ Analyst Notes</h2><ul>`;
+    openComments.forEach(c => {
+      const sLabel = IC_SECTIONS.find(s => s.id === c.section_id)?.title ?? c.section_id;
+      h += `<li><b style="color:#444">${sLabel}:</b> ${c.text} <span style="color:#999;font-size:8px"> — ${c.author_email}</span></li>`;
+    });
+    h += `</ul></div>`;
   }
 
   return h;
@@ -6709,13 +7380,14 @@ async function uploadWithProgress(bucket: string, path: string, file: File, onPc
   });
 }
 
-function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs, progress, progressLabel }: {
+function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs, extracted = [], progress, progressLabel, lockedClass, hint }: {
   onUpload: (f: File, cls: DocClass, fy: number | null) => void;
-  onCancel: () => void;
+  onCancel?: () => void;
   onDelete: (doc: DocRow) => void;
-  onEdit: (id: string, doc_class: string, fiscal_year: number | null) => void;
+  onEdit?: (id: string, doc_class: string, fiscal_year: number | null) => void;
   onRetry: (doc: DocRow) => void;
-  busy: boolean; docs: DocRow[]; progress: number; progressLabel: string;
+  busy: boolean; docs: DocRow[]; extracted?: ExtractedRow[]; progress: number; progressLabel: string;
+  lockedClass?: DocClass; hint?: string[];
 }) {
   const DOC_CLASSES: { value: DocClass; label: string }[] = [
     { value: "all_in_one",     label: "ALL-IN-ONE (BS + P&L + CF + PROJ)" },
@@ -6738,6 +7410,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
   const [editFy, setEditFy]         = useState("");
 
   function autoDetect(filename: string): DocClass {
+    if (lockedClass) return lockedClass;
     const n = filename.toLowerCase().replace(/[\s_\-.]/g, "");
     if (/bank|stmt|statement/.test(n))             return "bank_statement";
     if (/gst|gstin|gstr/.test(n))                  return "gst_return";
@@ -6781,7 +7454,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
   };
 
   const startEdit = (d: DocRow) => { setEditingId(d.id); setEditClass(d.doc_class); setEditFy(d.fiscal_year ? String(d.fiscal_year) : ""); };
-  const saveEdit  = (id: string) => { onEdit(id, editClass, editFy ? Number(editFy) : null); setEditingId(null); };
+  const saveEdit  = (id: string) => { onEdit?.(id, editClass, editFy ? Number(editFy) : null); setEditingId(null); };
 
   const handleDownloadDoc = async (d: DocRow) => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -6816,31 +7489,35 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
 
       {/* ── Controls row ─────────────────────────────────────────────────── */}
       <div className="flex gap-3 items-end flex-wrap">
-        <div>
-          <label className="terminal-label block mb-1">Statement Type</label>
-          <select value={globalCls} onChange={e => setGlobalCls(e.target.value as DocClass)}
-            className="bg-input border border-border px-2 py-1.5 text-sm text-primary">
-            {DOC_CLASSES.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className="terminal-label block mb-1">Fiscal Year (optional)</label>
-          <input type="number" placeholder="e.g. 2025" value={globalFy} onChange={e => setGlobalFy(e.target.value)}
-            className="bg-input border border-border px-2 py-1.5 text-sm text-primary w-28" />
-        </div>
+        {!lockedClass && (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1">Statement Type</label>
+              <select value={globalCls} onChange={e => setGlobalCls(e.target.value as DocClass)}
+                className="bg-input border border-border px-2 py-1.5 text-sm text-primary">
+                {DOC_CLASSES.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1">Fiscal Year (optional)</label>
+              <input type="number" placeholder="e.g. 2025" value={globalFy} onChange={e => setGlobalFy(e.target.value)}
+                className="bg-input border border-border px-2 py-1.5 text-sm text-primary w-28" />
+            </div>
+          </>
+        )}
         <div className="flex-1 min-w-[200px]">
-          <label className="terminal-label block mb-1">File (PDF / Image / Excel)</label>
+          {!lockedClass && <label className="block text-sm font-medium text-foreground mb-1">File (PDF / Image / Excel)</label>}
           <div
             onDragOver={e => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={e => { e.preventDefault(); setDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) addToQueue(files); }}
             onClick={() => !(busy || queueRunning) && fileInputRef.current?.click()}
-            className={`border-2 border-dashed cursor-pointer px-3 py-2 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
+            className={`border-2 border-dashed rounded-lg cursor-pointer px-4 py-4 text-center text-sm transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
           >
             <input ref={fileInputRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
               onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addToQueue(files); e.target.value = ""; }} />
-            <span className="text-primary font-bold">⬆ DROP FILES OR CLICK</span>
-            <span className="text-muted-foreground ml-1">· Multiple OK</span>
+            <div className="text-muted-foreground">Drop files here or <span className="text-primary font-medium">click to browse</span></div>
+            <div className="text-xs text-muted-foreground/60 mt-1">PDF · Excel · Image · Multiple files OK</div>
           </div>
         </div>
       </div>
@@ -6849,20 +7526,20 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
       {fileQueue.length > 0 && (
         <div className="border border-border">
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-surface/40">
-            <span className="terminal-label text-[10px]">
-              {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""} QUEUED
-              {pendingCount > 0 && ` · ${pendingCount} PENDING`}
+            <span className="text-xs font-medium text-foreground">
+              {fileQueue.length} file{fileQueue.length > 1 ? "s" : ""} queued
+              {pendingCount > 0 && ` · ${pendingCount} pending`}
             </span>
             <div className="flex gap-2">
               {pendingCount > 0 && !busy && !queueRunning && (
                 <button onClick={processAll}
-                  className="bg-primary text-primary-foreground px-3 py-0.5 text-[10px] tracking-widest font-bold hover:opacity-90">
-                  [EXTRACT {pendingCount} FILE{pendingCount > 1 ? "S" : ""}]
+                  className="bg-primary text-primary-foreground rounded px-3 py-1 text-xs font-medium hover:bg-primary/90 transition-colors">
+                  Extract {pendingCount} file{pendingCount > 1 ? "s" : ""}
                 </button>
               )}
               <button onClick={() => setFileQueue([])}
-                className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground">
-                CLEAR ALL
+                className="text-xs border border-border rounded text-muted-foreground px-2 py-1 hover:text-foreground transition-colors">
+                Clear All
               </button>
             </div>
           </div>
@@ -6881,8 +7558,8 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
                 <span className="truncate flex-1 text-primary min-w-0" title={item.name}>{item.name}</span>
                 <span className="text-foreground/40 shrink-0 hidden sm:block">{item.size}</span>
                 {item.status === "duplicate" ? (
-                  <span className="text-warning text-[9px] tracking-widest shrink-0">ALREADY EXISTS</span>
-                ) : (
+                  <span className="text-amber-500 text-[10px] shrink-0 border border-amber-200 rounded px-1.5 py-0.5">Already exists</span>
+                ) : !lockedClass ? (
                   <>
                     <select
                       value={item.stmtType}
@@ -6903,7 +7580,7 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
                       className="bg-input border border-border/60 text-[9px] text-primary px-1 py-0.5 w-12 shrink-0 disabled:opacity-40"
                     />
                   </>
-                )}
+                ) : null}
                 {item.status !== "processing" && (
                   <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))}
                     className="text-foreground/40 hover:text-destructive hover:bg-destructive/10 px-1.5 py-0.5 border border-transparent hover:border-destructive/20 text-[10px] shrink-0 transition-colors"
@@ -6917,69 +7594,93 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
 
       {/* ── Progress bar ─────────────────────────────────────────────────── */}
       {busy && (
-        <div className="border border-warning/40 bg-warning/5 p-3 space-y-2">
-          <div className="flex justify-between items-center text-[11px] tracking-widest">
-            <span className="text-warning">▸ {progressLabel || "WORKING"}</span>
+        <div className="border border-border rounded-lg bg-muted/20 p-3 space-y-2">
+          <div className="flex justify-between items-center text-sm">
+            <span className="text-foreground">▸ {progressLabel || "Working…"}</span>
             <div className="flex items-center gap-3">
               <span className="text-primary font-bold tabular-nums">{progress}%</span>
-              <button onClick={onCancel}
-                className="text-[10px] border border-destructive/60 text-destructive px-2 py-0.5 hover:bg-destructive/10 tracking-widest">
-                [CANCEL]
-              </button>
+              {onCancel && (
+                <button onClick={onCancel}
+                  className="text-xs border border-destructive/60 text-destructive rounded px-2 py-0.5 hover:bg-destructive/10">
+                  Cancel
+                </button>
+              )}
             </div>
           </div>
-          <div className="h-2 bg-input border border-border overflow-hidden">
-            <div className="h-full bg-primary transition-all duration-300 ease-out"
-              style={{ width: `${progress}%`, boxShadow: "0 0 8px hsl(var(--primary))" }} />
+          <div className="h-1.5 bg-border rounded-full overflow-hidden">
+            <div className="h-full bg-primary transition-all duration-300 ease-out rounded-full"
+              style={{ width: `${progress}%` }} />
           </div>
-          <div className="flex justify-between text-[9px] text-muted-foreground tracking-widest">
-            <span>PARSE</span><span>UPLOAD</span><span>REGISTER</span><span>EXTRACT</span><span>DONE</span>
+          <div className="flex justify-between text-[10px] text-muted-foreground">
+            <span>Parse</span><span>Upload</span><span>Register</span><span>Extract</span><span>Done</span>
           </div>
         </div>
       )}
 
-      <div className="text-[10px] text-muted-foreground tracking-wider space-y-0.5">
-        <div>▸ ALL-IN-ONE (AUTO) detects every statement type and all fiscal years inside one document.</div>
-        <div>▸ Statement type is auto-detected from filename — review and override per file before extracting.</div>
-        <div>▸ PROJECTIONS do not require a fiscal year. Excel parsed locally — PDF/Image via vision model.</div>
+      <div className="text-xs text-muted-foreground space-y-0.5">
+        {hint ? hint.map((h, i) => <div key={i}>· {h}</div>) : (
+          <>
+            <div>· ALL-IN-ONE (AUTO) detects every statement type and all fiscal years inside one document.</div>
+            <div>· Statement type is auto-detected from filename — review and override per file before extracting.</div>
+            <div>· Projections do not require a fiscal year. Excel parsed locally — PDF/Image via vision model.</div>
+          </>
+        )}
       </div>
 
       {/* ── Uploaded documents table ──────────────────────────────────────── */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs border-t border-border min-w-[480px]">
-          <thead className="text-muted-foreground">
-            <tr><th className="text-left py-1">FILE</th><th>TYPE</th><th>CLASS</th><th>FY</th><th>STATUS</th><th></th></tr>
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <table className="w-full text-xs min-w-[400px]">
+          <thead className="bg-muted/30 text-muted-foreground">
+            <tr>
+              <th className="text-left py-2 px-3">File</th>
+              <th className="px-2">Type</th>
+              {!lockedClass && <th className="px-2">Class</th>}
+              {!lockedClass && <th className="px-2">FY</th>}
+              <th className="px-2">Status</th>
+              <th className="px-2"></th>
+            </tr>
           </thead>
           <tbody>
             {docs.length === 0 ? (
-              <tr><td colSpan={6} className="text-center text-muted-foreground py-4">NO DOCUMENTS UPLOADED YET</td></tr>
+              <tr><td colSpan={lockedClass ? 4 : 6} className="text-center text-muted-foreground py-6">No documents uploaded yet</td></tr>
             ) : docs.map(d => {
               const isEditing = editingId === d.id;
+              const staleExtracted = d.extraction_status === "extracted"
+                && FINANCIAL_CLASSES_SET.has(d.doc_class)
+                && !extracted.some(e => e.document_id === d.id);
+              const statusText = staleExtracted ? "Done ⚠" : d.extraction_status === "extracted" ? "Done" : d.extraction_status === "failed" ? "Failed" : d.extraction_status === "running" ? "Running…" : "Pending";
+              const statusCls = staleExtracted ? "text-warning" : d.extraction_status === "extracted" ? "text-success" : d.extraction_status === "failed" ? "text-destructive" : d.extraction_status === "running" ? "text-warning animate-pulse" : "text-muted-foreground";
               return (
-                <tr key={d.id} className="border-b border-border/30">
-                  <td className="py-1 max-w-[180px] truncate"><button type="button" onClick={() => handleDownloadDoc(d)} title="Click to download" className="text-primary hover:underline hover:text-accent cursor-pointer text-left truncate max-w-full">{d.file_name}</button></td>
-                  <td className="text-center text-accent">{d.file_type.toUpperCase()}</td>
-                  <td className="text-center text-foreground/80 px-1">
-                    {isEditing ? (
-                      <select value={editClass} onChange={e => setEditClass(e.target.value)} className={cellCls}>
-                        {DOC_CLASSES.map(d => <option key={d.value} value={d.value}>{d.value}</option>)}
-                      </select>
-                    ) : d.doc_class}
-                  </td>
-                  <td className="text-center px-1">
-                    {isEditing
-                      ? <input type="number" value={editFy} onChange={e => setEditFy(e.target.value)} placeholder="auto" className={`${cellCls} w-16`} />
-                      : (d.fiscal_year ?? "—")}
-                  </td>
-                  <td className={`text-center ${d.extraction_status === "extracted" ? "text-success" : d.extraction_status === "failed" ? "text-destructive" : d.extraction_status === "running" ? "text-warning animate-pulse" : "text-warning"}`}>
-                    <span title={(d as DocRow & { extraction_error?: string }).extraction_error ?? ""}>{d.extraction_status.toUpperCase()}</span>
+                <tr key={d.id} className="border-t border-border/30">
+                  <td className="py-1.5 px-3 max-w-[180px] truncate"><button type="button" onClick={() => handleDownloadDoc(d)} title="Click to download" className="text-primary hover:underline hover:text-accent cursor-pointer text-left truncate max-w-full">{d.file_name}</button></td>
+                  <td className="text-center text-accent px-2">{d.file_type.toUpperCase()}</td>
+                  {!lockedClass && (
+                    <td className="text-center text-foreground/80 px-2">
+                      {isEditing ? (
+                        <select value={editClass} onChange={e => setEditClass(e.target.value)} className={cellCls}>
+                          {DOC_CLASSES.map(dc => <option key={dc.value} value={dc.value}>{dc.value}</option>)}
+                        </select>
+                      ) : d.doc_class}
+                    </td>
+                  )}
+                  {!lockedClass && (
+                    <td className="text-center px-2">
+                      {isEditing
+                        ? <input type="number" value={editFy} onChange={e => setEditFy(e.target.value)} placeholder="auto" className={`${cellCls} w-16`} />
+                        : (d.fiscal_year ?? "—")}
+                    </td>
+                  )}
+                  <td className={`text-center px-2 ${statusCls}`}>
+                    <span title={staleExtracted ? "No financial records found — click ▶ to retry." : (d as DocRow & { extraction_error?: string }).extraction_error ?? ""}>
+                      {statusText}
+                    </span>
                     {(d as DocRow & { extraction_error?: string }).extraction_error && d.extraction_status === "failed" && (
                       <div className="text-[9px] text-destructive/60 max-w-[140px] truncate" title={(d as DocRow & { extraction_error?: string }).extraction_error!}>
                         {(d as DocRow & { extraction_error?: string }).extraction_error}
                       </div>
                     )}
                   </td>
-                  <td className="text-center pl-2 whitespace-nowrap">
+                  <td className="text-center px-2 whitespace-nowrap">
                     {isEditing ? (
                       <>
                         <button type="button" onClick={() => saveEdit(d.id)} className="text-green-400 hover:text-green-300 mr-2">✓</button>
@@ -6987,10 +7688,10 @@ function UploadGrid({ onUpload, onCancel, onDelete, onEdit, onRetry, busy, docs,
                       </>
                     ) : (
                       <>
-                        {d.extraction_status !== "extracted" && (
+                        {d.extraction_status !== "running" && (
                           <button type="button" onClick={() => onRetry(d)} disabled={busy} title="Re-run extraction" className="text-warning/70 hover:text-warning mr-2 disabled:pointer-events-none text-base leading-none">▶</button>
                         )}
-                        <button type="button" onClick={() => startEdit(d)} disabled={busy} className="text-foreground/40 hover:text-primary mr-2 disabled:pointer-events-none">✎</button>
+                        {onEdit && <button type="button" onClick={() => startEdit(d)} disabled={busy} className="text-foreground/40 hover:text-primary mr-2 disabled:pointer-events-none">✎</button>}
                         <button type="button" onClick={() => onDelete(d)} disabled={busy} className="text-foreground/40 hover:text-red-400 disabled:pointer-events-none">✕</button>
                       </>
                     )}
@@ -7511,9 +8212,9 @@ function ICRatioTable({ ratios }: { ratios: RatioRow[] }) {
 function ICRow({ label, value }: { label: string; value: string | number | null | undefined }) {
   if (value === null || value === undefined || value === "") return null;
   return (
-    <tr className="border-b border-border/30">
-      <td className="py-0.5 w-44 text-muted-foreground">{label}</td>
-      <td className="text-primary">{String(value)}</td>
+    <tr className="border-b border-border/40">
+      <td className="py-2 w-44 text-muted-foreground text-sm">{label}</td>
+      <td className="py-2 text-foreground text-sm">{String(value)}</td>
     </tr>
   );
 }
@@ -7521,7 +8222,7 @@ function ICRow({ label, value }: { label: string; value: string | number | null 
 function ICClientProfile({ cc }: { cc: CaseRow }) {
   const product = PRODUCTS[cc.product_type];
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       <table className="w-full">
         <tbody>
           <ICRow label="Client Name" value={cc.client_name} />
@@ -7535,14 +8236,14 @@ function ICClientProfile({ cc }: { cc: CaseRow }) {
       </table>
       {cc.promoter_details && (
         <div>
-          <div className="terminal-label mb-1">PROMOTER DETAILS</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.promoter_details}</div>
+          <div className="text-xs font-medium text-muted-foreground mb-1">Promoter Details</div>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.promoter_details}</p>
         </div>
       )}
       {cc.group_summary && (
         <div>
-          <div className="terminal-label mb-1">GROUP SUMMARY</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.group_summary}</div>
+          <div className="text-xs font-medium text-muted-foreground mb-1">Group Summary</div>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.group_summary}</p>
         </div>
       )}
     </div>
@@ -7552,7 +8253,7 @@ function ICClientProfile({ cc }: { cc: CaseRow }) {
 function ICInvestmentStructure({ cc }: { cc: CaseRow }) {
   const product = PRODUCTS[cc.product_type];
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       <table className="w-full">
         <tbody>
           <ICRow label="Product / Facility Type" value={product.label} />
@@ -7567,14 +8268,14 @@ function ICInvestmentStructure({ cc }: { cc: CaseRow }) {
       </table>
       {cc.end_use && (
         <div>
-          <div className="terminal-label mb-1">END USE OF FUNDS</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.end_use}</div>
+          <div className="text-xs font-medium text-muted-foreground mb-1">End Use of Funds</div>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.end_use}</p>
         </div>
       )}
       {cc.collateral_summary && (
         <div>
-          <div className="terminal-label mb-1">COLLATERAL / SECURITY</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.collateral_summary}</div>
+          <div className="text-xs font-medium text-muted-foreground mb-1">Collateral / Security</div>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.collateral_summary}</p>
         </div>
       )}
     </div>
@@ -7583,9 +8284,9 @@ function ICInvestmentStructure({ cc }: { cc: CaseRow }) {
 
 function ICRehbarHistory({ cc }: { cc: CaseRow }) {
   return (
-    <div className="space-y-3 text-xs">
-      <div className="border border-border/40 bg-surface/30 p-3 space-y-1">
-        <div className="text-[10px] text-accent font-bold tracking-widest mb-2">REHBAR FINANCIAL SERVICES — FUNDER PROFILE</div>
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-muted/30 p-4">
+        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">Rehbar Financial Services — Funder Profile</div>
         <table className="w-full">
           <tbody>
             <ICRow label="Legal Entity" value="Rehbar Financial Services" />
@@ -7597,8 +8298,8 @@ function ICRehbarHistory({ cc }: { cc: CaseRow }) {
         </table>
       </div>
       <div>
-        <div className="terminal-label mb-1">PRIOR EXPOSURE TO {cc.client_name.toUpperCase()}</div>
-        <div className="text-foreground/60 italic text-xs">No prior Rehbar funding history on record for this client. This appears to be a new relationship.</div>
+        <div className="text-xs font-medium text-muted-foreground mb-1">Prior Exposure to {cc.client_name}</div>
+        <p className="text-sm text-muted-foreground italic">No prior Rehbar funding history on record for this client. This appears to be a new relationship.</p>
       </div>
     </div>
   );
@@ -7606,27 +8307,27 @@ function ICRehbarHistory({ cc }: { cc: CaseRow }) {
 
 function ICVisitReference({ cc }: { cc: CaseRow }) {
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       {cc.analyst_notes ? (
         <div>
-          <div className="terminal-label mb-1">ANALYST NOTES / SITE VISIT OBSERVATIONS</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.analyst_notes}</div>
+          <div className="text-xs font-medium text-muted-foreground mb-1">Analyst Notes / Site Visit Observations</div>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.analyst_notes}</p>
         </div>
       ) : (
-        <div className="text-foreground/50 italic">No analyst notes recorded. Add visit report, reference check findings, and executive recommendation via [EDIT] on the case header.</div>
+        <p className="text-sm text-muted-foreground italic">No analyst notes recorded. Add visit report, reference check findings, and executive recommendation via Edit on the case header.</p>
       )}
-      <div className="border-t border-border/40 pt-3">
-        <div className="terminal-label mb-2">REFERENCE CHECK TEMPLATE</div>
-        <table className="w-full">
+      <div className="border-t border-border/40 pt-4">
+        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Reference Check Status</div>
+        <table className="w-full text-sm">
           <thead className="text-muted-foreground border-b border-border">
-            <tr><th className="text-left py-0.5">CHECK TYPE</th><th className="text-left">SOURCE</th><th className="text-left">STATUS</th></tr>
+            <tr><th className="text-left py-1.5 font-medium">Check Type</th><th className="text-left font-medium">Source</th><th className="text-left font-medium">Status</th></tr>
           </thead>
           <tbody>
-            {[["Banker Reference","Principal Bank","Pending"],["Vendor/Supplier Check","Key Suppliers","Pending"],["Customer Reference","Major Clients","Pending"],["Site Visit","Business Premises","Pending"]].map(([t,s,st]) => (
+            {[["Banker Reference","Principal Bank","Pending"],["Vendor / Supplier Check","Key Suppliers","Pending"],["Customer Reference","Major Clients","Pending"],["Site Visit","Business Premises","Pending"]].map(([t,s,st]) => (
               <tr key={t} className="border-b border-border/30">
-                <td className="py-0.5 text-foreground/90">{t}</td>
-                <td className="text-foreground/60">{s}</td>
-                <td className="text-warning">{st}</td>
+                <td className="py-1.5 text-foreground">{t}</td>
+                <td className="text-muted-foreground">{s}</td>
+                <td><span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">{st}</span></td>
               </tr>
             ))}
           </tbody>
@@ -7639,7 +8340,7 @@ function ICVisitReference({ cc }: { cc: CaseRow }) {
 function ICProductSpecifics({ cc }: { cc: CaseRow }) {
   const product = PRODUCTS[cc.product_type];
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       <table className="w-full">
         <tbody>
           <ICRow label="Product" value={product.label} />
@@ -7649,20 +8350,20 @@ function ICProductSpecifics({ cc }: { cc: CaseRow }) {
         </tbody>
       </table>
       <div>
-        <div className="terminal-label mb-2">SOP RULES APPLICABLE TO {product.short}</div>
-        <ul className="space-y-1">
+        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">SOP Rules for {product.short}</div>
+        <ul className="space-y-1.5">
           {product.rules.map((r, i) => (
-            <li key={i} className="flex gap-2">
-              <span className="text-warning shrink-0">▸</span>
-              <span className="text-foreground/90">{r}</span>
+            <li key={i} className="flex gap-2.5 text-sm">
+              <span className="w-1.5 h-1.5 rounded-full bg-primary/60 mt-1.5 shrink-0" />
+              <span className="text-foreground">{r}</span>
             </li>
           ))}
         </ul>
       </div>
       {cc.policy_exceptions && (
         <div>
-          <div className="terminal-label mb-1">POLICY EXCEPTIONS</div>
-          <div className="text-warning whitespace-pre-wrap">{cc.policy_exceptions}</div>
+          <div className="text-xs font-medium text-muted-foreground mb-1">Policy Exceptions</div>
+          <p className="text-sm text-amber-700 whitespace-pre-wrap">{cc.policy_exceptions}</p>
         </div>
       )}
     </div>

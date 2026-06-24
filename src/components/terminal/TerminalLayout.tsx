@@ -12,15 +12,19 @@ export const TerminalLayout = ({ children, topBar }: TerminalLayoutProps) => {
       <div className="sticky top-0 z-40">
         <TerminalHeader />
         {topBar && (
-          <div className="border-b border-border bg-card px-3 h-9 flex items-center justify-between gap-3">
+          <div className="border-b border-border bg-card px-4 lg:px-6 h-12 flex items-center justify-between gap-4">
             {topBar}
           </div>
         )}
       </div>
-      <main className="flex-1 p-3">{children}</main>
-      <footer className="border-t border-border bg-surface text-[10px] text-muted-foreground tracking-widest px-3 py-1.5 flex justify-between">
-        <span className="truncate">© REHBAR FINANCIAL SERVICES · CREDIT ANALYSIS SOFTWARE · rehbar.co.in</span>
-        <span className="hidden md:block shrink-0 ml-3">F1 PIPELINE · F2 NEW · F4 ANALYST · ESC LOGOUT</span>
+      <main className="flex-1 p-4 lg:p-6">{children}</main>
+      <footer className="border-t border-border bg-card px-4 lg:px-6 py-3 flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">
+          © Rehbar Financial Services · Credit Analysis Software
+        </span>
+        <span className="text-xs text-muted-foreground hidden md:block">
+          rehbar.co.in
+        </span>
       </footer>
     </div>
   );

@@ -25,6 +25,7 @@ CREATE INDEX IF NOT EXISTS document_chunks_document_id_idx ON document_chunks (d
 -- RLS: users can only access chunks for cases they have access to
 ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "users can read own case chunks" ON document_chunks;
 CREATE POLICY "users can read own case chunks"
   ON document_chunks FOR SELECT
   USING (
@@ -35,6 +36,7 @@ CREATE POLICY "users can read own case chunks"
     )
   );
 
+DROP POLICY IF EXISTS "service role full access" ON document_chunks;
 CREATE POLICY "service role full access"
   ON document_chunks FOR ALL
   USING (auth.role() = 'service_role')

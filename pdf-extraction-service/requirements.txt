@@ -1,0 +1,20 @@
+fastapi==0.115.0
+uvicorn==0.32.0
+pdfplumber==0.11.4
+openpyxl>=3.1.0
+supabase>=2.10.0
+pydantic==2.10.0
+httpx>=0.26,<0.29
+pytest==8.3.0
+pytest-asyncio==0.24.0
+markitdown[all]>=0.1.0
+# Phase 2 — uncomment when enabling embedding matcher
+# sentence-transformers==3.3.1
+# numpy==1.26.4
+# Phase 3 — uncomment when enabling Gemini fallback
+# google-generativeai==0.8.3
+# PaddleOCR — uncomment when enabling scanned PDF support
+# paddleocr==2.8.1
+# paddlepaddle==2.6.2
+# PyMuPDF==1.24.0
+# Pillow==10.4.0

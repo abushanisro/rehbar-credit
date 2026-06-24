@@ -12,26 +12,25 @@ interface PanelProps {
   scan?: boolean;
 }
 
-const statusColor: Record<NonNullable<PanelProps["status"]>, string> = {
-  live: "bg-success text-success-foreground",
-  idle: "bg-muted text-muted-foreground",
-  warn: "bg-warning text-warning-foreground",
-  error: "bg-destructive text-destructive-foreground",
+const statusDot: Record<NonNullable<PanelProps["status"]>, string> = {
+  live:  "bg-green-500",
+  idle:  "bg-slate-400",
+  warn:  "bg-amber-500",
+  error: "bg-red-500",
 };
 
-export const Panel = ({ title, ticker, status = "live", actions, children, className, bodyClassName, scan }: PanelProps) => {
+export const Panel = ({ title, ticker, status = "live", actions, children, className, bodyClassName }: PanelProps) => {
   return (
-    <section className={cn("terminal-panel relative overflow-hidden animate-fade-in", className)}>
+    <section className={cn("terminal-panel animate-fade-in", className)}>
       <header className="terminal-panel-header">
         <div className="flex items-center gap-2">
-          <span className={cn("inline-block w-1.5 h-1.5", statusColor[status], status === "live" && "ticker-blink")} />
-          <span className="font-bold">{title}</span>
-          {ticker && <span className="text-muted-foreground">// {ticker}</span>}
+          <div className={cn("w-2 h-2 rounded-full shrink-0", statusDot[status], status === "live" && "animate-pulse")} />
+          <span className="text-sm font-semibold text-foreground">{title}</span>
+          {ticker && <span className="text-xs text-muted-foreground">{ticker}</span>}
         </div>
         <div className="flex items-center gap-2">{actions}</div>
       </header>
-      {scan && <div className="scan-line" />}
-      <div className={cn("p-3 relative z-[2]", bodyClassName)}>{children}</div>
+      <div className={cn("p-4", bodyClassName)}>{children}</div>
     </section>
   );
 };

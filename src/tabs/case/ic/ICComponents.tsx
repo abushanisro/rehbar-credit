@@ -8,56 +8,80 @@ export const IC_S_CLS: Record<string, string> = {
   green: "text-success", amber: "text-warning", red: "text-destructive", na: "text-muted-foreground",
 };
 export const IC_B_CLS: Record<string, string> = {
-  green: "bg-success text-success-foreground",
-  amber: "bg-warning text-warning-foreground",
-  red: "bg-destructive text-destructive-foreground",
-  na: "bg-muted text-muted-foreground",
+  green: "bg-green-50 text-green-700 border border-green-200",
+  amber: "bg-amber-50 text-amber-700 border border-amber-200",
+  red:   "bg-red-50 text-red-700 border border-red-200",
+  na:    "bg-muted text-muted-foreground border border-border",
 };
+
+// ── Section heading used across IC components ─────────────────────────────────
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 mt-1">
+      {children}
+    </div>
+  );
+}
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    green: { label: "Pass",    cls: "bg-green-50 text-green-700 border border-green-200" },
+    amber: { label: "Caution", cls: "bg-amber-50 text-amber-700 border border-amber-200" },
+    red:   { label: "Fail",    cls: "bg-red-50 text-red-700 border border-red-200" },
+    na:    { label: "—",       cls: "text-muted-foreground" },
+  };
+  const { label, cls } = map[status] ?? map.na;
+  return <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${cls}`}>{label}</span>;
+}
 
 export function ICSummaryPanel({ cc, ratios }: { cc: CaseRow; ratios: RatioRow[] }) {
   const product = PRODUCTS[cc.product_type];
   const years = Array.from(new Set(ratios.map(r => r.fiscal_year))).sort();
   const KEY = ["dscr", "current_ratio", "debt_to_equity", "interest_coverage", "ebitda_margin", "roe"];
   return (
-    <div className="space-y-2 text-xs">
+    <div className="space-y-4 text-sm">
+      {/* Deal summary */}
       <table className="w-full">
         <tbody>
-          <tr className="border-b border-border/30">
-            <td className="py-0.5 w-28 text-muted-foreground">Client</td>
-            <td className="text-primary font-medium">{cc.client_name}</td>
-            <td className="w-24 text-muted-foreground">Product</td>
-            <td className="text-primary">{product.short}</td>
+          <tr className="border-b border-border/40">
+            <td className="py-1.5 w-32 text-muted-foreground text-xs">Client</td>
+            <td className="text-foreground font-medium">{cc.client_name}</td>
+            <td className="w-24 text-muted-foreground text-xs">Product</td>
+            <td className="text-foreground">{product.short}</td>
           </tr>
-          <tr className="border-b border-border/30">
-            <td className="py-0.5 text-muted-foreground">Amount</td>
-            <td className="text-primary">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")} Cr</td>
-            <td className="text-muted-foreground">Tenure</td>
-            <td className="text-primary">{cc.tenure_months ?? "—"}M</td>
+          <tr className="border-b border-border/40">
+            <td className="py-1.5 text-muted-foreground text-xs">Amount</td>
+            <td className="text-foreground">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")} Cr</td>
+            <td className="text-muted-foreground text-xs">Tenure</td>
+            <td className="text-foreground">{cc.tenure_months ?? "—"} months</td>
           </tr>
-          <tr className="border-b border-border/30">
-            <td className="py-0.5 text-muted-foreground">IRR</td>
-            <td className="text-primary">{cc.expected_irr ?? "—"}%</td>
-            <td className="text-muted-foreground">Industry</td>
-            <td className="text-primary">{cc.industry ?? "—"}</td>
+          <tr className="border-b border-border/40">
+            <td className="py-1.5 text-muted-foreground text-xs">IRR</td>
+            <td className="text-foreground">{cc.expected_irr ?? "—"}%</td>
+            <td className="text-muted-foreground text-xs">Industry</td>
+            <td className="text-foreground">{cc.industry ?? "—"}</td>
           </tr>
           {cc.end_use && (
-            <tr className="border-b border-border/30">
-              <td className="py-0.5 text-muted-foreground">End Use</td>
-              <td colSpan={3} className="text-foreground/90">{cc.end_use}</td>
+            <tr className="border-b border-border/40">
+              <td className="py-1.5 text-muted-foreground text-xs">End Use</td>
+              <td colSpan={3} className="text-foreground">{cc.end_use}</td>
             </tr>
           )}
         </tbody>
       </table>
+
+      {/* Key ratio snapshot */}
       {ratios.length > 0 && years.length > 0 && (
-        <>
-          <div className="text-[10px] text-accent font-bold tracking-widest pt-1">KEY RATIO SNAPSHOT</div>
-          <table className="w-full">
+        <div>
+          <SectionLabel>Key Ratio Snapshot</SectionLabel>
+          <table className="w-full text-xs">
             <thead className="text-muted-foreground border-b border-border">
               <tr>
-                <th className="text-left py-0.5">RATIO</th>
-                {years.map(y => <th key={y} className="text-right">FY{y}</th>)}
-                <th className="text-right">BMK</th>
-                <th className="text-right">STATUS</th>
+                <th className="text-left py-1.5 font-medium">Ratio</th>
+                {years.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
+                <th className="text-right font-medium">Benchmark</th>
+                <th className="text-right font-medium">Status</th>
               </tr>
             </thead>
             <tbody>
@@ -68,11 +92,11 @@ export function ICSummaryPanel({ cc, ratios }: { cc: CaseRow; ratios: RatioRow[]
                 const s = latest.threshold_status ?? "na";
                 return (
                   <tr key={name} className="border-b border-border/30">
-                    <td className="py-0.5 text-foreground/90">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
+                    <td className="py-1.5 text-foreground">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
                     {years.map(y => {
                       const r = ratios.find(x => x.ratio_name === name && x.fiscal_year === y);
                       return (
-                        <td key={y} className="text-right tabular-nums text-primary">
+                        <td key={y} className="text-right tabular-nums text-foreground">
                           {formatRatio(name, r?.ratio_value != null ? Number(r.ratio_value) : null)}
                         </td>
                       );
@@ -80,15 +104,15 @@ export function ICSummaryPanel({ cc, ratios }: { cc: CaseRow; ratios: RatioRow[]
                     <td className="text-right tabular-nums text-muted-foreground">
                       {latest.benchmark != null ? formatRatio(name, Number(latest.benchmark)) : "—"}
                     </td>
-                    <td className={`text-right font-bold text-[10px] ${IC_S_CLS[s]}`}>
-                      {s === "green" ? "PASS" : s === "red" ? "FAIL" : s === "amber" ? "CAU" : "—"}
+                    <td className="text-right">
+                      <StatusBadge status={s} />
                     </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
-        </>
+        </div>
       )}
     </div>
   );
@@ -222,8 +246,8 @@ export function FV({ v, abbr, calc }: { v: number | null | undefined; abbr: stri
   if (v === null || v === undefined || !Number.isFinite(v as number))
     return <span className="text-muted-foreground">—</span>;
   return (
-    <span className={calc ? "text-warning/80" : "text-primary"}>
-      {icFmt(v)}{abbr && <span className="text-[9px] text-muted-foreground ml-0.5">{abbr}</span>}
+    <span className={calc ? "text-amber-600" : "text-foreground"}>
+      {icFmt(v)}{abbr && <span className="text-[10px] text-muted-foreground ml-0.5">{abbr}</span>}
     </span>
   );
 }
@@ -232,7 +256,7 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
   const years = Array.from(new Set(
     extracted.filter(r => r.statement_type !== "projections").map(r => r.fiscal_year)
   )).sort();
-  if (years.length === 0) return <div className="text-muted-foreground text-xs">No historical data extracted.</div>;
+  if (years.length === 0) return <div className="text-muted-foreground text-sm">No historical data extracted.</div>;
 
   const unit = extracted.find(r => r.unit)?.unit;
   const unitLabel = unit ? `₹ ${unit}` : "₹";
@@ -247,20 +271,19 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
   const cfLabels = ["Cash from Operations", "Cash from Investing", "Cash from Financing", "Net Change in Cash", "Opening Cash", "Closing Cash"];
 
   const renderTable = (allLabels: string[], title: string) => {
-    // Only show rows where at least one year has a value
     const activeLabels = allLabels.filter(label =>
       fyItems.some(items => icLiVal(items, label) !== null)
     );
     if (activeLabels.length === 0) return null;
     return (
       <div>
-        <div className="text-[10px] text-accent font-bold tracking-widest mb-1">{title} · {unitLabel}</div>
+        <SectionLabel>{title} · {unitLabel}</SectionLabel>
         <table className="w-full text-xs">
           <thead className="text-muted-foreground border-b border-border">
             <tr>
-              <th className="text-left py-0.5">ITEM</th>
-              {years.map(y => <th key={y} className="text-right">FY{y}</th>)}
-              {years.length >= 2 && <th className="text-right text-accent">YOY%</th>}
+              <th className="text-left py-1.5 font-medium">Item</th>
+              {years.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
+              {years.length >= 2 && <th className="text-right font-medium text-primary/70">YoY %</th>}
             </tr>
           </thead>
           <tbody>
@@ -274,9 +297,9 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
               const anyCalc = calcFlags.some(Boolean);
               return (
                 <tr key={label} className="border-b border-border/30">
-                  <td className="py-0.5">
-                    <span className={anyCalc ? "text-warning/90" : "text-foreground/90"}>{label}</span>
-                    {anyCalc && <span className="ml-1 text-[8px] text-warning/70 tracking-widest">CALC</span>}
+                  <td className="py-1.5">
+                    <span className={anyCalc ? "text-amber-600" : "text-foreground"}>{label}</span>
+                    {anyCalc && <span className="ml-1.5 text-[10px] text-amber-500">(calc)</span>}
                   </td>
                   {vals.map((v, i) => (
                     <td key={i} className="text-right tabular-nums">
@@ -284,7 +307,7 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
                     </td>
                   ))}
                   {years.length >= 2 && (
-                    <td className={`text-right tabular-nums text-[11px] ${yoyPct !== null ? (yoyPct > 0 ? "text-success" : yoyPct < 0 ? "text-destructive" : "text-muted-foreground") : "text-muted-foreground"}`}>
+                    <td className={`text-right tabular-nums text-[11px] ${yoyPct !== null ? (yoyPct > 0 ? "text-green-600" : yoyPct < 0 ? "text-red-600" : "text-muted-foreground") : "text-muted-foreground"}`}>
                       {yoyPct !== null ? (yoyPct > 0 ? "+" : "") + yoyPct.toFixed(1) + "%" : "—"}
                     </td>
                   )}
@@ -300,20 +323,20 @@ export function ICHistoricalTables({ extracted }: { extracted: ExtractedRow[] })
   const hasCF = fyItems.some(items => cfLabels.some(l => icLiVal(items, l) !== null));
 
   return (
-    <div className="space-y-3">
-      {renderTable(plLabels, "P&L SUMMARY")}
-      {renderTable(bsLabels, "BALANCE SHEET")}
-      {hasCF && renderTable(cfLabels, "CASH FLOW STATEMENT")}
-      <div className="text-[9px] text-warning/70 tracking-wider">
-        ▸ <span className="text-warning/70">CALC</span> = auto-derived from available data · all other values extracted from source documents
-      </div>
+    <div className="space-y-5">
+      {renderTable(plLabels, "P&L Summary")}
+      {renderTable(bsLabels, "Balance Sheet")}
+      {hasCF && renderTable(cfLabels, "Cash Flow Statement")}
+      <p className="text-[10px] text-muted-foreground">
+        Values marked <span className="text-amber-500">(calc)</span> are auto-derived from available data. All other values were extracted directly from source documents.
+      </p>
     </div>
   );
 }
 
 export function ICProjectionsTable({ extracted }: { extracted: ExtractedRow[] }) {
   const projRows = extracted.filter(r => r.statement_type === "projections");
-  if (projRows.length === 0) return <div className="text-muted-foreground text-xs">No projection data extracted.</div>;
+  if (projRows.length === 0) return <div className="text-muted-foreground text-sm">No projection data extracted.</div>;
 
   const unit = extracted.find(r => r.unit)?.unit;
   const unitLabel = unit ? `₹ ${unit}` : "₹";
@@ -332,19 +355,19 @@ export function ICProjectionsTable({ extracted }: { extracted: ExtractedRow[] })
 
   return (
     <div>
-      <div className="text-[9px] text-muted-foreground mb-1 tracking-wider">{unitLabel} · (A) Actual · (P) Projected</div>
+      <p className="text-xs text-muted-foreground mb-2">{unitLabel} · Actual (A) vs Projected (P)</p>
       <table className="w-full text-xs">
         <thead className="text-muted-foreground border-b border-border">
           <tr>
-            <th className="text-left py-0.5">METRIC</th>
-            {histYears.map(y => <th key={y} className="text-right">FY{y}<span className="text-[9px] opacity-60">(A)</span></th>)}
-            {projYears.map(y => <th key={y} className="text-right text-accent">FY{y}<span className="text-[9px] opacity-60">(P)</span></th>)}
+            <th className="text-left py-1.5 font-medium">Metric</th>
+            {histYears.map(y => <th key={y} className="text-right font-medium">FY{y} (A)</th>)}
+            {projYears.map(y => <th key={y} className="text-right font-medium text-primary/70">FY{y} (P)</th>)}
           </tr>
         </thead>
         <tbody>
           {pairs.map(([histLabel, projLabel]) => (
             <tr key={histLabel} className="border-b border-border/30">
-              <td className="py-0.5 text-foreground/90">{histLabel}</td>
+              <td className="py-1.5 text-foreground">{histLabel}</td>
               {histYears.map(y => <td key={y} className="text-right tabular-nums"><FV v={icLiVal(icGetItems(extracted, y), histLabel)} abbr={abbr} /></td>)}
               {projYears.map(y => {
                 const items = (projRows.find(r => r.fiscal_year === y)?.line_items ?? []) as unknown as LineItem[];
@@ -359,23 +382,23 @@ export function ICProjectionsTable({ extracted }: { extracted: ExtractedRow[] })
 }
 
 export function ICRatioTable({ ratios }: { ratios: RatioRow[] }) {
-  if (ratios.length === 0) return <div className="text-muted-foreground text-xs">No ratios computed. Run ratio analysis first.</div>;
+  if (ratios.length === 0) return <div className="text-muted-foreground text-sm">No ratios computed. Run ratio analysis first.</div>;
   const years = Array.from(new Set(ratios.map(r => r.fiscal_year))).sort();
   const categories = Array.from(new Set(ratios.map(r => r.category)));
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-5">
       {categories.map(cat => {
         const names = Array.from(new Set(ratios.filter(r => r.category === cat).map(r => r.ratio_name)));
         return (
           <div key={cat}>
-            <div className="text-[10px] text-accent font-bold tracking-widest mb-1">{cat.toUpperCase()}</div>
+            <SectionLabel>{cat}</SectionLabel>
             <table className="w-full text-xs">
               <thead className="text-muted-foreground border-b border-border">
                 <tr>
-                  <th className="text-left py-0.5">RATIO</th>
-                  {years.map(y => <th key={y} className="text-right">FY{y}</th>)}
-                  <th className="text-right">BMK</th>
+                  <th className="text-left py-1.5 font-medium">Ratio</th>
+                  {years.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
+                  <th className="text-right font-medium">Benchmark</th>
                 </tr>
               </thead>
               <tbody>
@@ -384,17 +407,15 @@ export function ICRatioTable({ ratios }: { ratios: RatioRow[] }) {
                   const latestStatus = latest?.threshold_status ?? "na";
                   return (
                     <tr key={name} className="border-b border-border/30">
-                      <td className="py-0.5 text-foreground/90">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
+                      <td className="py-1.5 text-foreground">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
                       {years.map(y => {
                         const r = ratios.find(x => x.ratio_name === name && x.fiscal_year === y);
                         const val = r?.ratio_value != null ? Number(r.ratio_value) : null;
                         const s = r?.threshold_status ?? "na";
                         return (
-                          <td key={y} className="text-right pr-1">
-                            <span className="tabular-nums text-foreground/90 mr-1">{formatRatio(name, val)}</span>
-                            <span className={`px-1 text-[9px] font-bold tracking-widest ${IC_B_CLS[s]}`}>
-                              {s === "green" ? "✓" : s === "red" ? "✗" : s === "amber" ? "~" : "—"}
-                            </span>
+                          <td key={y} className="text-right pr-2">
+                            <span className="tabular-nums text-foreground mr-1.5">{formatRatio(name, val)}</span>
+                            <StatusBadge status={s} />
                           </td>
                         );
                       })}
@@ -416,9 +437,9 @@ export function ICRatioTable({ ratios }: { ratios: RatioRow[] }) {
 export function ICRow({ label, value }: { label: string; value: string | number | null | undefined }) {
   if (value === null || value === undefined || value === "") return null;
   return (
-    <tr className="border-b border-border/30">
-      <td className="py-0.5 w-44 text-muted-foreground">{label}</td>
-      <td className="text-primary">{String(value)}</td>
+    <tr className="border-b border-border/40">
+      <td className="py-2 w-44 text-muted-foreground text-sm">{label}</td>
+      <td className="py-2 text-foreground text-sm">{String(value)}</td>
     </tr>
   );
 }
@@ -426,7 +447,7 @@ export function ICRow({ label, value }: { label: string; value: string | number 
 export function ICClientProfile({ cc }: { cc: CaseRow }) {
   const product = PRODUCTS[cc.product_type];
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       <table className="w-full">
         <tbody>
           <ICRow label="Client Name" value={cc.client_name} />
@@ -440,14 +461,14 @@ export function ICClientProfile({ cc }: { cc: CaseRow }) {
       </table>
       {cc.promoter_details && (
         <div>
-          <div className="terminal-label mb-1">PROMOTER DETAILS</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.promoter_details}</div>
+          <SectionLabel>Promoter Details</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.promoter_details}</p>
         </div>
       )}
       {cc.group_summary && (
         <div>
-          <div className="terminal-label mb-1">GROUP SUMMARY</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.group_summary}</div>
+          <SectionLabel>Group Summary</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.group_summary}</p>
         </div>
       )}
     </div>
@@ -457,7 +478,7 @@ export function ICClientProfile({ cc }: { cc: CaseRow }) {
 export function ICInvestmentStructure({ cc }: { cc: CaseRow }) {
   const product = PRODUCTS[cc.product_type];
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       <table className="w-full">
         <tbody>
           <ICRow label="Product / Facility Type" value={product.label} />
@@ -472,14 +493,14 @@ export function ICInvestmentStructure({ cc }: { cc: CaseRow }) {
       </table>
       {cc.end_use && (
         <div>
-          <div className="terminal-label mb-1">END USE OF FUNDS</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.end_use}</div>
+          <SectionLabel>End Use of Funds</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.end_use}</p>
         </div>
       )}
       {cc.collateral_summary && (
         <div>
-          <div className="terminal-label mb-1">COLLATERAL / SECURITY</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.collateral_summary}</div>
+          <SectionLabel>Collateral / Security</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.collateral_summary}</p>
         </div>
       )}
     </div>
@@ -488,9 +509,9 @@ export function ICInvestmentStructure({ cc }: { cc: CaseRow }) {
 
 export function ICRehbarHistory({ cc }: { cc: CaseRow }) {
   return (
-    <div className="space-y-3 text-xs">
-      <div className="border border-border/40 bg-surface/30 p-3 space-y-1">
-        <div className="text-[10px] text-accent font-bold tracking-widest mb-2">REHBAR FINANCIAL SERVICES — FUNDER PROFILE</div>
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-muted/30 p-4">
+        <SectionLabel>Rehbar Financial Services — Funder Profile</SectionLabel>
         <table className="w-full">
           <tbody>
             <ICRow label="Legal Entity" value="Rehbar Financial Services" />
@@ -502,8 +523,8 @@ export function ICRehbarHistory({ cc }: { cc: CaseRow }) {
         </table>
       </div>
       <div>
-        <div className="terminal-label mb-1">PRIOR EXPOSURE TO {cc.client_name.toUpperCase()}</div>
-        <div className="text-foreground/60 italic text-xs">No prior Rehbar funding history on record for this client. This appears to be a new relationship.</div>
+        <SectionLabel>Prior Exposure to {cc.client_name}</SectionLabel>
+        <p className="text-sm text-muted-foreground italic">No prior Rehbar funding history on record for this client. This appears to be a new relationship.</p>
       </div>
     </div>
   );
@@ -511,27 +532,31 @@ export function ICRehbarHistory({ cc }: { cc: CaseRow }) {
 
 export function ICVisitReference({ cc }: { cc: CaseRow }) {
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       {cc.analyst_notes ? (
         <div>
-          <div className="terminal-label mb-1">ANALYST NOTES / SITE VISIT OBSERVATIONS</div>
-          <div className="text-foreground/90 leading-relaxed whitespace-pre-wrap">{cc.analyst_notes}</div>
+          <SectionLabel>Analyst Notes / Site Visit Observations</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.analyst_notes}</p>
         </div>
       ) : (
-        <div className="text-foreground/50 italic">No analyst notes recorded. Add visit report, reference check findings, and executive recommendation via [EDIT] on the case header.</div>
+        <p className="text-sm text-muted-foreground italic">No analyst notes recorded. Add visit report, reference check findings, and executive recommendation via Edit on the case header.</p>
       )}
-      <div className="border-t border-border/40 pt-3">
-        <div className="terminal-label mb-2">REFERENCE CHECK TEMPLATE</div>
-        <table className="w-full">
+      <div className="border-t border-border/40 pt-4">
+        <SectionLabel>Reference Check Status</SectionLabel>
+        <table className="w-full text-sm">
           <thead className="text-muted-foreground border-b border-border">
-            <tr><th className="text-left py-0.5">CHECK TYPE</th><th className="text-left">SOURCE</th><th className="text-left">STATUS</th></tr>
+            <tr>
+              <th className="text-left py-1.5 font-medium">Check Type</th>
+              <th className="text-left font-medium">Source</th>
+              <th className="text-left font-medium">Status</th>
+            </tr>
           </thead>
           <tbody>
-            {[["Banker Reference","Principal Bank","Pending"],["Vendor/Supplier Check","Key Suppliers","Pending"],["Customer Reference","Major Clients","Pending"],["Site Visit","Business Premises","Pending"]].map(([t,s,st]) => (
+            {[["Banker Reference","Principal Bank","Pending"],["Vendor / Supplier Check","Key Suppliers","Pending"],["Customer Reference","Major Clients","Pending"],["Site Visit","Business Premises","Pending"]].map(([t,s,st]) => (
               <tr key={t} className="border-b border-border/30">
-                <td className="py-0.5 text-foreground/90">{t}</td>
-                <td className="text-foreground/60">{s}</td>
-                <td className="text-warning">{st}</td>
+                <td className="py-1.5 text-foreground">{t}</td>
+                <td className="text-muted-foreground">{s}</td>
+                <td><span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">{st}</span></td>
               </tr>
             ))}
           </tbody>
@@ -544,7 +569,7 @@ export function ICVisitReference({ cc }: { cc: CaseRow }) {
 export function ICProductSpecifics({ cc }: { cc: CaseRow }) {
   const product = PRODUCTS[cc.product_type];
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-4">
       <table className="w-full">
         <tbody>
           <ICRow label="Product" value={product.label} />
@@ -554,20 +579,20 @@ export function ICProductSpecifics({ cc }: { cc: CaseRow }) {
         </tbody>
       </table>
       <div>
-        <div className="terminal-label mb-2">SOP RULES APPLICABLE TO {product.short}</div>
-        <ul className="space-y-1">
+        <SectionLabel>SOP Rules Applicable to {product.short}</SectionLabel>
+        <ul className="space-y-1.5">
           {product.rules.map((r, i) => (
-            <li key={i} className="flex gap-2">
-              <span className="text-warning shrink-0">▸</span>
-              <span className="text-foreground/90">{r}</span>
+            <li key={i} className="flex gap-2.5 text-sm">
+              <span className="w-1.5 h-1.5 rounded-full bg-primary/60 mt-1.5 shrink-0" />
+              <span className="text-foreground">{r}</span>
             </li>
           ))}
         </ul>
       </div>
       {cc.policy_exceptions && (
         <div>
-          <div className="terminal-label mb-1">POLICY EXCEPTIONS</div>
-          <div className="text-warning whitespace-pre-wrap">{cc.policy_exceptions}</div>
+          <SectionLabel>Policy Exceptions</SectionLabel>
+          <p className="text-sm text-amber-700 whitespace-pre-wrap">{cc.policy_exceptions}</p>
         </div>
       )}
     </div>

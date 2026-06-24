@@ -16,6 +16,7 @@ import CompanyView from "./pages/CompanyView";
 import Users from "./pages/Users";
 import ICReview from "./pages/ICReview";
 import ICAuth from "./pages/ICAuth";
+import Observability from "./pages/Observability";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -56,6 +57,7 @@ const App = () => (
               <Route path="/companies" element={<ProtectedRoute><StaffOnly><ErrorBoundary><Companies /></ErrorBoundary></StaffOnly></ProtectedRoute>} />
               <Route path="/companies/:id" element={<ProtectedRoute><StaffOnly><ErrorBoundary><CompanyView /></ErrorBoundary></StaffOnly></ProtectedRoute>} />
               <Route path="/users" element={<ProtectedRoute><StaffOnly><ErrorBoundary><Users /></ErrorBoundary></StaffOnly></ProtectedRoute>} />
+              <Route path="/observability" element={<ProtectedRoute><StaffOnly><ErrorBoundary><Observability /></ErrorBoundary></StaffOnly></ProtectedRoute>} />
               <Route path="/ic" element={<ProtectedRoute><ErrorBoundary><ICReview /></ErrorBoundary></ProtectedRoute>} />
               <Route path="/history" element={<Navigate to="/" replace />} />
               <Route path="*" element={<NotFound />} />

@@ -1,0 +1,26 @@
+services:
+  worker:
+    build: .
+    command: python -m app.worker
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SERVICE_SECRET: ${SERVICE_SECRET:-}
+      WORKER_POLL_INTERVAL_S: "3"
+      WORKER_BATCH_SIZE: "5"
+      # Phase 2: set to "true" to enable embedding matcher
+      EMBEDDING_ENABLED: "false"
+      # Phase 3: set to "true" to enable Gemini fallback
+      LLM_FALLBACK_ENABLED: "false"
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SERVICE_SECRET: ${SERVICE_SECRET:-}
+    restart: unless-stopped

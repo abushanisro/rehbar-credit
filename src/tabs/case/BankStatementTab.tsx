@@ -1,13 +1,14 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Panel } from "@/components/terminal/Panel";
+import { UploadGrid } from "@/components/case/UploadGrid";
 import {
   ComposedChart, Bar, Line, XAxis, YAxis,
   CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import type { Tables } from "@/integrations/supabase/types";
-import type { CaseRow, DocRow, UploadQueueItem, QueueStatus } from "@/features/case/types";
+import type { CaseRow, DocRow } from "@/features/case/types";
 
 async function pollExtractionStatus(docId: string, signal: AbortSignal): Promise<void> {
   for (let i = 0; i < 300; i++) {
@@ -32,11 +33,7 @@ export function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseR
   const [busy, setBusy]         = useState(false);
   const [progress, setProgress] = useState(0);
   const [label, setLabel]       = useState("");
-  const [fileQueue, setFileQueue] = useState<UploadQueueItem[]>([]);
-  const [queueRunning, setQueueRunning] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
   const [editCell, setEditCell] = useState<{ id: string; field: string; value: string } | null>(null);
-  const fileRef                 = useRef<HTMLInputElement>(null);
 
   const fmt = (v: number | null) => v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
@@ -80,28 +77,26 @@ export function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseR
   const bounceRate  = data.length && totalBounce ? ((totalBounce / data.length)).toFixed(1) : null;
   const bankName    = data[0]?.bank_name;
 
-  const addBankFiles = (files: File[]) => {
-    setFileQueue(q => {
-      const existingNames = new Set([...q.map(i => i.name), ...docs.map(d => d.file_name)]);
-      return [...q, ...files.map(f => ({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file: f, name: f.name,
-        size: f.size < 1_048_576 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / 1_048_576).toFixed(2)} MB`,
-        status: (existingNames.has(f.name) ? "duplicate" : "pending") as QueueStatus,
-      }))];
-    });
+  const deleteDoc = async (doc: DocRow) => {
+    if (!window.confirm(`Delete "${doc.file_name}"?`)) return;
+    await supabase.from("financial_documents").delete().eq("id", doc.id);
+    await onReload();
   };
 
-  const processBankQueue = async () => {
-    const pending = fileQueue.filter(i => i.status === "pending");
-    if (!pending.length) return;
-    setQueueRunning(true);
-    for (const item of pending) {
-      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "processing" } : qi));
-      await handleUpload(item.file);
-      setFileQueue(q => q.map(qi => qi.id === item.id ? { ...qi, status: "done" } : qi));
+  const retryDoc = async (doc: DocRow) => {
+    try {
+      await supabase.from("financial_documents").update({ extraction_status: "running", extraction_error: null }).eq("id", doc.id);
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${session?.access_token}`, "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY };
+      await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trigger-bank-extraction`, {
+        method: "POST", headers,
+        body: JSON.stringify({ case_id: cc.id, user_id: user.id, document_ids: [doc.id] }),
+      });
+      toast.success("Re-running extraction");
+      await onReload();
+    } catch (e) {
+      toast.error("Retry failed: " + (e instanceof Error ? e.message : String(e)));
     }
-    setQueueRunning(false);
   };
 
   const handleUpload = async (file: File) => {
@@ -213,123 +208,76 @@ export function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseR
     toast.success("Bank statement data deleted");
   };
 
+  const bankDocs = docs.filter(d => d.doc_class === "bank_statement");
+
   return (
     <div className="space-y-3">
-      {/* Upload */}
-      <Panel title="BANK STATEMENT UPLOAD" ticker="AI EXTRACTION" status={data.length > 0 ? "live" : "idle"}
+      <Panel title="Bank Statement Upload" ticker="AI Extraction" status={data.length > 0 ? "live" : "idle"}
         actions={
           <div className="flex gap-2">
             {failedDocs.length > 0 && (
-              <button onClick={retryFailed} className="text-[10px] border border-warning/40 text-warning/70 px-2 py-0.5 hover:bg-warning/10">
-                [↺ RETRY {failedDocs.length} FAILED]
+              <button onClick={retryFailed} className="text-xs border border-warning/40 text-warning/70 px-2 py-1 rounded hover:bg-warning/10">
+                ↺ Retry {failedDocs.length} failed
               </button>
             )}
-            {data.length > 0 && <button onClick={deleteAll} className="text-[10px] border border-destructive/40 text-destructive/70 px-2 py-0.5 hover:bg-destructive/10">[DELETE ALL]</button>}
+            {data.length > 0 && <button onClick={deleteAll} className="text-xs border border-destructive/40 text-destructive/70 px-2 py-1 rounded hover:bg-destructive/10">Delete all</button>}
           </div>
         }
       >
-        <div className="space-y-3">
-          <input ref={fileRef} type="file" className="hidden" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
-            onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addBankFiles(files); e.target.value = ""; }} />
-
-          {/* Drop zone */}
-          <div
-            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={e => { e.preventDefault(); setDragOver(false); const files = Array.from(e.dataTransfer.files); if (files.length) addBankFiles(files); }}
-            onClick={() => !(busy || queueRunning) && fileRef.current?.click()}
-            className={`border-2 border-dashed cursor-pointer px-4 py-3 text-center text-xs transition-colors ${dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"} ${busy || queueRunning ? "pointer-events-none opacity-40" : ""}`}
-          >
-            <span className="text-primary font-bold">⬆ DROP BANK STATEMENTS OR CLICK</span>
-            <span className="text-muted-foreground ml-1">· Multiple months OK · PDF · Excel · Image</span>
-          </div>
-
-          {/* Queue */}
-          {fileQueue.length > 0 && (
-            <div className="border border-border">
-              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/60 bg-surface/40">
-                <span className="terminal-label text-[10px]">
-                  {fileQueue.length} FILE{fileQueue.length > 1 ? "S" : ""}
-                  {fileQueue.filter(i => i.status === "pending").length > 0 && ` · ${fileQueue.filter(i => i.status === "pending").length} PENDING`}
-                </span>
-                <div className="flex gap-2">
-                  {fileQueue.some(i => i.status === "pending") && !busy && !queueRunning && (
-                    <button onClick={processBankQueue}
-                      className="bg-primary text-primary-foreground px-3 py-0.5 text-[10px] tracking-widest font-bold hover:opacity-90">
-                      [EXTRACT {fileQueue.filter(i => i.status === "pending").length} FILE{fileQueue.filter(i => i.status === "pending").length > 1 ? "S" : ""}]
-                    </button>
-                  )}
-                  <button onClick={() => setFileQueue([])} className="text-[10px] border border-border text-muted-foreground px-2 py-0.5 hover:text-foreground">CLEAR</button>
-                </div>
-              </div>
-              <div className="divide-y divide-border/30">
-                {fileQueue.map(item => (
-                  <div key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
-                    <span className={item.status === "done" ? "text-success" : item.status === "error" ? "text-destructive" : item.status === "processing" ? "text-primary animate-pulse" : item.status === "duplicate" ? "text-warning" : "text-muted-foreground"}>
-                      {item.status === "done" ? "●" : item.status === "error" ? "✗" : item.status === "processing" ? "▶" : item.status === "duplicate" ? "◎" : "○"}
-                    </span>
-                    <span className="truncate flex-1 text-primary">{item.name}</span>
-                    <span className="text-foreground/40 shrink-0">{item.size}</span>
-                    {item.status === "duplicate" && (
-                      <span className="text-warning text-[9px] tracking-widest shrink-0">ALREADY EXISTS</span>
-                    )}
-                    {item.status === "pending" && (
-                      <button onClick={() => setFileQueue(q => q.filter(qi => qi.id !== item.id))} className="text-foreground/30 hover:text-destructive text-[10px]">✕</button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Progress */}
-          {busy && (
-            <div className="space-y-1">
-              <div className="flex justify-between text-[10px] text-muted-foreground"><span>{label}</span><span>{progress}%</span></div>
-              <div className="h-1.5 bg-border"><div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} /></div>
-            </div>
-          )}
-        </div>
+        <UploadGrid
+          onUpload={(f) => handleUpload(f)}
+          onDelete={deleteDoc}
+          onRetry={retryDoc}
+          busy={busy}
+          docs={bankDocs}
+          progress={progress}
+          progressLabel={label}
+          defaultClass="bank_statement"
+          allowedClasses={["bank_statement"]}
+          showClass={false}
+          showFy={false}
+          hint={["Multiple months OK — drop all at once to extract in parallel", "PDF, Excel, or image formats supported"]}
+        />
       </Panel>
 
       {data.length > 0 && (
         <>
           {/* Summary KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <Panel title="AVG MONTHLY CREDITS" ticker={bankName ?? "BANK"}>
+            <Panel title="Avg Monthly Credits" ticker={bankName ?? "Bank"}>
               <div className="text-xl font-bold text-success">₹{fmt(avgCredits)}</div>
-              <div className="terminal-label mt-1">per month</div>
+              <div className="text-xs text-muted-foreground mt-1">per month</div>
             </Panel>
-            <Panel title="AVG MONTHLY DEBITS">
+            <Panel title="Avg Monthly Debits">
               <div className="text-xl font-bold text-destructive">₹{fmt(avgDebits)}</div>
-              <div className="terminal-label mt-1">per month</div>
+              <div className="text-xs text-muted-foreground mt-1">per month</div>
             </Panel>
-            <Panel title="AVG BALANCE (AMB)" status={avgBalance && avgBalance > 0 ? "live" : "idle"}>
+            <Panel title="Avg Balance (AMB)" status={avgBalance && avgBalance > 0 ? "live" : "idle"}>
               <div className="text-xl font-bold text-primary">₹{fmt(avgBalance)}</div>
-              <div className="terminal-label mt-1">average monthly balance</div>
+              <div className="text-xs text-muted-foreground mt-1">average monthly balance</div>
             </Panel>
-            <Panel title="INWARD BOUNCES" status={totalBounce > 0 ? "idle" : "live"}>
+            <Panel title="Inward Bounces" status={totalBounce > 0 ? "idle" : "live"}>
               <div className={`text-xl font-bold ${totalBounce > 0 ? "text-destructive" : "text-success"}`}>{totalBounce}</div>
-              <div className="terminal-label mt-1">{bounceRate ? `${bounceRate}/month avg` : "nil"}</div>
+              <div className="text-xs text-muted-foreground mt-1">{bounceRate ? `${bounceRate}/month avg` : "nil"}</div>
             </Panel>
           </div>
 
           {/* Monthly table */}
-          <Panel title="MONTHLY BANK ANALYSIS" ticker={`${data.length} MONTHS`}>
+          <Panel title="Monthly Bank Analysis" ticker={`${data.length} months`}>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-muted-foreground border-b border-border">
                   <tr>
-                    <th className="text-left py-1 pr-2">MONTH</th>
-                    <th className="text-right pr-2">OPENING</th>
-                    <th className="text-right pr-2">CREDITS</th>
-                    <th className="text-right pr-2">DEBITS</th>
-                    <th className="text-right pr-2">CLOSING</th>
-                    <th className="text-right pr-2">AVG BAL</th>
-                    <th className="text-right pr-2">EMI OUTFLOW</th>
-                    <th className="text-center pr-2">BNCE↓</th>
-                    <th className="text-center pr-2">BNCE↑</th>
-                    <th className="text-right">NET FLOW</th>
+                    <th className="text-left py-1.5 pr-2 font-medium">Month</th>
+                    <th className="text-right pr-2 font-medium">Opening</th>
+                    <th className="text-right pr-2 font-medium">Credits</th>
+                    <th className="text-right pr-2 font-medium">Debits</th>
+                    <th className="text-right pr-2 font-medium">Closing</th>
+                    <th className="text-right pr-2 font-medium">Avg Bal</th>
+                    <th className="text-right pr-2 font-medium">EMI Outflow</th>
+                    <th className="text-center pr-2 font-medium">Bounce↓</th>
+                    <th className="text-center pr-2 font-medium">Bounce↑</th>
+                    <th className="text-right font-medium">Net Flow</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -359,7 +307,7 @@ export function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseR
 
           {/* Chart */}
           {data.length >= 2 && (
-            <Panel title="CREDITS vs DEBITS TREND" ticker="MONTHLY CASH FLOW">
+            <Panel title="Credits vs Debits Trend" ticker="Monthly Cash Flow">
               <div className="h-52">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={data.map(r => ({ month: r.month.slice(5), credits: r.total_credits, debits: r.total_debits, balance: r.avg_balance }))} margin={{ top: 4, right: 20, left: 0, bottom: 0 }}>
@@ -389,9 +337,9 @@ export function BankStatementTab({ cc, data, docs, user, onReload }: { cc: CaseR
             }
             if (avgBalance && avgBalance < 0) obs.push({ text: "Negative average balance detected — possible overdraft usage", cls: "text-destructive" });
             return obs.length > 0 ? (
-              <Panel title="BANK ANALYSIS INSIGHTS" ticker="AUTO">
+              <Panel title="Bank Analysis Insights" ticker="Auto">
                 <div className="space-y-1.5">
-                  {obs.map((o, i) => <div key={i} className={`text-xs flex gap-2 ${o.cls}`}><span>▸</span><span>{o.text}</span></div>)}
+                  {obs.map((o, i) => <div key={i} className={`text-sm flex gap-2 ${o.cls}`}><span>·</span><span>{o.text}</span></div>)}
                 </div>
               </Panel>
             ) : null;

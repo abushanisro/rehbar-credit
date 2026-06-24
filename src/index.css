@@ -2,166 +2,143 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Rehbar Financial Services — brand-aligned terminal theme.
-   Primary palette extracted from logo: navy #1C2B6E, orange #E8721C,
-   gold #F5A428, red #CE3425, light-gold #F2CF68. All colors HSL. */
+/* Rehbar Financial Services — clean, professional design system.
+   Primary palette: Rehbar orange #E8721C, gold #F5A428, on light white/gray. */
 
 @layer base {
+  /* ── Light mode (default) ──────────────────────────────────────────────────── */
   :root {
-    /* Backgrounds — deep brand navy */
-    --background: 229 58% 5%;        /* #060A18 very dark navy */
-    --foreground: 36 88% 72%;        /* warm gold text — readable on navy */
+    --background: 210 20% 98%;        /* #F7F8FC very light blue-gray */
+    --foreground: 222 47% 11%;        /* #0F172A slate-900, high contrast */
 
-    --surface:   229 52% 8%;         /* #0B1028 */
-    --surface-2: 229 48% 11%;        /* #101829 */
-    --surface-3: 229 44% 14%;        /* #16203A */
+    --surface:    0 0% 100%;          /* #FFFFFF white card panels */
+    --surface-2:  210 40% 96%;        /* #F1F5F9 slate-100 */
+    --surface-3:  214 32% 91%;        /* #E2E8F0 slate-200 */
 
-    --card:             229 55% 7%;  /* #090F22 */
-    --card-foreground:  36 88% 72%;
+    --card:             0 0% 100%;
+    --card-foreground:  222 47% 11%;
 
-    --popover:            229 52% 8%;
-    --popover-foreground: 36 88% 72%;
+    --popover:            0 0% 100%;
+    --popover-foreground: 222 47% 11%;
 
     /* Primary — Rehbar orange (#E8721C) */
     --primary:            25 82% 51%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary:            229 40% 15%;
-    --secondary-foreground: 36 88% 72%;
+    --secondary:            210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
 
-    --muted:            229 40% 12%;
-    --muted-foreground: 220 18% 52%;
+    --muted:            210 40% 96%;
+    --muted-foreground: 215 16% 47%;  /* #64748B slate-500 */
 
     /* Accent — brand gold (#F5A428) */
     --accent:            36 91% 56%;
-    --accent-foreground: 229 58% 6%;
+    --accent-foreground: 222 47% 11%;
 
-    /* Destructive — brand red (#CE3425) */
-    --destructive:            5 69% 48%;
+    /* Status */
+    --destructive:            0 72% 51%;   /* #DC2626 red-600 */
     --destructive-foreground: 0 0% 100%;
 
-    /* Success */
-    --success:            145 80% 42%;
-    --success-foreground: 0 0% 4%;
+    --success:            142 72% 29%;     /* #16A34A green-600 */
+    --success-foreground: 0 0% 100%;
 
-    /* Warning — light brand gold (#F2CF68) */
-    --warning:            45 84% 68%;
-    --warning-foreground: 229 58% 8%;
+    --warning:            32 95% 44%;      /* #D97706 amber-600 */
+    --warning-foreground: 0 0% 100%;
 
-    --border: 229 38% 20%;
-    --input:  229 48% 9%;
+    --border: 214 32% 91%;                 /* #E2E8F0 subtle */
+    --input:  0 0% 100%;
     --ring:   25 82% 51%;
 
-    --grid-line: 229 40% 16%;
+    --grid-line: 214 32% 91%;
 
-    --radius: 0px;
+    --radius: 8px;
 
     --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
-    --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-sans: 'IBM Plex Sans', 'Inter', system-ui, sans-serif;
 
-    --shadow-glow: 0 0 0 1px hsl(25 82% 51% / 0.4), 0 0 20px hsl(25 82% 51% / 0.15);
-    --shadow-panel: inset 0 0 0 1px hsl(var(--border));
+    --shadow-panel:    0 1px 3px hsl(222 47% 11% / 0.08), 0 1px 2px hsl(222 47% 11% / 0.04);
+    --shadow-card:     0 4px 6px -1px hsl(222 47% 11% / 0.07), 0 2px 4px -2px hsl(222 47% 11% / 0.04);
+    --shadow-elevated: 0 10px 15px -3px hsl(222 47% 11% / 0.08), 0 4px 6px -2px hsl(222 47% 11% / 0.04);
+    --shadow-glow:     0 0 0 3px hsl(25 82% 51% / 0.12);
+    --gradient-scan:   none;
 
-    --gradient-scan: linear-gradient(180deg, transparent 0%, hsl(25 82% 51% / 0.04) 50%, transparent 100%);
-
-    --sidebar-background:         229 58% 4%;
-    --sidebar-foreground:         36 88% 72%;
+    --sidebar-background:         210 20% 98%;
+    --sidebar-foreground:         222 47% 11%;
     --sidebar-primary:            25 82% 51%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent:             229 48% 10%;
-    --sidebar-accent-foreground:  36 88% 72%;
-    --sidebar-border:             229 38% 20%;
+    --sidebar-accent:             210 40% 96%;
+    --sidebar-accent-foreground:  222 47% 11%;
+    --sidebar-border:             214 32% 91%;
     --sidebar-ring:               25 82% 51%;
   }
 
-  /* ── Light mode ──────────────────────────────────────────────────────────────
-     WCAG AA requires 4.5:1 contrast for normal text, 3:1 for large/bold text.
-     Background ≈ HSL(225,28%,95%) ≈ #EDF0F7 — luminance ~0.89.
-     To hit 4.5:1 a foreground needs luminance ≤ 0.16.
+  /* ── Dark mode ─────────────────────────────────────────────────────────────── */
+  :root.dark {
+    --background: 222 47% 11%;        /* #0F172A slate-900 */
+    --foreground: 210 40% 96%;        /* #F1F5F9 slate-100 */
 
-     Brand orange  #E8721C (dark mode primary, lum 0.30) → fails 2.8:1 on white.
-     Brand gold    #F5A428 (dark mode accent,  lum 0.48) → fails 1.9:1 on white.
+    --surface:    220 40% 14%;        /* #1E293B slate-800 */
+    --surface-2:  217 33% 18%;        /* #253347 */
+    --surface-3:  215 28% 22%;        /* #2D3F52 */
 
-     Both are completely retuned for light mode while keeping Rehbar's visual identity.
-  ──────────────────────────────────────────────────────────────────────────── */
-  :root.light {
-    /* ── Backgrounds ── */
-    --background: 225 28% 95%;       /* #EDF0F7  soft blue-gray, not stark white */
-    --foreground: 229 55% 13%;       /* #111843  very dark navy — 12:1 contrast ✓ */
+    --card:             220 40% 14%;
+    --card-foreground:  210 40% 96%;
 
-    --surface:   0 0% 100%;          /* #FFFFFF  card panels pop off background */
-    --surface-2: 225 22% 91%;        /* #E2E6F2  secondary surfaces */
-    --surface-3: 225 20% 85%;        /* #D1D7E8  tertiary / hover */
+    --popover:            220 40% 14%;
+    --popover-foreground: 210 40% 96%;
 
-    --card:             0 0% 100%;
-    --card-foreground:  229 55% 13%;
-
-    --popover:            0 0% 100%;
-    --popover-foreground: 229 55% 13%;
-
-    /* Primary — darkened orange: HSL(22,88%,36%) ≈ #AE4308
-       Luminance ≈ 0.13 → contrast 5.5:1 on background ✓ */
-    --primary:            22 88% 36%;
+    --primary:            25 82% 51%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary:            225 20% 89%;
-    --secondary-foreground: 229 55% 13%;
+    --secondary:            215 28% 22%;
+    --secondary-foreground: 210 40% 96%;
 
-    /* Muted foreground: HSL(229,28%,38%) ≈ #485280
-       Luminance ≈ 0.11 → contrast 6.1:1 ✓ */
-    --muted:            225 22% 92%;
-    --muted-foreground: 229 28% 38%;
+    --muted:            215 28% 22%;
+    --muted-foreground: 215 20% 55%;
 
-    /* Accent — dark amber: HSL(32,72%,32%) ≈ #8B5A08
-       Luminance ≈ 0.11 → contrast 6.1:1 ✓ */
-    --accent:            32 72% 32%;
-    --accent-foreground: 0 0% 100%;
+    --accent:            36 91% 56%;
+    --accent-foreground: 222 47% 11%;
 
-    /* Destructive — darkened red: HSL(5,68%,40%) ≈ #AE2812
-       Luminance ≈ 0.10 → contrast 6.7:1 ✓ */
-    --destructive:            5 68% 40%;
+    --destructive:            0 72% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    /* Success — dark green: HSL(142,58%,28%) ≈ #1C7038
-       Luminance ≈ 0.09 → contrast 7.1:1 ✓ */
-    --success:            142 58% 28%;
+    --success:            142 72% 42%;
     --success-foreground: 0 0% 100%;
 
-    /* Warning — dark amber: HSL(35,80%,32%) ≈ #986106
-       Luminance ≈ 0.10 → contrast 6.4:1 ✓ */
-    --warning:            35 80% 32%;
-    --warning-foreground: 0 0% 100%;
+    --warning:            32 95% 55%;
+    --warning-foreground: 222 47% 11%;
 
-    --border: 225 20% 74%;           /* visible, medium-contrast borders */
-    --input:  225 15% 97%;           /* near-white input backgrounds */
-    --ring:   22 88% 36%;
+    --border: 215 25% 27%;
+    --input:  220 40% 14%;
+    --ring:   25 82% 51%;
 
-    --grid-line: 225 20% 82%;        /* subtle grid on light background */
+    --grid-line: 215 25% 22%;
 
-    --shadow-glow: 0 0 0 1px hsl(22 88% 36% / 0.25), 0 0 14px hsl(22 88% 36% / 0.07);
-    --shadow-panel: inset 0 0 0 1px hsl(var(--border)), 0 2px 8px hsl(229 40% 10% / 0.07);
+    --shadow-panel:    0 1px 3px hsl(0 0% 0% / 0.3), 0 1px 2px hsl(0 0% 0% / 0.2);
+    --shadow-card:     0 4px 6px -1px hsl(0 0% 0% / 0.25), 0 2px 4px -2px hsl(0 0% 0% / 0.15);
+    --shadow-elevated: 0 10px 15px -3px hsl(0 0% 0% / 0.3), 0 4px 6px -2px hsl(0 0% 0% / 0.2);
+    --shadow-glow:     0 0 0 3px hsl(25 82% 51% / 0.25);
+    --gradient-scan:   none;
 
-    --gradient-scan: linear-gradient(180deg, transparent 0%, hsl(22 88% 36% / 0.025) 50%, transparent 100%);
-
-    --sidebar-background:         225 25% 92%;
-    --sidebar-foreground:         229 55% 13%;
-    --sidebar-primary:            22 88% 36%;
+    --sidebar-background:         222 47% 9%;
+    --sidebar-foreground:         210 40% 96%;
+    --sidebar-primary:            25 82% 51%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent:             225 20% 89%;
-    --sidebar-accent-foreground:  229 55% 13%;
-    --sidebar-border:             225 20% 74%;
-    --sidebar-ring:               22 88% 36%;
+    --sidebar-accent:             215 28% 22%;
+    --sidebar-accent-foreground:  210 40% 96%;
+    --sidebar-border:             215 25% 27%;
+    --sidebar-ring:               25 82% 51%;
+  }
+
+  /* Legacy alias: existing code adds "light" class → keep as no-op since :root is now light */
+  :root.light {
+    /* :root defaults are already light — no overrides needed */
   }
 }
 
 @layer base {
-  * {
-    @apply border-border;
-  }
+  * { @apply border-border; }
 
-  /* Smooth theme transitions — the .theme-switching class is added for 250 ms
-     on toggle, so all panels/cards animate together. Removed immediately after
-     so hover effects on individual elements stay instant. */
   html.theme-switching *,
   html.theme-switching *::before,
   html.theme-switching *::after {
@@ -176,113 +153,89 @@
     transition: background-color 0.2s ease, color 0.2s ease;
   }
 
-  html, body, #root {
-    height: 100%;
-  }
+  html, body, #root { height: 100%; }
 
   body {
-    @apply bg-background text-foreground font-mono antialiased;
-    font-family: var(--font-mono);
-    background-image:
-      linear-gradient(hsl(var(--grid-line) / 0.4) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(var(--grid-line) / 0.4) 1px, transparent 1px);
-    background-size: 32px 32px;
-    background-attachment: fixed;
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
     transition: background-color 0.2s ease, color 0.2s ease;
   }
 
   ::selection {
-    background: hsl(var(--primary) / 0.4);
-    color: hsl(var(--primary-foreground));
+    background: hsl(var(--primary) / 0.15);
+    color: hsl(var(--foreground));
   }
 
-  ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-track { background: hsl(var(--surface)); }
-  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); }
-  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--primary) / 0.5); }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.4); }
 }
 
-/* Hide Liveblocks "Powered by" badge */
 #liveblocks-badge { display: none !important; }
 
 @layer components {
+  /* ── Core card/panel component ───────────────────────────────────────────── */
   .terminal-panel {
-    @apply bg-card border border-border relative;
+    @apply bg-card border border-border rounded-lg relative overflow-hidden;
     box-shadow: var(--shadow-panel);
   }
 
   .terminal-panel-header {
-    @apply flex items-center justify-between px-3 py-1.5 border-b border-border bg-surface text-xs uppercase tracking-widest text-primary/80;
+    @apply flex items-center justify-between px-4 py-3 border-b border-border bg-card text-sm font-semibold text-foreground;
   }
 
   .terminal-label {
-    @apply text-[10px] uppercase tracking-[0.2em] text-muted-foreground;
+    @apply text-xs font-medium text-muted-foreground;
   }
 
   .terminal-value {
-    @apply text-primary font-mono;
+    @apply text-foreground font-semibold;
   }
 
-  .scanlines::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: repeating-linear-gradient(
-      0deg,
-      transparent 0,
-      transparent 2px,
-      hsl(0 0% 0% / 0.25) 3px,
-      transparent 4px
-    );
-    z-index: 1;
-  }
+  /* ── Legacy terminal effects — all disabled for clean design ─────────────── */
+  .scanlines::before  { display: none; }
+  .scan-line          { display: none; }
+  .glow               { /* removed */ }
 
-  /* In light mode, scanlines are barely perceptible — enough for texture,
-     not enough to reduce readability. */
-  :root.light .scanlines::before {
-    background: repeating-linear-gradient(
-      0deg,
-      transparent 0,
-      transparent 3px,
-      hsl(229 40% 10% / 0.035) 4px,
-      transparent 5px
-    );
-  }
+  :root.light .scanlines::before { display: none; }
+  :root.light .glow              { /* removed */ }
+  :root.light .terminal-panel    { box-shadow: var(--shadow-panel); }
 
+  /* ── Status blink (kept for functional use) ──────────────────────────────── */
   .ticker-blink {
-    animation: blink 1s steps(2) infinite;
+    animation: blink 1.2s steps(2) infinite;
   }
 
-  @keyframes blink {
-    50% { opacity: 0; }
-  }
+  @keyframes blink { 50% { opacity: 0; } }
 
   @keyframes scan {
-    0% { transform: translateY(-100%); }
+    0%   { transform: translateY(-100%); }
     100% { transform: translateY(100%); }
   }
 
-  .scan-line {
-    position: absolute;
-    inset: 0;
-    background: var(--gradient-scan);
-    pointer-events: none;
-    animation: scan 4s linear infinite;
+  /* ── Animation utilities ─────────────────────────────────────────────────── */
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
 
-  .glow {
-    text-shadow: 0 0 8px hsl(var(--primary) / 0.6);
-  }
+  .animate-fade-in { animation: fade-in 0.2s ease-out; }
 
-  /* Glow is more restrained on light backgrounds to avoid bleed. */
-  :root.light .glow {
-    text-shadow: 0 0 5px hsl(var(--primary) / 0.28);
-  }
-
-  /* Light mode: cards and panels get a subtle lift shadow instead of
-     relying purely on colour difference. */
-  :root.light .terminal-panel {
-    box-shadow: var(--shadow-panel);
+  /* ── IC Note editorial design system ────────────────────────────────────── */
+  .ic-document {
+    --ic-navy:    #0F1B2D;
+    --ic-cream:   #FAFAF6;
+    --ic-gold:    #8B6914;
+    --ic-ink:     #1C1C1E;
+    --ic-rule:    #D4C9B0;
+    --ic-muted:   #6B6152;
+    --ic-pass:    #1A4A2E;
+    --ic-fail:    #6B1A1A;
+    --ic-caution: #6B4B00;
+    --ic-navy-2:  #162236;
+    --ic-gold-lt: #C4A04A;
   }
 }

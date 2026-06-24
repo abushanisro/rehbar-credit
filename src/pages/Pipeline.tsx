@@ -5,6 +5,7 @@ import { useAuth } from "@/features/auth/AuthProvider";
 import { TerminalLayout } from "@/components/terminal/TerminalLayout";
 import { CASE_STATUS_META, PRODUCTS, type CaseStatus, type ProductType } from "@/features/credit/domain";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 
 interface CaseRow {
   id: string;
@@ -28,25 +29,16 @@ type ProfileRow = { id: string; email: string | null; full_name: string | null }
 type RoleRow    = { user_id: string; role: string };
 
 const ROLE_SHORT: Record<string, string> = {
-  admin: "ADM", analyst: "ANL", business_development: "BD",
-  ic_member: "IC", credit_committee: "CC", operations: "OPS",
-};
-const ROLE_COLOR: Record<string, string> = {
-  admin:                "text-destructive border-destructive/40",
-  analyst:              "text-primary border-primary/30",
-  business_development: "text-accent border-accent/30",
-  ic_member:            "text-success border-success/30",
-  credit_committee:     "text-warning border-warning/30",
-  operations:           "text-muted-foreground border-border",
+  admin: "Admin", analyst: "Analyst", business_development: "BD",
+  ic_member: "IC", credit_committee: "CC", operations: "Ops",
 };
 
-// Visual accent per column — inline style so Tailwind purging isn't an issue
 const COL_ACCENT: Partial<Record<CaseStatus, string>> = {
-  draft:                  "#6b7280",
+  draft:                  "#94a3b8",
   docs_received:          "#60a5fa",
   on_hold:                "#f59e0b",
   analysis:               "#a78bfa",
-  recommended_ic:         "#a78bfa",
+  recommended_ic:         "#8b5cf6",
   ic_review:              "#3b82f6",
   approved:               "#22c55e",
   conditionally_approved: "#4ade80",
@@ -59,18 +51,17 @@ const COLUMNS: CaseStatus[] = [
   "ic_review", "approved", "conditionally_approved", "declined", "queries_resubmission",
 ];
 
-// ── Project Mapping ──────────────────────────────────────────────────────────
 const BUSINESS_STAGES = [
-  { n: 1,  short: "CREATED",   label: "Case Created" },
-  { n: 2,  short: "DOCS REC.", label: "All Docs Received" },
-  { n: 3,  short: "ON HOLD",   label: "On Hold" },
-  { n: 4,  short: "ANALYSIS",  label: "Analysis In Process" },
-  { n: 5,  short: "REC. IC",   label: "Recommended for IC" },
-  { n: 6,  short: "SUB. IC",   label: "Submitted to IC" },
-  { n: 7,  short: "APPR.",     label: "Approved by IC" },
-  { n: 8,  short: "COND.",     label: "Cond. Approved by IC" },
-  { n: 9,  short: "REJECTED",  label: "Rejected by IC" },
-  { n: 10, short: "RE-QUERY",  label: "Queries Resubmission" },
+  { n: 1,  short: "Created",   label: "Case Created" },
+  { n: 2,  short: "Docs Rec.", label: "All Docs Received" },
+  { n: 3,  short: "On Hold",   label: "On Hold" },
+  { n: 4,  short: "Analysis",  label: "Analysis In Process" },
+  { n: 5,  short: "Rec. IC",   label: "Recommended for IC" },
+  { n: 6,  short: "Sub. IC",   label: "Submitted to IC" },
+  { n: 7,  short: "Approved",  label: "Approved by IC" },
+  { n: 8,  short: "Cond.",     label: "Conditionally Approved" },
+  { n: 9,  short: "Rejected",  label: "Rejected by IC" },
+  { n: 10, short: "Re-Query",  label: "Queries Resubmission" },
 ] as const;
 
 const STAGE_MAP: Partial<Record<CaseStatus, { current: number; completed: number[] }>> = {
@@ -90,7 +81,6 @@ const STAGE_MAP: Partial<Record<CaseStatus, { current: number; completed: number
   queries_resubmission:   { current: 10, completed: [1, 2, 4, 5, 6] },
 };
 
-// Maps intermediate doc-processing statuses to their visible pipeline column
 const PIPELINE_COL_OVERRIDE: Partial<Record<CaseStatus, CaseStatus>> = {
   uploading:  "docs_received",
   extracting: "docs_received",
@@ -109,12 +99,10 @@ export default function Pipeline() {
   const [dragOverCol, setDragOverCol] = useState<CaseStatus | null>(null);
   const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
 
-  // Inline note editing
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
   const noteRef = useRef<HTMLTextAreaElement>(null);
 
-  // Per-column sort order (localStorage)
   const [colOrder, setColOrder] = useState<Record<string, string[]>>(() => {
     try { return JSON.parse(localStorage.getItem("rehbar_pipeline_order") ?? "{}"); }
     catch { return {}; }
@@ -130,7 +118,6 @@ export default function Pipeline() {
     return [...colCases].sort((a, b) => (idx.get(a.id) ?? -1) - (idx.get(b.id) ?? -1));
   };
 
-  // Filters
   const [search, setSearch] = useState("");
   const [myOnly, setMyOnly] = useState(false);
   const [productFilter, setProductFilter] = useState<ProductType | "">("");
@@ -182,7 +169,6 @@ export default function Pipeline() {
     return () => { supabase.removeChannel(ch); };
   }, []);
 
-  // ── Case removal ─────────────────────────────────────────────────────────
   const removeCase = async (e: React.MouseEvent, id: string, name: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -193,7 +179,6 @@ export default function Pipeline() {
     else toast.success(`Deleted ${name}`);
   };
 
-  // ── Note handlers ────────────────────────────────────────────────────────
   const startEditNote = (e: React.MouseEvent, c: CaseRow) => {
     e.preventDefault();
     e.stopPropagation();
@@ -212,7 +197,6 @@ export default function Pipeline() {
     if (error) { toast.error("Failed to save note"); load(); }
   };
 
-  // ── Drag handlers ────────────────────────────────────────────────────────
   const onDragStart = (e: React.DragEvent, id: string) => {
     if (editingNoteId) return;
     setDraggingId(id);
@@ -282,7 +266,6 @@ export default function Pipeline() {
 
   const clearFilters = () => { setSearch(""); setMyOnly(false); setProductFilter(""); };
 
-  // ── Render ───────────────────────────────────────────────────────────────
   const icCount       = cases.filter(c => c.status === "ic_review").length;
   const approvedCount = cases.filter(c => c.status === "approved" || c.status === "conditionally_approved").length;
   const onHoldCount   = cases.filter(c => c.status === "on_hold").length;
@@ -290,129 +273,159 @@ export default function Pipeline() {
   return (
     <TerminalLayout>
 
-      {/* ── Stats bar ──────────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-stretch gap-3 mb-3">
-        <div className="flex-1 min-w-[120px] border border-border bg-surface px-4 py-2.5">
-          <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">ACTIVE CASES</div>
-          <div className="text-2xl text-primary glow font-bold">{cases.length}</div>
+      {/* ── Page header ─────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Pipeline</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">Track and manage all credit cases</p>
         </div>
-        <div className="flex-1 min-w-[120px] border border-border bg-surface px-4 py-2.5">
-          <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">SUBMITTED TO IC</div>
-          <div className="text-2xl text-warning glow font-bold">{icCount}</div>
+        <Link
+          to="/new"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          New Case
+        </Link>
+      </div>
+
+      {/* ── Stats ────────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="bg-card rounded-lg border border-border p-5" style={{ boxShadow: "var(--shadow-panel)" }}>
+          <p className="text-xs font-medium text-muted-foreground mb-2">Active Cases</p>
+          <p className="text-3xl font-bold text-foreground">{cases.length}</p>
+          <p className="text-xs text-muted-foreground mt-1">Total in pipeline</p>
         </div>
-        <div className="flex-1 min-w-[120px] border border-border bg-surface px-4 py-2.5">
-          <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">APPROVED</div>
-          <div className="text-2xl text-success glow font-bold">{approvedCount}</div>
+        <div className="bg-card rounded-lg border border-border p-5" style={{ boxShadow: "var(--shadow-panel)" }}>
+          <p className="text-xs font-medium text-muted-foreground mb-2">Submitted to IC</p>
+          <p className="text-3xl font-bold text-amber-600">{icCount}</p>
+          <p className="text-xs text-muted-foreground mt-1">Awaiting review</p>
         </div>
-        <div className="flex-1 min-w-[120px] border border-border bg-surface px-4 py-2.5">
-          <div className="text-[9px] tracking-widest text-muted-foreground mb-0.5">ON HOLD</div>
-          <div className="text-2xl text-warning/80 glow font-bold">{onHoldCount}</div>
+        <div className="bg-card rounded-lg border border-border p-5" style={{ boxShadow: "var(--shadow-panel)" }}>
+          <p className="text-xs font-medium text-muted-foreground mb-2">Approved</p>
+          <p className="text-3xl font-bold text-green-600">{approvedCount}</p>
+          <p className="text-xs text-muted-foreground mt-1">Approved by IC</p>
         </div>
-        <div className="border border-primary/40 bg-primary/5 px-4 py-2.5 flex items-center">
-          <Link
-            to="/new"
-            className="text-primary text-[10px] tracking-widest font-bold hover:opacity-80 whitespace-nowrap"
-          >
-            [F2] NEW CASE →
-          </Link>
+        <div className="bg-card rounded-lg border border-border p-5" style={{ boxShadow: "var(--shadow-panel)" }}>
+          <p className="text-xs font-medium text-muted-foreground mb-2">On Hold</p>
+          <p className="text-3xl font-bold text-amber-500">{onHoldCount}</p>
+          <p className="text-xs text-muted-foreground mt-1">Pending action</p>
         </div>
       </div>
 
       {/* ── Filter bar ──────────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2 mb-3 border border-border bg-surface px-3 py-2">
+      <div className="flex flex-wrap items-center gap-3 mb-5 bg-card rounded-lg border border-border px-4 py-3" style={{ boxShadow: "var(--shadow-panel)" }}>
         <div className="relative flex-1 min-w-[200px]">
-          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-[11px]">▶</span>
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/60" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search client name or case code…"
-            className="w-full bg-input border border-border pl-6 pr-7 py-1.5 text-xs text-primary focus:outline-none focus:border-primary placeholder:text-muted-foreground/30"
+            placeholder="Search by client name or case code…"
+            className="w-full bg-background border border-border rounded-lg pl-9 pr-8 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-colors"
           />
           {search && (
-            <button onClick={() => setSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-primary text-[11px]">✕</button>
+            <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
           )}
         </div>
+
         <button
           onClick={() => setMyOnly(v => !v)}
-          className={`px-3 py-1.5 text-[10px] tracking-widest font-bold border transition-colors whitespace-nowrap ${myOnly ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-primary/50 hover:text-primary"}`}
+          className={cn(
+            "px-3 py-2 text-sm font-medium rounded-lg border transition-colors whitespace-nowrap",
+            myOnly
+              ? "bg-primary text-white border-primary"
+              : "bg-background border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
+          )}
         >
-          {myOnly ? "● MY CASES" : "○ MY CASES"}
+          {myOnly ? "✓ My Cases" : "My Cases"}
         </button>
+
         <select
           value={productFilter}
           onChange={e => setProductFilter(e.target.value as ProductType | "")}
-          className="bg-input border border-border px-2 py-1.5 text-xs text-primary focus:outline-none focus:border-primary"
+          className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
         >
           <option value="">All Products</option>
           {Object.values(PRODUCTS).map(p => (
             <option key={p.id} value={p.id}>{p.label}</option>
           ))}
         </select>
-        <div className="text-[10px] tracking-widest ml-auto whitespace-nowrap flex items-center gap-3">
-          {filtersActive ? (
-            <span className={visibleCases.length === 0 ? "text-destructive" : "text-primary"}>
-              {visibleCases.length} / {cases.length} CASES
-            </span>
-          ) : (
-            <span className="text-muted-foreground/40">{cases.length} TOTAL</span>
-          )}
+
+        <div className="ml-auto flex items-center gap-3 text-sm">
+          <span className={cn("font-medium", filtersActive && visibleCases.length === 0 ? "text-destructive" : "text-muted-foreground")}>
+            {filtersActive ? `${visibleCases.length} of ${cases.length} cases` : `${cases.length} cases`}
+          </span>
           {filtersActive && (
-            <button onClick={clearFilters} className="text-muted-foreground/50 hover:text-destructive">CLEAR ✕</button>
+            <button onClick={clearFilters} className="text-muted-foreground/60 hover:text-destructive text-xs">
+              Clear filters
+            </button>
           )}
         </div>
       </div>
 
       {/* ── Pipeline board ──────────────────────────────────────────────── */}
-      <div className="border border-border bg-surface">
-        {/* Board header */}
-        <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface-2">
-          <span className="text-[10px] tracking-widest text-primary font-bold">PIPELINE BOARD</span>
-          <span className="text-[9px] text-muted-foreground/50 tracking-wider">
-            drag between columns to move stage &nbsp;·&nbsp; drag up/down to reorder &nbsp;·&nbsp; click note to edit
-          </span>
+      <div className="bg-card rounded-lg border border-border overflow-hidden mb-6" style={{ boxShadow: "var(--shadow-panel)" }}>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-border bg-surface-2/50">
+          <h2 className="text-sm font-semibold text-foreground">Pipeline Board</h2>
+          <p className="text-xs text-muted-foreground hidden sm:block">
+            Drag cards between columns to update status · Click the note area to add notes
+          </p>
         </div>
 
         {loading ? (
-          <div className="p-8 text-center text-muted-foreground text-xs tracking-wider">LOADING PIPELINE…</div>
+          <div className="p-12 text-center text-muted-foreground text-sm">Loading pipeline…</div>
         ) : cases.length === 0 ? (
-          <div className="p-12 text-center text-muted-foreground text-xs tracking-wider">
-            NO CASES YET —{" "}
-            <Link to="/new" className="text-primary hover:opacity-80">[F2] CREATE YOUR FIRST CASE</Link>
+          <div className="p-16 text-center">
+            <div className="w-12 h-12 rounded-full bg-surface-2 flex items-center justify-center mx-auto mb-4">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+            </div>
+            <p className="text-sm font-medium text-foreground mb-1">No cases yet</p>
+            <p className="text-xs text-muted-foreground mb-4">Create your first credit case to get started</p>
+            <Link to="/new" className="inline-flex items-center gap-1.5 px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg hover:bg-primary/90 transition-colors">
+              Create First Case
+            </Link>
           </div>
         ) : visibleCases.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground text-xs tracking-wider">
-            NO CASES MATCH FILTERS —{" "}
-            <button onClick={clearFilters} className="text-primary hover:opacity-80">CLEAR FILTERS</button>
+          <div className="p-12 text-center">
+            <p className="text-sm text-muted-foreground mb-3">No cases match your filters</p>
+            <button onClick={clearFilters} className="text-sm text-primary hover:underline font-medium">Clear filters</button>
           </div>
         ) : (
-          <div>
-            <div className="flex">
-              {COLUMNS.map((col, colIdx) => {
+          <div className="overflow-x-auto">
+            <div className="flex" style={{ minWidth: `${COLUMNS.length * 180}px` }}>
+              {COLUMNS.map(col => {
                 const meta     = CASE_STATUS_META[col];
                 const colCases = getSortedColCases(col, visibleCases.filter(c => getPipelineCol(c.status) === col));
                 const isOver   = dragOverCol === col;
-                const accent   = COL_ACCENT[col] ?? "#6b7280";
+                const accent   = COL_ACCENT[col] ?? "#94a3b8";
 
                 return (
                   <div
                     key={col}
-                    className={`flex flex-col flex-1 min-w-0 border-r border-border transition-colors ${isOver ? "bg-primary/3" : "bg-surface"}`}
+                    className={cn(
+                      "flex flex-col flex-1 border-r border-border last:border-r-0 transition-colors",
+                      isOver ? "bg-primary/5" : "bg-surface"
+                    )}
                     onDragOver={e => { e.preventDefault(); setDragOverCol(col); }}
                     onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOverCol(null); }}
                     onDrop={e => onDrop(e, col)}
                   >
                     {/* Column header */}
-                    <div
-                      className="px-3 py-2 border-b border-border"
-                      style={{ borderTop: `3px solid ${accent}` }}
-                    >
+                    <div className="px-3 py-2.5 border-b border-border bg-card" style={{ borderTop: `3px solid ${accent}` }}>
                       <div className="flex items-center justify-between">
-                        <span className="text-[9px] tracking-wide font-bold leading-tight" style={{ color: accent }}>
-                          {meta.label}
-                        </span>
+                        <span className="text-xs font-semibold text-foreground/80 leading-tight">{meta.label}</span>
                         <span
-                          className="text-[9px] font-bold px-1.5 py-px rounded-full"
+                          className="text-xs font-bold px-1.5 py-0.5 rounded-full"
                           style={{ background: `${accent}22`, color: accent }}
                         >
                           {colCases.length}
@@ -421,10 +434,10 @@ export default function Pipeline() {
                     </div>
 
                     {/* Cards */}
-                    <div className="flex-1 p-1.5 space-y-1.5 min-h-[280px]">
+                    <div className="flex-1 p-2 space-y-2 min-h-[300px]">
                       {colCases.map(c => {
-                        const isDragging   = draggingId === c.id;
-                        const isDropTarget = dragOverCardId === c.id && !isDragging;
+                        const isDragging    = draggingId === c.id;
+                        const isDropTarget  = dragOverCardId === c.id && !isDragging;
                         const isEditingNote = editingNoteId === c.id;
 
                         return (
@@ -436,59 +449,61 @@ export default function Pipeline() {
                             onDragOver={e => { e.preventDefault(); setDragOverCardId(c.id); setDragOverCol(col); }}
                             onDragLeave={() => setDragOverCardId(null)}
                             onDrop={e => onCardDrop(e, c.id, col)}
-                            className={`relative group bg-card border transition-all select-none ${
-                              isDragging    ? "opacity-40 scale-95 cursor-grabbing border-primary/40" :
-                              isDropTarget  ? "border-primary shadow-sm" :
-                                             "border-border hover:border-border/80 cursor-grab"
-                            }`}
+                            className={cn(
+                              "relative group bg-card rounded-lg border transition-all select-none",
+                              isDragging   ? "opacity-40 scale-95 cursor-grabbing border-primary/40 shadow-lg" :
+                              isDropTarget ? "border-primary shadow-md" :
+                                            "border-border hover:border-border/60 hover:shadow-sm cursor-grab"
+                            )}
                             style={{ borderLeft: `3px solid ${accent}` }}
                           >
-                            {/* ── Card top: drag handle area ── */}
                             <Link
                               to={`/case/${c.id}`}
                               draggable={false}
-                              className="block px-2 pt-2 pb-1.5"
+                              className="block px-3 pt-3 pb-2"
                               onClick={e => { if (isDragging) e.preventDefault(); }}
                             >
-                              {/* Client name */}
-                              <div className="text-primary font-bold text-[11px] leading-snug pr-4 break-words">
+                              <p className="text-sm font-semibold text-foreground leading-snug pr-5 break-words">
                                 {c.client_name}
-                              </div>
-                              {/* Code + badges */}
-                              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                                <span className="text-muted-foreground text-[9px] font-mono">{c.case_code}</span>
-                                <span className="text-[8px] font-bold tracking-widest px-1 py-px border border-accent/30 text-accent">
+                              </p>
+                              <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                                <span className="text-xs text-muted-foreground font-mono">{c.case_code}</span>
+                                <span
+                                  className="text-xs font-medium px-1.5 py-0.5 rounded"
+                                  style={{ background: `${accent}18`, color: accent }}
+                                >
                                   {PRODUCTS[c.product_type].short}
                                 </span>
                                 {c.deal_amount && (
-                                  <span className="text-success text-[10px] font-bold">
+                                  <span className="text-xs font-semibold text-green-600">
                                     ₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr
                                   </span>
                                 )}
                               </div>
-                              {/* Assigned to */}
-                              <div className="mt-1.5 flex items-center gap-1 min-w-0">
-                                <span className="text-[8px] tracking-widest text-primary/40 shrink-0">→</span>
-                                {(c.assigned_to_name || c.assigned_to_email) ? (
-                                  <>
-                                    <span className="text-[9px] text-primary/70 truncate font-medium">
-                                      {c.assigned_to_name ?? c.assigned_to_email?.split("@")[0]}
+                              {(c.assigned_to_name || c.assigned_to_email) ? (
+                                <div className="mt-2 flex items-center gap-1.5 min-w-0">
+                                  <div className="w-5 h-5 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
+                                    <span className="text-[9px] font-bold text-primary">
+                                      {(c.assigned_to_name ?? c.assigned_to_email ?? "?")[0].toUpperCase()}
                                     </span>
-                                    {c.assignee_role && (
-                                      <span className={`shrink-0 text-[7px] font-bold tracking-widest border px-1 py-px ${ROLE_COLOR[c.assignee_role] ?? "text-muted-foreground border-border"}`}>
-                                        {ROLE_SHORT[c.assignee_role] ?? c.assignee_role.toUpperCase()}
-                                      </span>
-                                    )}
-                                  </>
-                                ) : (
-                                  <span className="text-[9px] text-muted-foreground/30 italic">unassigned</span>
-                                )}
-                              </div>
+                                  </div>
+                                  <span className="text-xs text-muted-foreground truncate">
+                                    {c.assigned_to_name ?? c.assigned_to_email?.split("@")[0]}
+                                  </span>
+                                  {c.assignee_role && (
+                                    <span className="text-xs text-muted-foreground/60 shrink-0">
+                                      · {ROLE_SHORT[c.assignee_role] ?? c.assignee_role}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <p className="mt-2 text-xs text-muted-foreground/40 italic">Unassigned</p>
+                              )}
                             </Link>
 
-                            {/* ── Note area (not draggable) ── */}
+                            {/* Note area */}
                             <div
-                              className="border-t border-border/40 px-2 py-1.5"
+                              className="border-t border-border/50 px-3 py-2"
                               onMouseDown={e => e.stopPropagation()}
                               onDragStart={e => e.stopPropagation()}
                             >
@@ -500,48 +515,45 @@ export default function Pipeline() {
                                   onBlur={() => saveNote(c.id)}
                                   onKeyDown={e => {
                                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveNote(c.id);
-                                    if (e.key === "Escape") { setEditingNoteId(null); }
+                                    if (e.key === "Escape") setEditingNoteId(null);
                                   }}
-                                  placeholder="Type a note… (Ctrl+Enter to save)"
+                                  placeholder="Add a note… (Ctrl+Enter to save)"
                                   rows={3}
-                                  className="w-full bg-input border border-primary/40 px-2 py-1 text-[10px] text-primary font-mono resize-none focus:outline-none placeholder:text-muted-foreground/30"
+                                  className="w-full bg-surface-2 border border-primary/30 rounded-md px-2 py-1.5 text-xs text-foreground resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 placeholder:text-muted-foreground/40"
                                   draggable={false}
                                 />
                               ) : (
-                                <button
-                                  type="button"
-                                  onClick={e => startEditNote(e, c)}
-                                  className="w-full text-left group/note"
-                                >
+                                <button type="button" onClick={e => startEditNote(e, c)} className="w-full text-left">
                                   {c.analyst_notes ? (
-                                    <p className="text-[10px] text-foreground/70 font-mono leading-relaxed line-clamp-3 group-hover/note:text-primary transition-colors whitespace-pre-wrap">
+                                    <p className="text-xs text-muted-foreground leading-relaxed line-clamp-3 whitespace-pre-wrap hover:text-foreground transition-colors">
                                       {c.analyst_notes}
                                     </p>
                                   ) : (
-                                    <p className="text-[9px] text-muted-foreground/30 tracking-wider italic group-hover/note:text-muted-foreground/60 transition-colors">
-                                      ✎ add note…
+                                    <p className="text-xs text-muted-foreground/40 italic hover:text-muted-foreground/70 transition-colors">
+                                      + Add note
                                     </p>
                                   )}
                                 </button>
                               )}
                             </div>
 
-                            {/* Delete button */}
+                            {/* Delete */}
                             <button
                               onClick={e => deleteCase(e, c.id)}
                               title="Delete case"
-                              className="absolute top-2 right-2 w-4 h-4 flex items-center justify-center text-[10px] text-foreground/20 opacity-0 group-hover:opacity-100 hover:text-destructive transition-all z-10"
+                              className="absolute top-2.5 right-2.5 w-5 h-5 flex items-center justify-center rounded text-muted-foreground/30 opacity-0 group-hover:opacity-100 hover:text-destructive hover:bg-red-50 transition-all"
                             >
-                              ✕
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                              </svg>
                             </button>
                           </div>
                         );
                       })}
 
-                      {/* Drop zone hint at bottom of column */}
                       {isOver && (
-                        <div className="border border-dashed border-primary/30 h-10 flex items-center justify-center text-[9px] text-primary/40 tracking-widest">
-                          DROP HERE
+                        <div className="border-2 border-dashed border-primary/30 rounded-lg h-12 flex items-center justify-center text-xs text-primary/50">
+                          Drop here
                         </div>
                       )}
                     </div>
@@ -553,26 +565,41 @@ export default function Pipeline() {
         )}
       </div>
 
-      {/* ── Project Mapping ──────────────────────────────────────────────── */}
+      {/* ── Progress tracker ─────────────────────────────────────────────── */}
       {visibleCases.length > 0 && (
-        <div className="border border-border bg-surface mt-3">
-          <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface-2">
-            <span className="text-[10px] tracking-widest text-primary font-bold">PROJECT MAPPING</span>
-            <span className="text-[9px] text-muted-foreground/50 tracking-wider">◉ current &nbsp;·&nbsp; ✓ completed &nbsp;·&nbsp; — pending</span>
+        <div className="bg-card rounded-lg border border-border overflow-hidden" style={{ boxShadow: "var(--shadow-panel)" }}>
+          <div className="flex items-center justify-between px-5 py-3.5 border-b border-border bg-surface-2/50">
+            <h2 className="text-sm font-semibold text-foreground">Progress Tracker</h2>
+            <div className="hidden sm:flex items-center gap-4 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-2 h-2 rounded-full bg-primary" />Current stage
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-2 h-2 rounded-full bg-green-500" />Completed
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-2 h-2 rounded-full bg-border" />Pending
+              </span>
+            </div>
           </div>
-          <div className="overflow-x-auto px-4 py-3">
-            <table className="text-[10px] font-mono border-collapse w-full" style={{ minWidth: "860px" }}>
+          <div className="overflow-x-auto">
+            <table className="text-sm border-collapse w-full" style={{ minWidth: "900px" }}>
               <thead>
-                <tr className="border-b border-border text-[8px] tracking-widest text-muted-foreground">
-                  <th className="text-left py-2 pr-4 font-normal sticky left-0 bg-surface z-10" style={{ minWidth: "200px" }}>CASE</th>
-                  <th className="text-left py-2 px-3 font-normal whitespace-nowrap" style={{ minWidth: "80px" }}>AMOUNT</th>
+                <tr className="border-b border-border bg-surface-2/30">
+                  <th className="text-left py-3 px-5 font-medium text-muted-foreground text-xs sticky left-0 bg-surface-2/30 z-10" style={{ minWidth: "200px" }}>
+                    Case
+                  </th>
+                  <th className="text-left py-3 px-4 font-medium text-muted-foreground text-xs" style={{ minWidth: "90px" }}>
+                    Amount
+                  </th>
                   {BUSINESS_STAGES.map(s => (
-                    <th key={s.n} title={s.label} className="py-2 px-1 font-normal text-center" style={{ minWidth: "58px" }}>
-                      <div className="text-muted-foreground/30 text-[7px] mb-0.5">{s.n}</div>
-                      <div className="whitespace-nowrap">{s.short}</div>
+                    <th key={s.n} title={s.label} className="py-3 px-2 font-medium text-muted-foreground text-xs text-center" style={{ minWidth: "62px" }}>
+                      {s.short}
                     </th>
                   ))}
-                  <th className="text-left py-2 px-3 font-normal" style={{ minWidth: "160px" }}>NOTE</th>
+                  <th className="text-left py-3 px-4 font-medium text-muted-foreground text-xs" style={{ minWidth: "160px" }}>
+                    Note
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -581,45 +608,52 @@ export default function Pipeline() {
                   return (
                     <tr
                       key={c.id}
-                      className="border-b border-border/40 hover:bg-surface-2 transition-colors cursor-pointer"
+                      className="border-b border-border/50 hover:bg-surface-2/50 transition-colors cursor-pointer"
                       onClick={() => window.location.href = `/case/${c.id}`}
                     >
-                      <td className="py-2 pr-4 sticky left-0 bg-card z-10 border-r border-border/20">
-                        <div className="text-primary font-bold text-[11px] break-words">{c.client_name}</div>
-                        <div className="text-muted-foreground text-[9px] mt-0.5 flex items-center gap-1.5">
-                          <span>{c.case_code}</span>
-                          <span className="text-accent">{PRODUCTS[c.product_type].short}</span>
-                        </div>
+                      <td className="py-3 px-5 sticky left-0 bg-card z-10 border-r border-border/30">
+                        <p className="text-sm font-semibold text-foreground break-words leading-tight">{c.client_name}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {c.case_code} · {PRODUCTS[c.product_type].short}
+                        </p>
                       </td>
-                      <td className="py-2 px-3 whitespace-nowrap">
+                      <td className="py-3 px-4">
                         {c.deal_amount
-                          ? <span className="text-success">₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr</span>
-                          : <span className="text-muted-foreground/30">—</span>}
+                          ? <span className="text-sm font-semibold text-green-600">₹{Number(c.deal_amount).toLocaleString("en-IN")} Cr</span>
+                          : <span className="text-sm text-muted-foreground/40">—</span>}
                       </td>
                       {BUSINESS_STAGES.map(s => {
                         const isCurrent  = map.current === s.n;
                         const isComplete = map.completed.includes(s.n);
                         return (
-                          <td key={s.n} className={`py-2 px-1 text-center ${isCurrent ? "bg-primary/10" : ""}`}>
-                            {isCurrent  ? <span className="text-primary font-bold text-[13px] leading-none">◉</span>
-                            : isComplete ? <span className="text-success text-[11px]">✓</span>
-                            : <span className="text-muted-foreground/20 text-[10px]">—</span>}
+                          <td key={s.n} className={cn("py-3 px-2 text-center", isCurrent && "bg-primary/10")}>
+                            {isCurrent  ? (
+                              <span className="inline-block w-3 h-3 rounded-full bg-primary" />
+                            ) : isComplete ? (
+                              <svg className="inline-block text-green-500" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            ) : (
+                              <span className="inline-block w-2 h-2 rounded-full bg-border/60" />
+                            )}
                           </td>
                         );
                       })}
-                      <td className="py-2 px-3" onClick={e => e.stopPropagation()}>
+                      <td className="py-3 px-4" onClick={e => e.stopPropagation()}>
                         <div className="flex items-start justify-between gap-2 group/row">
                           <div className="flex-1 min-w-0">
                             {c.analyst_notes
-                              ? <span className="text-foreground/60 text-[9px] line-clamp-2 whitespace-pre-wrap">{c.analyst_notes}</span>
-                              : <span className="text-muted-foreground/20 text-[9px] italic">—</span>}
+                              ? <span className="text-xs text-muted-foreground line-clamp-2 whitespace-pre-wrap">{c.analyst_notes}</span>
+                              : <span className="text-xs text-muted-foreground/30 italic">—</span>}
                           </div>
                           <button
                             onClick={e => removeCase(e, c.id, c.client_name)}
                             title="Delete case"
-                            className="opacity-0 group-hover/row:opacity-100 text-muted-foreground/40 hover:text-destructive transition-all text-[11px] leading-none shrink-0 mt-0.5"
+                            className="opacity-0 group-hover/row:opacity-100 text-muted-foreground/30 hover:text-destructive transition-all shrink-0"
                           >
-                            ×
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
                           </button>
                         </div>
                       </td>

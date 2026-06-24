@@ -27,6 +27,16 @@ Deno.serve(async (req) => {
     const { data: doc } = await supabase.from("financial_documents").select("*").eq("id", document_id).single();
     if (!doc) return new Response(JSON.stringify({ error: "Document not found" }), { status: 404, headers: { ...cors, "Content-Type": "application/json" } });
 
+    // ── Python worker job queue ────────────────────────────────────────────────
+    if (Deno.env.get("PYTHON_SERVICE_ENABLED") === "true" && doc.file_type !== "excel") {
+      await supabase.from("extraction_jobs").insert({
+        case_id, document_id, user_id: user.id,
+        job_type: "gst", payload: {},
+      });
+      await supabase.from("financial_documents").update({ extraction_status: "queued" }).eq("id", document_id);
+      return new Response(JSON.stringify({ ok: true, status: "queued" }), { status: 200, headers: { ...cors, "Content-Type": "application/json" } });
+    }
+
     await supabase.from("financial_documents").update({ extraction_status: "running" }).eq("id", document_id);
 
     let files: FileContent[];
