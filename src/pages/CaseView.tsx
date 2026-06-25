@@ -2233,6 +2233,15 @@ function CaseViewInner() {
     setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
   };
 
+  const patchIcParaSig = async (key: string, sig: { email: string; name: string; at: string }) => {
+    if (!cc) return;
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const existingSigs = ((current.para_sigs as Record<string, unknown>) ?? {});
+    const next = { ...current, para_sigs: { ...existingSigs, [key]: sig } };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
   const addIcComment = async (sectionId: string, text: string) => {
     if (!cc || !user) return;
     const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
@@ -3917,6 +3926,17 @@ function CaseViewInner() {
                       </colgroup>
                       <tbody>
                         {(() => {
+                          // Pre-build section → leaf child labels (for collapsed totals)
+                          const sectionChildMap: Record<string, string[]> = {};
+                          let mapSection: string | null = null;
+                          for (const lbl of labels) {
+                            const ai = typeRows.map(r => (r.line_items as unknown as LineItem[]).find(i => i.label === lbl)).find(Boolean);
+                            if (ai?.is_section) { mapSection = lbl; sectionChildMap[lbl] = []; }
+                            else if (mapSection && !COMPUTED_LABELS.has(lbl) && !GRAND_TOTAL_LABELS.has(lbl)) {
+                              sectionChildMap[mapSection].push(lbl);
+                            }
+                          }
+
                           // Track which section we're in for collapse filtering
                           let currentSection: string | null = null;
                           return labels.map(label => {
@@ -3970,30 +3990,48 @@ function CaseViewInner() {
                             };
 
                             if (isSection) {
-                              // Look up the section's representative total for each year
                               const totalRowLabel = SECTION_TOTAL_MAP[label];
+                              const childLabels = sectionChildMap[label] ?? [];
                               return (
                                 <tr key={label} {...dragProps}
-                                  className="border-t-2 border-border/60 bg-surface select-none group"
+                                  className={`border-t-2 border-border/60 select-none group transition-colors ${isCollapsed ? "bg-primary/5 hover:bg-primary/8" : "bg-surface"}`}
                                 >
                                   <td className="py-1.5 pr-3 pl-1">
                                     <div className="flex items-center gap-1.5">
                                       <button
                                         onClick={() => toggleSection(type, label)}
-                                        className="w-4 h-4 flex items-center justify-center border border-primary/40 text-primary/60 hover:bg-primary/10 hover:border-primary text-[10px] font-bold flex-shrink-0 transition-colors"
+                                        className={`w-4 h-4 flex items-center justify-center border text-[10px] font-bold flex-shrink-0 transition-colors ${isCollapsed ? "border-primary text-primary bg-primary/10 hover:bg-primary/20" : "border-primary/40 text-primary/60 hover:bg-primary/10 hover:border-primary"}`}
                                       >{isCollapsed ? "+" : "−"}</button>
-                                      <span className="text-[10px] font-bold tracking-widest text-foreground uppercase">{label}</span>
+                                      <span className={`text-[10px] font-bold tracking-widest uppercase ${isCollapsed ? "text-primary" : "text-foreground"}`}>{label}</span>
+                                      {isCollapsed && <span className="text-[8px] text-muted-foreground/50 ml-1">{childLabels.length} items</span>}
                                     </div>
                                   </td>
                                   {years.map(fy => {
                                     const fyRow = typeRows.find(r => r.fiscal_year === fy);
                                     const items = fyRow ? (fyRow.line_items as unknown as LineItem[]) : [];
+                                    // Prefer mapped total row; fall back to sum of leaf children
                                     const totalItem = totalRowLabel ? items.find(i => i.label === totalRowLabel) : null;
-                                    const totalVal = totalItem ? (totalItem.override_value ?? totalItem.value) : null;
+                                    let totalVal = totalItem ? (totalItem.override_value ?? totalItem.value) : null;
+                                    if (totalVal == null && childLabels.length > 0) {
+                                      let hasAny = false;
+                                      let sum = 0;
+                                      for (const cl of childLabels) {
+                                        const ci = items.find(i => i.label === cl);
+                                        const cv = ci ? (ci.override_value ?? ci.value) : null;
+                                        if (cv != null) { sum += cv; hasAny = true; }
+                                      }
+                                      if (hasAny) totalVal = sum;
+                                    }
                                     return (
-                                      <td key={fy} className="text-right pr-2 tabular-nums font-bold text-primary/70 text-[11px]">
-                                        {totalVal != null ? totalVal.toLocaleString("en-IN") : ""}
-                                        {abbr && totalVal != null && <span className="text-[8px] text-muted-foreground ml-0.5">{abbr}</span>}
+                                      <td key={fy} className="text-right pr-2 tabular-nums text-[11px]">
+                                        {totalVal != null ? (
+                                          <span className={isCollapsed ? "font-bold text-primary" : "font-semibold text-primary/70"}>
+                                            {totalVal.toLocaleString("en-IN")}
+                                            {abbr && <span className="text-[8px] text-muted-foreground ml-0.5">{abbr}</span>}
+                                          </span>
+                                        ) : (
+                                          isCollapsed ? <span className="text-muted-foreground/30 text-[9px]">—</span> : null
+                                        )}
                                       </td>
                                     );
                                   })}
@@ -4910,6 +4948,7 @@ function CaseViewInner() {
             onDelete={handleDeleteDoc}
             onRetry={handleRetry}
             onPatchSection={patchIcSection}
+            onPatchParaSig={patchIcParaSig}
             onAddComment={addIcComment}
             onResolveComment={resolveIcComment}
             onAnnotationsChange={saveAnnotations}

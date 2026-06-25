@@ -36,6 +36,7 @@ export interface IcNoteShape {
   annotations?: Annotation[];
   cell_edits?: Record<string, Record<string, Record<number, number | null>>>;
   custom_rows?: Record<string, string[]>;
+  para_sigs?: Record<string, { email: string; name: string; at: string }>;
 }
 
 // ── IC colour constants ───────────────────────────────────────────────────────
@@ -354,6 +355,7 @@ export function ICNoteDocument({
   onDelete,
   onRetry,
   onPatchSection,
+  onPatchParaSig,
   onAddComment,
   onResolveComment,
   onAnnotationsChange,
@@ -382,6 +384,7 @@ export function ICNoteDocument({
   onDelete?: (doc: DocRow) => void;
   onRetry?: (doc: DocRow) => void;
   onPatchSection: (sectionId: string, markdown: string) => Promise<void>;
+  onPatchParaSig?: (key: string, sig: { email: string; name: string; at: string }) => Promise<void>;
   onAddComment: (sectionId: string, text: string) => Promise<void>;
   onResolveComment: (commentId: string) => Promise<void>;
   onAnnotationsChange?: (annotations: Annotation[]) => Promise<void>;
@@ -446,6 +449,13 @@ export function ICNoteDocument({
     if (snap.blockIdx >= blocks.length) blocks.push(snap.val);
     else blocks[snap.blockIdx] = snap.val;
     onPatchSection(snap.sectionId, blocks.filter((b, i) => i < blocks.length - 1 || b.trim()).join("\n\n"));
+    if (snap.val.trim()) {
+      onPatchParaSig?.(`${snap.sectionId}:${snap.blockIdx}`, {
+        email: userEmail,
+        name: userEmail.split("@")[0],
+        at: new Date().toISOString(),
+      });
+    }
   };
 
   const handleAddComment = async () => {
@@ -958,6 +968,7 @@ export function ICNoteDocument({
                             </button>
                           );
                         }
+                        const sig = ic.para_sigs?.[`${s.id}:${bi}`];
                         return (
                           <div key={bi} style={{ marginBottom: 4 }}>
                             {isEditing ? (
@@ -977,6 +988,11 @@ export function ICNoteDocument({
                                 onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
                               >
                                 <BulletMd text={block} skipTables={hasPanel} />
+                                {sig && (
+                                  <div style={{ fontSize: 7.5, color: IC.muted, fontFamily: "'Source Serif 4', Georgia, serif", textAlign: "right", marginTop: 3, opacity: 0.7, letterSpacing: "0.03em" }}>
+                                    ✎ {sig.name} · {new Date(sig.at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>

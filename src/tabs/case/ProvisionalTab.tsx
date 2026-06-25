@@ -103,6 +103,23 @@ function fmtN(n: number | null, dec = 2): string {
   return n.toLocaleString("en-IN", { minimumFractionDigits: dec, maximumFractionDigits: dec });
 }
 
+function toL(v: number | null, unit: string): number | null {
+  if (v == null) return null;
+  const u = unit.toLowerCase();
+  if (u === "crores" || u === "crore") return v * 100;
+  if (u === "inr" || u === "rupees" || u === "rs") return v / 1e5;
+  if (u === "thousands") return v / 100;
+  return v;
+}
+function fromL(v: number | null, unit: string): number | null {
+  if (v == null) return null;
+  const u = unit.toLowerCase();
+  if (u === "crores" || u === "crore") return v / 100;
+  if (u === "inr" || u === "rupees" || u === "rs") return v * 1e5;
+  if (u === "thousands") return v * 100;
+  return v;
+}
+
 function growthCls(v: number | null): string {
   if (v == null) return "text-muted-foreground";
   return v > 0 ? "text-success" : v < 0 ? "text-destructive" : "text-muted-foreground";
@@ -908,7 +925,7 @@ function AddPeriodForm({ onAdd, onCancel, existingPeriods }: {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function FinTable({
-  section, periods, labels, showAnnualized, auditedItems,
+  section, periods, labels, showAnnualized, auditedItems, auditedUnit,
   onEdit,
 }: {
   section: "pl" | "bs";
@@ -916,18 +933,24 @@ function FinTable({
   labels: string[];
   showAnnualized: boolean;
   auditedItems: LineItem[] | null;
+  auditedUnit?: string;
   onEdit: (periodId: string, section: "pl" | "bs", label: string, value: number | null) => void;
 }) {
   const [editCell, setEditCell] = useState<{ id: string; label: string } | null>(null);
   const [editVal, setEditVal]   = useState("");
 
   const startEdit = (id: string, label: string, cur: number | null) => {
-    setEditCell({ id, label }); setEditVal(cur != null ? String(cur) : "");
+    const pUnit = periods.find(pp => pp.id === id)?.unit ?? "Lakhs";
+    setEditCell({ id, label });
+    const curL = toL(cur, pUnit);
+    setEditVal(curL != null ? String(parseFloat(curL.toFixed(4))) : "");
   };
   const commit = () => {
     if (!editCell) return;
-    const v = editVal.trim() === "" ? null : parseFloat(editVal);
-    onEdit(editCell.id, section, editCell.label, isNaN(v as number) ? null : v);
+    const pUnit = periods.find(pp => pp.id === editCell.id)?.unit ?? "Lakhs";
+    const vL = editVal.trim() === "" ? null : parseFloat(editVal);
+    const v = fromL(isNaN(vL as number) ? null : vL, pUnit);
+    onEdit(editCell.id, section, editCell.label, v);
     setEditCell(null);
   };
 
@@ -948,7 +971,7 @@ function FinTable({
             {periods.map(p => (
               <th key={p.id} className="text-right pr-2 min-w-[90px]">
                 <div>{p.label}</div>
-                <div className="text-[8px] font-normal text-muted-foreground/60">{p.unit} · {p.months_covered}M</div>
+                <div className="text-[8px] font-normal text-muted-foreground/60">₹ Lakhs · {p.months_covered}M</div>
               </th>
             ))}
             {showAnn && (
@@ -970,28 +993,45 @@ function FinTable({
                 <td className="py-1 pr-4 text-foreground/80">{label}</td>
 
                 {auditedItems && (
-                  <td className="text-right pr-3 tabular-nums text-muted-foreground/60">{fmtN(auditedVal)}</td>
+                  <td className="text-right pr-3 tabular-nums text-muted-foreground/60">{fmtN(toL(auditedVal, auditedUnit ?? "Lakhs"))}</td>
                 )}
 
                 {periods.map(p => {
                   const val    = getv(p[section], label);
                   const isEdit = editCell?.id === p.id && editCell?.label === label;
                   return (
-                    <td key={p.id} className="text-right pr-2 tabular-nums">
+                    <td key={p.id} className="text-right pr-2 py-1">
                       {isEdit ? (
                         <input autoFocus type="number" value={editVal}
                           onChange={e => setEditVal(e.target.value)}
                           onBlur={commit}
                           onKeyDown={e => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditCell(null); }}
-                          className="w-20 bg-input border border-primary px-1 py-0.5 text-right text-xs focus:outline-none font-mono" />
+                          className="w-20 bg-input border border-primary px-1 py-0.5 text-right text-xs focus:outline-none font-mono"
+                          title="Enter value in ₹ Lakhs" />
                       ) : (
-                        <span
+                        <div
                           onClick={() => startEdit(p.id, label, val)}
-                          className={`cursor-pointer hover:text-primary hover:underline hover:underline-offset-2 ${val != null ? "text-foreground" : "text-muted-foreground/30"}`}
-                          title="Click to edit"
+                          className="cursor-pointer hover:text-primary"
+                          title="Click to edit (₹ Lakhs)"
                         >
-                          {val != null ? fmtN(val) : "—"}
-                        </span>
+                          {val != null ? (
+                            <>
+                              <div className="tabular-nums text-foreground text-xs">
+                                {fmtN(toL(val, p.unit))}{" "}
+                                <span className="text-[8px] text-muted-foreground/50 font-normal not-italic">L</span>
+                              </div>
+                              {!/^(lakhs?|lakh)$/i.test(p.unit) && (
+                                <div className="text-[8px] text-muted-foreground/50 tabular-nums leading-tight">
+                                  {/^(inr|rupees?|rs\.?)$/i.test(p.unit)
+                                    ? `₹ ${val.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+                                    : `${fmtN(val, 2)} ${p.unit}`}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-muted-foreground/30">—</span>
+                          )}
+                        </div>
                       )}
                     </td>
                   );
@@ -999,7 +1039,7 @@ function FinTable({
 
                 {showAnn && (
                   <td className="text-right pr-2 tabular-nums text-accent/80 font-medium">
-                    {fmtN(annVal)}
+                    {fmtN(toL(annVal, latestP?.unit ?? "Lakhs"))}
                   </td>
                 )}
               </tr>
@@ -1062,6 +1102,8 @@ export function ProvisionalTab({
   const auditedBS = lastAuditedFY
     ? (auditedBSRows.find(r => r.fiscal_year === lastAuditedFY)?.line_items as unknown as LineItem[] ?? null)
     : null;
+  const auditedPLUnit = auditedPLRows.find(r => r.fiscal_year === lastAuditedFY)?.unit ?? "Lakhs";
+  const auditedBSUnit = auditedBSRows.find(r => r.fiscal_year === lastAuditedFY)?.unit ?? "Lakhs";
 
   const sorted = [...periods].sort((a, b) => {
     if (a.fiscal_year !== b.fiscal_year) return a.fiscal_year - b.fiscal_year;
@@ -1133,13 +1175,12 @@ export function ProvisionalTab({
     return mc >= 12 ? v : (v / mc) * 12;
   }
 
-  const annTurnover = kpiPeriod ? annOrDirect(getv(kpiPeriod.pl, "Turnover"), kpiPeriod.months_covered) : null;
-  const annEbitda   = kpiPeriod ? annOrDirect(getv(kpiPeriod.pl, "EBITDA"),   kpiPeriod.months_covered) : null;
-  const annPat      = kpiPeriod ? annOrDirect(getv(kpiPeriod.pl, "PAT"),       kpiPeriod.months_covered) : null;
-  const auditTurn   = auditedPL ? getv(auditedPL, "Turnover") : null;
-  const auditPat    = auditedPL ? getv(auditedPL, "PAT") : null;
-
-  const unit = viewPeriods[0]?.unit ?? extracted.find(r => r.unit)?.unit ?? "Lakhs";
+  const kpiUnit     = kpiPeriod?.unit ?? "Lakhs";
+  const annTurnover = kpiPeriod ? toL(annOrDirect(getv(kpiPeriod.pl, "Turnover"), kpiPeriod.months_covered), kpiUnit) : null;
+  const annEbitda   = kpiPeriod ? toL(annOrDirect(getv(kpiPeriod.pl, "EBITDA"),   kpiPeriod.months_covered), kpiUnit) : null;
+  const annPat      = kpiPeriod ? toL(annOrDirect(getv(kpiPeriod.pl, "PAT"),       kpiPeriod.months_covered), kpiUnit) : null;
+  const auditTurn   = auditedPL ? toL(getv(auditedPL, "Turnover"), auditedPLUnit) : null;
+  const auditPat    = auditedPL ? toL(getv(auditedPL, "PAT"), auditedPLUnit) : null;
 
   return (
     <div className="space-y-3">
@@ -1238,17 +1279,17 @@ export function ProvisionalTab({
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <Panel title={kpiPeriod && kpiPeriod.months_covered >= 12 ? "ANNUAL TURNOVER" : "ANNUALIZED TURNOVER"} ticker={kpiPeriod?.label ?? ""}>
             <div className="text-2xl font-bold text-primary glow tabular-nums">{fmtN(annTurnover)}</div>
-            <div className="terminal-label mt-1">{fmtUnit(unit)} · {kpiPeriod && kpiPeriod.months_covered >= 12 ? "Full Year" : "Projected 12M"}</div>
+            <div className="terminal-label mt-1">₹ Lakhs · {kpiPeriod && kpiPeriod.months_covered >= 12 ? "Full Year" : "Projected 12M"}</div>
             {auditTurn && <div className={`text-[10px] mt-0.5 ${growthCls(annTurnover && auditTurn ? annTurnover - auditTurn : null)}`}>vs audited FY{lastAuditedFY}: {growthLabel(annTurnover, auditTurn)}</div>}
           </Panel>
           <Panel title={kpiPeriod && kpiPeriod.months_covered >= 12 ? "ANNUAL EBITDA" : "ANNUALIZED EBITDA"} ticker={kpiPeriod?.label ?? ""}>
             <div className="text-2xl font-bold text-warning glow tabular-nums">{fmtN(annEbitda)}</div>
-            <div className="terminal-label mt-1">{fmtUnit(unit)}</div>
+            <div className="terminal-label mt-1">₹ Lakhs</div>
             {annTurnover && annEbitda ? <div className="text-[10px] mt-0.5 text-muted-foreground">Margin: {((annEbitda / annTurnover) * 100).toFixed(1)}%</div> : null}
           </Panel>
           <Panel title={kpiPeriod && kpiPeriod.months_covered >= 12 ? "ANNUAL PAT" : "ANNUALIZED PAT"} ticker={kpiPeriod?.label ?? ""}>
             <div className={`text-2xl font-bold glow tabular-nums ${(annPat ?? 0) >= 0 ? "text-success" : "text-destructive"}`}>{fmtN(annPat)}</div>
-            <div className="terminal-label mt-1">{fmtUnit(unit)}</div>
+            <div className="terminal-label mt-1">₹ Lakhs</div>
             {auditPat && <div className={`text-[10px] mt-0.5 ${growthCls(annPat && auditPat ? annPat - auditPat : null)}`}>vs audited: {growthLabel(annPat, auditPat)}</div>}
           </Panel>
           <Panel title="PERIODS LOADED" ticker="PROVISIONAL DATA">
@@ -1285,7 +1326,8 @@ export function ProvisionalTab({
                   const src = ann ?? latest;
                   if (!src) return null;
                   const v = getv(src.pl, label);
-                  return src.months_covered >= 12 ? v : (v != null ? (v / src.months_covered) * 12 : null);
+                  const raw = src.months_covered >= 12 ? v : (v != null ? (v / src.months_covered) * 12 : null);
+                  return toL(raw, src.unit ?? "Lakhs");
                 });
                 const prevVal = vals[vals.length - 2];
                 const curVal  = vals[vals.length - 1];
@@ -1347,10 +1389,10 @@ export function ProvisionalTab({
 
       {/* ── P&L Table ────────────────────────────────────────────────────────── */}
       {viewPeriods.length > 0 ? (
-        <Panel title={`PROVISIONAL P&L${activeFY ? ` · FY${activeFY}` : ""}`} ticker={`${fmtUnit(unit)} · CLICK CELL TO EDIT`}>
+        <Panel title={`PROVISIONAL P&L${activeFY ? ` · FY${activeFY}` : ""}`} ticker="₹ Lakhs · CLICK CELL TO EDIT">
           <FinTable
             section="pl" periods={viewPeriods} labels={PL_LABELS}
-            showAnnualized={showAnn} auditedItems={auditedPL}
+            showAnnualized={showAnn} auditedItems={auditedPL} auditedUnit={auditedPLUnit}
             onEdit={handleEdit}
           />
           {showAnn && viewPeriods.some(p => p.months_covered < 12) && (
@@ -1383,7 +1425,7 @@ export function ProvisionalTab({
       {viewPeriods.length > 0 && (
         <Panel
           title={`PROVISIONAL BALANCE SHEET${activeFY ? ` · FY${activeFY}` : ""}`}
-          ticker="CLICK CELL TO EDIT"
+          ticker="₹ Lakhs · CLICK CELL TO EDIT"
           actions={
             <button onClick={() => setShowBS(s => !s)} className="text-[9px] border border-border px-2 py-0.5 text-muted-foreground hover:text-foreground tracking-widest">
               {showBS ? "COLLAPSE" : "EXPAND"}
@@ -1393,7 +1435,7 @@ export function ProvisionalTab({
           {showBS && (
             <FinTable
               section="bs" periods={viewPeriods} labels={BS_LABELS}
-              showAnnualized={false} auditedItems={auditedBS}
+              showAnnualized={false} auditedItems={auditedBS} auditedUnit={auditedBSUnit}
               onEdit={handleEdit}
             />
           )}
