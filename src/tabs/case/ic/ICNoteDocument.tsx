@@ -1,11 +1,12 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, Fragment } from "react";
 import { IC_SECTIONS } from "@/features/credit/domain";
-import type { CaseRow, ExtractedRow, RatioRow } from "@/features/case/types";
+import type { CaseRow, ExtractedRow, RatioRow, DocRow } from "@/features/case/types";
 import {
   ICSummaryPanel, ICHistoricalTables, ICProjectionsTable,
   ICRatioTable, ICClientProfile, ICInvestmentStructure,
   ICRehbarHistory, ICVisitReference, ICProductSpecifics,
 } from "./ICComponents";
+import { ProjectionsTab } from "@/tabs/case/ProjectionsTab";
 import { ICAnnotationLayer, annotationsToSvgString } from "./ICAnnotationLayer";
 import type { Annotation, DrawTool } from "./ICAnnotationLayer";
 
@@ -164,7 +165,8 @@ function BulletMd({ text, skipTables = false }: { text: string; skipTables?: boo
 // ── Section panel dispatcher ──────────────────────────────────────────────────
 
 function SectionPanel({
-  sectionId, cc, extracted, ratios, cellEdits, customRows, onCellEdit, onAddRow,
+  sectionId, cc, extracted, ratios, cellEdits, customRows, onCellEdit, onAddRow, onCasePatch, onRatioPatch, company, directors,
+  busy, progress, progressLabel, docs, onGenerateNote, onDelete, onRetry,
 }: {
   sectionId: string;
   cc: CaseRow;
@@ -174,6 +176,17 @@ function SectionPanel({
   customRows?: Record<string, string[]>;
   onCellEdit?: (tableKey: string, rowLabel: string, fy: number, val: number | null) => void;
   onAddRow?: (tableKey: string, label: string) => void;
+  onCasePatch?: (field: string, val: string | number | null) => Promise<void>;
+  onRatioPatch?: (ratioId: string, field: "ratio_value" | "benchmark", val: number | null) => Promise<void>;
+  company?: Record<string, string | null> | null;
+  directors?: Record<string, string | null>[] | null;
+  busy?: boolean;
+  progress?: number;
+  progressLabel?: string;
+  docs?: DocRow[];
+  onGenerateNote?: () => void;
+  onDelete?: (doc: DocRow) => void;
+  onRetry?: (doc: DocRow) => void;
 }) {
   const provisional = ((cc.ic_note as Record<string, unknown> | null)?.provisional ?? []) as Array<{ fiscal_year: number; months_covered?: number; pl?: Array<{ label: string; value: number | null; override_value?: number | null }>; bs?: Array<{ label: string; value: number | null; override_value?: number | null }> }>;
 
@@ -181,7 +194,7 @@ function SectionPanel({
   const projCellEdits = cellEdits?.["projections"] as Record<string, Record<number, number>> | undefined;
 
   switch (sectionId) {
-    case "executive_summary":      return <ICSummaryPanel cc={cc} ratios={ratios} />;
+    case "executive_summary":      return <ICSummaryPanel cc={cc} ratios={ratios} onCasePatch={onCasePatch} onRatioPatch={onRatioPatch} company={company} />;
     case "historical_financial":   return (
       <ICHistoricalTables
         extracted={extracted}
@@ -193,17 +206,21 @@ function SectionPanel({
       />
     );
     case "projections":            return (
-      <ICProjectionsTable
+      <ProjectionsTab
+        cc={cc}
         extracted={extracted}
-        provisional={provisional}
-        cellEdits={projCellEdits}
-        customRows={customRows?.["projections"]}
-        onCellEdit={(rowLabel, fy, val) => onCellEdit?.("projections", rowLabel, fy, val)}
-        onAddRow={(label) => onAddRow?.("projections", label)}
+        busy={busy ?? false}
+        progress={progress ?? 0}
+        progressLabel={progressLabel ?? ""}
+        onGenerateNote={onGenerateNote ?? (() => {})}
+        docs={docs ?? []}
+        onDelete={onDelete}
+        onRetry={onRetry}
+        embedded={true}
       />
     );
     case "key_ratios":             return <ICRatioTable ratios={ratios} />;
-    case "client_promoter":        return <ICClientProfile cc={cc} />;
+    case "client_promoter":        return <ICClientProfile cc={cc} company={company} directors={directors as Parameters<typeof ICClientProfile>[0]["directors"]} />;
     case "investment_structure":   return <ICInvestmentStructure cc={cc} />;
     case "rehbar_funding_history": return <ICRehbarHistory cc={cc} />;
     case "visit_reference":        return <ICVisitReference cc={cc} />;
@@ -314,13 +331,22 @@ export function ICNoteDocument({
   ic,
   userEmail,
   busy,
+  progress,
+  progressLabel,
+  docs,
   onGenerate,
+  onDelete,
+  onRetry,
   onPatchSection,
   onAddComment,
   onResolveComment,
   onAnnotationsChange,
   onCellEdit,
   onAddRow,
+  onCasePatch,
+  onRatioPatch,
+  company,
+  directors,
 }: {
   cc: CaseRow;
   extracted: ExtractedRow[];
@@ -328,16 +354,24 @@ export function ICNoteDocument({
   ic: IcNoteShape;
   userEmail: string;
   busy?: boolean;
+  progress?: number;
+  progressLabel?: string;
+  docs?: DocRow[];
   onGenerate: (notes?: string) => void;
+  onDelete?: (doc: DocRow) => void;
+  onRetry?: (doc: DocRow) => void;
   onPatchSection: (sectionId: string, markdown: string) => Promise<void>;
   onAddComment: (sectionId: string, text: string) => Promise<void>;
   onResolveComment: (commentId: string) => Promise<void>;
   onAnnotationsChange?: (annotations: Annotation[]) => Promise<void>;
   onCellEdit?: (tableKey: string, rowLabel: string, fy: number, val: number | null) => Promise<void>;
   onAddRow?: (tableKey: string, label: string) => Promise<void>;
+  onCasePatch?: (field: string, val: string | number | null) => Promise<void>;
+  onRatioPatch?: (ratioId: string, field: "ratio_value" | "benchmark", val: number | null) => Promise<void>;
+  company?: Record<string, string | null> | null;
+  directors?: Record<string, string | null>[] | null;
 }) {
-  const [editingSection, setEditingSection]             = useState<string | null>(null);
-  const [draftText, setDraftText]                       = useState("");
+  const [editBlock, setEditBlock]                       = useState<{ sectionId: string; blockIdx: number; val: string } | null>(null);
   const [showComments, setShowComments]                 = useState(false);
   const [activeCommentSection, setActiveCommentSection] = useState<string | null>(null);
   const [newCommentText, setNewCommentText]             = useState("");
@@ -348,7 +382,6 @@ export function ICNoteDocument({
   const [drawTool, setDrawTool]                         = useState<DrawTool>("pen");
   const [drawColor, setDrawColor]                       = useState("#e74c3c");
   const [drawWidth, setDrawWidth]                       = useState(2);
-  const saveTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sectionRefs    = useRef<Record<string, HTMLDivElement | null>>({});
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -379,21 +412,18 @@ export function ICNoteDocument({
 
   const totalComments = (ic.comments ?? []).filter(c => !c.resolved).length;
 
-  const startEdit = (id: string) => {
-    setEditingSection(id);
-    setDraftText(ic.sections?.[id]?.markdown ?? "");
-  };
+  const splitBlocks = (md: string): string[] =>
+    md.split(/\n\n+/).filter((_, i, arr) => i < arr.length - 1 || arr[i].trim() !== "");
 
-  const handleTextChange = (id: string, text: string) => {
-    setDraftText(text);
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => onPatchSection(id, text), 1200);
-  };
-
-  const endEdit = (id: string) => {
-    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
-    onPatchSection(id, draftText);
-    setEditingSection(null);
+  const commitBlockEdit = () => {
+    if (!editBlock) return;
+    const snap = editBlock;
+    setEditBlock(null);
+    const currentMd = ic.sections?.[snap.sectionId]?.markdown ?? "";
+    const blocks = currentMd.split(/\n\n+/);
+    if (snap.blockIdx >= blocks.length) blocks.push(snap.val);
+    else blocks[snap.blockIdx] = snap.val;
+    onPatchSection(snap.sectionId, blocks.filter((b, i) => i < blocks.length - 1 || b.trim()).join("\n\n"));
   };
 
   const handleAddComment = async () => {
@@ -414,6 +444,16 @@ export function ICNoteDocument({
   // ── No IC note state ──────────────────────────────────────────────────────
 
   if (!ic.sections) {
+    // Required fields validation
+    const REQUIRED_FIELDS: { field: keyof CaseRow; label: string }[] = [
+      { field: "client_name",   label: "Client Name" },
+      { field: "deal_amount",   label: "Facility Amount (₹ Cr)" },
+      { field: "tenure_months", label: "Tenure (months)" },
+      { field: "industry",      label: "Industry" },
+    ];
+    const missing = REQUIRED_FIELDS.filter(f => !cc[f.field]);
+    const canGenerate = missing.length === 0;
+
     return (
       <div className="ic-document" style={{ background: IC.cream, border: `1px solid ${IC.rule}`, minHeight: "70vh", display: "flex", flexDirection: "column" }}>
         {/* Letterhead */}
@@ -431,21 +471,71 @@ export function ICNoteDocument({
           </div>
         </div>
 
-        {/* Empty state body */}
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "48px 32px" }}>
-          <div style={{ maxWidth: 480, textAlign: "center" }}>
-            <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 22, fontWeight: 700, color: IC.navy, marginBottom: 10 }}>
-              Generate IC Appraisal Note
+        {/* Pre-generation body */}
+        <div style={{ flex: 1, padding: "32px 40px", overflowY: "auto" }}>
+          <div style={{ maxWidth: 640, margin: "0 auto" }}>
+            <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 20, fontWeight: 700, color: IC.navy, marginBottom: 6 }}>
+              Pre-Generation Checklist
             </div>
-            <div style={{ fontSize: 12, color: IC.muted, lineHeight: 1.7, fontFamily: "'Source Serif 4', Georgia, serif", marginBottom: 28 }}>
-              {busy
-                ? "Claude is drafting all 12 sections with per-section RAG retrieval. This takes 60–90 seconds."
-                : "Run ratio analysis first, then generate the 30-section IC appraisal note with RAG-enriched content."}
+            <div style={{ fontSize: 11, color: IC.muted, lineHeight: 1.7, fontFamily: "'Source Serif 4', Georgia, serif", marginBottom: 24 }}>
+              The following information must be complete before the IC Appraisal Note can be generated.
+              Click any field in the Case Summary below to edit it directly.
             </div>
 
-            {!busy && (
-              <>
-                <div style={{ textAlign: "left", marginBottom: 18 }}>
+            {/* Required fields status */}
+            <div style={{ border: `1px solid ${IC.rule}`, borderRadius: 6, marginBottom: 24, overflow: "hidden" }}>
+              <div style={{ background: IC.navy, padding: "8px 16px", fontSize: 8, letterSpacing: "0.14em", fontWeight: 700, color: IC.goldLt, textTransform: "uppercase", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                Required Fields
+              </div>
+              <div style={{ padding: "4px 0" }}>
+                {REQUIRED_FIELDS.map(({ field, label }) => {
+                  const val = cc[field];
+                  const ok = !!val;
+                  return (
+                    <div key={field} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 16px", borderBottom: `1px solid rgba(212,201,176,0.35)` }}>
+                      <span style={{ fontSize: 12, color: ok ? "#1A4A2E" : "#6B1A1A", flexShrink: 0 }}>{ok ? "✓" : "○"}</span>
+                      <span style={{ fontSize: 10.5, fontFamily: "'Source Serif 4', Georgia, serif", color: ok ? IC.ink : "#6B1A1A", flex: 1 }}>{label}</span>
+                      <span style={{ fontSize: 10, color: ok ? IC.muted : "#9B4A4A", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                        {val ? String(val) : "Not set — edit in Case Summary below"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Case Summary with inline editing */}
+            <div style={{ border: `1px solid ${IC.rule}`, borderRadius: 6, marginBottom: 24, overflow: "hidden" }}>
+              <div style={{ background: IC.navy, padding: "8px 16px", fontSize: 8, letterSpacing: "0.14em", fontWeight: 700, color: IC.goldLt, textTransform: "uppercase", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                Case Summary — click any cell to edit
+              </div>
+              <div style={{ padding: 16 }}>
+                <ICSummaryPanel cc={cc} ratios={ratios} onCasePatch={onCasePatch} onRatioPatch={onRatioPatch} company={company} />
+              </div>
+            </div>
+
+            {/* Company Details */}
+            {company && (
+              <div style={{ border: `1px solid ${IC.rule}`, borderRadius: 6, marginBottom: 24, overflow: "hidden" }}>
+                <div style={{ background: IC.navy, padding: "8px 16px", fontSize: 8, letterSpacing: "0.14em", fontWeight: 700, color: IC.goldLt, textTransform: "uppercase", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                  Company Details — MCA / Corpository Profile
+                </div>
+                <div style={{ padding: 16 }}>
+                  <ICClientProfile cc={cc} company={company} directors={directors as Parameters<typeof ICClientProfile>[0]["directors"]} />
+                </div>
+              </div>
+            )}
+
+            {/* Generate / busy */}
+            {!busy ? (
+              <div>
+                {!canGenerate && (
+                  <div style={{ background: "#F3EAEA", border: "1px solid #D4B0B0", borderRadius: 4, padding: "10px 16px", marginBottom: 16, fontSize: 10.5, color: "#6B1A1A", fontFamily: "'Source Serif 4', Georgia, serif", lineHeight: 1.6 }}>
+                    ⚠ Please complete the required fields above before generating the IC note.
+                    Missing: {missing.map(f => f.label).join(", ")}.
+                  </div>
+                )}
+                <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: 8, letterSpacing: "0.14em", color: IC.gold, textTransform: "uppercase", fontWeight: 700, marginBottom: 6, fontFamily: "'Source Serif 4', Georgia, serif" }}>
                     Analyst context (optional)
                   </div>
@@ -458,16 +548,28 @@ export function ICNoteDocument({
                   />
                 </div>
                 <button
-                  onClick={() => onGenerate(reanalyseNotes.trim() || undefined)}
-                  style={{ background: IC.navy, color: IC.cream, padding: "12px 32px", fontSize: 10, letterSpacing: "0.14em", fontWeight: 700, border: "none", cursor: "pointer", fontFamily: "'Source Serif 4', Georgia, serif", textTransform: "uppercase", borderRadius: 3 }}
+                  onClick={() => canGenerate && onGenerate(reanalyseNotes.trim() || undefined)}
+                  disabled={!canGenerate}
+                  style={{
+                    background: canGenerate ? IC.navy : "#B0AFA8",
+                    color: IC.cream,
+                    padding: "12px 32px",
+                    fontSize: 10,
+                    letterSpacing: "0.14em",
+                    fontWeight: 700,
+                    border: "none",
+                    cursor: canGenerate ? "pointer" : "not-allowed",
+                    fontFamily: "'Source Serif 4', Georgia, serif",
+                    textTransform: "uppercase",
+                    borderRadius: 3,
+                    opacity: canGenerate ? 1 : 0.65,
+                  }}
                 >
                   Generate 12-Section IC Note →
                 </button>
-              </>
-            )}
-
-            {busy && (
-              <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "center" }}>
+              </div>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ width: 6, height: 6, borderRadius: "50%", background: IC.gold, animation: "pulse 1.4s ease-in-out infinite" }} />
                 <span style={{ fontSize: 10, color: IC.muted, fontFamily: "'Source Serif 4', Georgia, serif", letterSpacing: "0.06em" }}>
                   Generating — please wait…
@@ -490,6 +592,7 @@ export function ICNoteDocument({
 
   return (
     <div
+      id="ic-note-doc"
       className="ic-document"
       style={{ background: IC.cream, border: `1px solid ${IC.rule}`, display: "flex", flexDirection: "column", minHeight: "80vh" }}
     >
@@ -536,7 +639,7 @@ export function ICNoteDocument({
         </div>
 
         {/* Toolbar */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 28px", borderTop: `1px solid rgba(212,201,176,0.1)` }}>
+        <div data-no-print="true" style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 28px", borderTop: `1px solid rgba(212,201,176,0.1)` }}>
           <button
             onClick={() => setShowComments(v => !v)}
             style={{
@@ -632,10 +735,10 @@ export function ICNoteDocument({
       </div>
 
       {/* ── Body: nav sidebar + document content + comments ─────────────────── */}
-      <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
+      <div id="ic-note-body-row" style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
 
         {/* Left nav sidebar */}
-        <div style={{ width: 188, flexShrink: 0, background: IC.navy, overflowY: "auto", borderRight: `1px solid rgba(212,201,176,0.12)` }}>
+        <div data-no-print="true" style={{ width: 188, flexShrink: 0, background: IC.navy, overflowY: "auto", borderRight: `1px solid rgba(212,201,176,0.12)` }}>
           <div style={{ padding: "14px 0 8px" }}>
             <div style={{ fontSize: 7, letterSpacing: "0.18em", color: "rgba(196,160,74,0.45)", textTransform: "uppercase", fontWeight: 700, padding: "0 14px 8px", fontFamily: "'Source Serif 4', Georgia, serif", borderBottom: `1px solid rgba(212,201,176,0.1)`, marginBottom: 4 }}>
               Sections
@@ -681,11 +784,11 @@ export function ICNoteDocument({
         </div>
 
         {/* Document content */}
-        <div ref={contentScrollRef} style={{ flex: 1, overflowY: "auto", background: IC.cream, position: "relative" }}>
+        <div id="ic-note-scroll" ref={contentScrollRef} style={{ flex: 1, overflowY: "auto", background: IC.cream, position: "relative" }}>
 
           {/* Regeneration overlay */}
           {busy && (
-            <div style={{
+            <div data-no-print="true" style={{
               position: "sticky", top: 0, left: 0, right: 0, zIndex: 20,
               background: `rgba(15,27,45,0.92)`, backdropFilter: "blur(3px)",
               padding: "14px 28px", display: "flex", alignItems: "center", gap: 14,
@@ -703,15 +806,15 @@ export function ICNoteDocument({
             </div>
           )}
 
-          {/* 12 Sections */}
+          {/* 12 Sections — TOC injected after Section I */}
           {IC_SECTIONS.map((s, idx) => {
             const md = ic.sections?.[s.id]?.markdown ?? "";
             const commentCount = activeCommentCount(s.id);
             const hasPanel = hasDataPanel(s.id);
 
             return (
+              <Fragment key={s.id}>
               <div
-                key={s.id}
                 ref={el => { sectionRefs.current[s.id] = el; }}
                 id={`sec-${s.id}`}
                 style={{
@@ -751,12 +854,6 @@ export function ICNoteDocument({
                     >
                       + Note
                     </button>
-                    <button
-                      onClick={() => startEdit(s.id)}
-                      style={{ fontSize: 7.5, letterSpacing: "0.1em", color: IC.muted, border: `1px solid ${IC.rule}`, padding: "3px 8px", cursor: "pointer", background: "transparent", borderRadius: 3, fontFamily: "inherit", textTransform: "uppercase" }}
-                    >
-                      ✎ Edit
-                    </button>
                   </div>
                 </div>
 
@@ -775,35 +872,92 @@ export function ICNoteDocument({
                       customRows={ic.custom_rows}
                       onCellEdit={onCellEdit}
                       onAddRow={onAddRow}
+                      onCasePatch={onCasePatch}
+                      onRatioPatch={onRatioPatch}
+                      company={company}
+                      directors={directors}
+                      busy={busy}
+                      progress={progress}
+                      progressLabel={progressLabel}
+                      docs={docs}
+                      onGenerateNote={() => onGenerate()}
+                      onDelete={onDelete}
+                      onRetry={onRetry}
                     />
                   </div>
                 )}
 
-                {/* Analytical observations */}
-                {editingSection === s.id ? (
-                  <textarea
-                    autoFocus
-                    value={draftText}
-                    onChange={e => handleTextChange(s.id, e.target.value)}
-                    onBlur={() => endEdit(s.id)}
-                    style={{ width: "100%", minHeight: 120, background: "rgba(15,27,45,0.04)", border: `1px solid ${IC.gold}`, padding: "10px 12px", fontSize: 11, color: IC.ink, resize: "vertical", outline: "none", fontFamily: "'Source Serif 4', Georgia, serif", borderRadius: 3, boxSizing: "border-box" }}
-                  />
-                ) : (
-                  <div
-                    onClick={() => startEdit(s.id)}
-                    style={{ cursor: "pointer", padding: "4px 6px", borderRadius: 3, transition: "background 0.15s" }}
-                    onMouseEnter={e => (e.currentTarget.style.background = "rgba(139,105,20,0.04)")}
-                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-                  >
-                    {md ? (
-                      <BulletMd text={md} skipTables={hasPanel} />
+                {/* Analytical observations — per-block inline editing */}
+                {(() => {
+                  const blocks = md ? splitBlocks(md) : [];
+                  const allBlocks = [...blocks, ""];  // trailing empty slot = "add paragraph"
+
+                  if (blocks.length === 0) {
+                    const isEditing = editBlock?.sectionId === s.id && editBlock.blockIdx === 0;
+                    return isEditing ? (
+                      <textarea
+                        autoFocus
+                        value={editBlock.val}
+                        onChange={e => setEditBlock(prev => prev ? { ...prev, val: e.target.value } : null)}
+                        onBlur={commitBlockEdit}
+                        onKeyDown={e => { if (e.key === "Escape") setEditBlock(null); }}
+                        style={{ width: "100%", minHeight: 72, background: "rgba(15,27,45,0.04)", border: `1px solid ${IC.gold}`, padding: "8px 10px", fontSize: 11, color: IC.ink, resize: "vertical", outline: "none", fontFamily: "'Source Serif 4', Georgia, serif", borderRadius: 3, boxSizing: "border-box" }}
+                      />
                     ) : (
-                      <div style={{ fontSize: 10, color: IC.muted, fontStyle: "italic", padding: "8px 0 4px 14px", borderLeft: `2px dashed ${IC.rule}`, fontFamily: "'Source Serif 4', Georgia, serif" }}>
-                        No AI analysis generated — click to add manually, or use Re-analyse to regenerate.
+                      <div
+                        onClick={() => setEditBlock({ sectionId: s.id, blockIdx: 0, val: "" })}
+                        style={{ cursor: "text", padding: "8px 14px", borderLeft: `2px dashed ${IC.rule}`, borderRadius: 3 }}
+                      >
+                        <span style={{ fontSize: 10, color: IC.muted, fontStyle: "italic", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                          No AI analysis generated — click to add text, or use Re-analyse to regenerate.
+                        </span>
                       </div>
-                    )}
-                  </div>
-                )}
+                    );
+                  }
+
+                  return (
+                    <div>
+                      {allBlocks.map((block, bi) => {
+                        const isEditing = editBlock?.sectionId === s.id && editBlock.blockIdx === bi;
+                        const isAddSlot = bi === blocks.length;
+                        if (isAddSlot && !isEditing) {
+                          return (
+                            <button
+                              key={bi}
+                              onClick={() => setEditBlock({ sectionId: s.id, blockIdx: bi, val: "" })}
+                              style={{ marginTop: 4, fontSize: 8, padding: "2px 8px", border: `1px dashed rgba(139,105,20,0.25)`, background: "transparent", color: "rgba(139,105,20,0.5)", cursor: "pointer", borderRadius: 3, fontFamily: "inherit" }}
+                            >
+                              + Add paragraph
+                            </button>
+                          );
+                        }
+                        return (
+                          <div key={bi} style={{ marginBottom: 4 }}>
+                            {isEditing ? (
+                              <textarea
+                                autoFocus
+                                value={editBlock.val}
+                                onChange={e => setEditBlock(prev => prev ? { ...prev, val: e.target.value } : null)}
+                                onBlur={commitBlockEdit}
+                                onKeyDown={e => { if (e.key === "Escape") setEditBlock(null); }}
+                                style={{ width: "100%", minHeight: 56, background: "rgba(15,27,45,0.04)", border: `1px solid ${IC.gold}`, padding: "7px 10px", fontSize: 11, color: IC.ink, resize: "vertical", outline: "none", fontFamily: "'Source Serif 4', Georgia, serif", borderRadius: 3, boxSizing: "border-box" }}
+                              />
+                            ) : (
+                              <div
+                                onClick={() => setEditBlock({ sectionId: s.id, blockIdx: bi, val: block })}
+                                style={{ cursor: "text", padding: "3px 6px", borderRadius: 3, transition: "background 0.12s" }}
+                                onMouseEnter={e => (e.currentTarget.style.background = "rgba(139,105,20,0.05)")}
+                                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                              >
+                                <BulletMd text={block} skipTables={hasPanel} />
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
 
                 {/* Section footer rule */}
                 {idx < IC_SECTIONS.length - 1 && (
@@ -816,6 +970,51 @@ export function ICNoteDocument({
                   </div>
                 )}
               </div>
+
+              {/* Table of Contents — page 2, right after Executive Summary */}
+              {idx === 0 && (
+                <div
+                  ref={el => { sectionRefs.current["__toc__"] = el; }}
+                  style={{ padding: "32px 36px 28px", borderBottom: `1px solid ${IC.rule}`, background: IC.cream }}
+                >
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 20 }}>
+                    <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 28, fontWeight: 900, color: IC.gold, lineHeight: 1, flexShrink: 0 }}>
+                      TOC
+                    </div>
+                    <div style={{ flex: 1, borderLeft: `2px solid ${IC.navy}`, paddingLeft: 12 }}>
+                      <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 13, fontWeight: 700, color: IC.navy, letterSpacing: "0.02em" }}>
+                        TABLE OF CONTENTS
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ height: 1, background: IC.rule, marginBottom: 18 }} />
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <tbody>
+                      {IC_SECTIONS.map(sec => (
+                        <tr
+                          key={sec.id}
+                          onClick={() => scrollToSection(sec.id)}
+                          style={{ cursor: "pointer", borderBottom: `1px solid rgba(212,201,176,0.4)` }}
+                        >
+                          <td style={{ width: 36, padding: "9px 0", fontFamily: "'Playfair Display', Georgia, serif", fontSize: 13, fontWeight: 700, color: IC.gold }}>
+                            {sec.roman}
+                          </td>
+                          <td style={{ padding: "9px 0", fontFamily: "'Source Serif 4', Georgia, serif", fontSize: 11, color: IC.ink, fontWeight: 600 }}>
+                            {sec.title}
+                          </td>
+                          <td style={{ padding: "9px 0 9px 12px", fontFamily: "'Source Serif 4', Georgia, serif", fontSize: 9.5, color: IC.muted, textAlign: "right", whiteSpace: "nowrap" }}>
+                            {ic.sections?.[sec.id]?.markdown ? "●" : "○"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div style={{ marginTop: 12, fontSize: 8.5, color: IC.muted, fontFamily: "'Source Serif 4', Georgia, serif", fontStyle: "italic" }}>
+                    ● Section generated · ○ Section pending · Click any row to jump to that section
+                  </div>
+                </div>
+              )}
+              </Fragment>
             );
           })}
 
@@ -941,6 +1140,7 @@ export function ICNoteDocument({
 
         {/* Comments sidebar */}
         {showComments && (
+          <div data-no-print="true" style={{ display: "contents" }}>
           <CommentsPanel
             ic={ic}
             activeSection={activeCommentSection}
@@ -950,6 +1150,7 @@ export function ICNoteDocument({
             onResolveComment={onResolveComment}
             onClose={() => { setShowComments(false); setActiveCommentSection(null); }}
           />
+          </div>
         )}
       </div>
     </div>

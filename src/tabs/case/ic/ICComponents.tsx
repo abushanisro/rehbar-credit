@@ -36,10 +36,102 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${cls}`}>{label}</span>;
 }
 
-export function ICSummaryPanel({ cc, ratios }: { cc: CaseRow; ratios: RatioRow[] }) {
+export function ICSummaryPanel({
+  cc, ratios, onCasePatch, onRatioPatch, company,
+}: {
+  cc: CaseRow;
+  ratios: RatioRow[];
+  onCasePatch?: (field: string, val: string | number | null) => Promise<void>;
+  onRatioPatch?: (ratioId: string, field: "ratio_value" | "benchmark", val: number | null) => Promise<void>;
+  company?: Record<string, string | null> | null;
+}) {
+  type EC =
+    | { kind: "case"; field: string; val: string }
+    | { kind: "ratio"; ratioId: string; field: "ratio_value" | "benchmark"; val: string };
+
+  const [editCell, setEditCell] = useState<EC | null>(null);
+
+  const NUM_FIELDS = ["deal_amount", "tenure_months", "expected_irr"];
+
+  const commitCase = async (field: string, val: string) => {
+    if (!onCasePatch) return;
+    setEditCell(null);
+    const parsed = NUM_FIELDS.includes(field) ? (val.trim() === "" ? null : parseFloat(val)) : (val.trim() || null);
+    await onCasePatch(field, parsed);
+  };
+
+  const commitRatio = async (ratioId: string, field: "ratio_value" | "benchmark", val: string) => {
+    if (!onRatioPatch) return;
+    setEditCell(null);
+    await onRatioPatch(ratioId, field, val.trim() === "" ? null : parseFloat(val));
+  };
+
+  const caseTd = (field: string, display: string, rawVal: string) => {
+    const isEditing = editCell?.kind === "case" && editCell.field === field;
+    const editable = !!onCasePatch;
+    if (isEditing && editCell?.kind === "case") {
+      return (
+        <td>
+          <input
+            autoFocus
+            value={editCell.val}
+            onChange={e => setEditCell({ kind: "case", field, val: e.target.value })}
+            onBlur={() => editCell?.kind === "case" && commitCase(field, editCell.val)}
+            onKeyDown={e => {
+              if (e.key === "Enter" && editCell?.kind === "case") commitCase(field, editCell.val);
+              if (e.key === "Escape") setEditCell(null);
+            }}
+            className="w-full border-b border-primary bg-transparent text-xs text-foreground outline-none py-0.5"
+          />
+        </td>
+      );
+    }
+    return (
+      <td
+        className={`text-foreground text-sm${editable ? " cursor-pointer hover:bg-primary/5 rounded px-1 -mx-1 transition-colors" : ""}`}
+        onClick={() => editable && setEditCell({ kind: "case", field, val: rawVal })}
+        title={editable ? "Click to edit" : undefined}
+      >
+        {display}
+      </td>
+    );
+  };
+
+  const ratioTd = (ratioId: string, field: "ratio_value" | "benchmark", val: number | null, display: string) => {
+    const isEditing = editCell?.kind === "ratio" && editCell.ratioId === ratioId && editCell.field === field;
+    const editable = !!onRatioPatch;
+    if (isEditing && editCell?.kind === "ratio") {
+      return (
+        <td className="text-right">
+          <input
+            autoFocus
+            value={editCell.val}
+            onChange={e => setEditCell({ kind: "ratio", ratioId, field, val: e.target.value })}
+            onBlur={() => editCell?.kind === "ratio" && commitRatio(ratioId, field, editCell.val)}
+            onKeyDown={e => {
+              if (e.key === "Enter" && editCell?.kind === "ratio") commitRatio(ratioId, field, editCell.val);
+              if (e.key === "Escape") setEditCell(null);
+            }}
+            className="w-16 border-b border-primary bg-transparent text-xs text-right outline-none"
+          />
+        </td>
+      );
+    }
+    return (
+      <td
+        className={`text-right tabular-nums${editable ? " cursor-pointer hover:bg-primary/5 rounded transition-colors" : ""}`}
+        onClick={() => editable && setEditCell({ kind: "ratio", ratioId, field, val: val != null ? String(val) : "" })}
+        title={editable ? "Click to edit" : undefined}
+      >
+        {display}
+      </td>
+    );
+  };
+
   const product = PRODUCTS[cc.product_type];
   const years = Array.from(new Set(ratios.map(r => r.fiscal_year))).sort();
   const KEY = ["dscr", "current_ratio", "debt_to_equity", "interest_coverage", "ebitda_margin", "roe"];
+
   return (
     <div className="space-y-4 text-sm">
       {/* Deal summary */}
@@ -47,30 +139,59 @@ export function ICSummaryPanel({ cc, ratios }: { cc: CaseRow; ratios: RatioRow[]
         <tbody>
           <tr className="border-b border-border/40">
             <td className="py-1.5 w-32 text-muted-foreground text-xs">Client</td>
-            <td className="text-foreground font-medium">{cc.client_name}</td>
+            {caseTd("client_name", cc.client_name, cc.client_name)}
             <td className="w-24 text-muted-foreground text-xs">Product</td>
-            <td className="text-foreground">{product.short}</td>
+            <td className="text-foreground text-sm">{product.short}</td>
           </tr>
           <tr className="border-b border-border/40">
             <td className="py-1.5 text-muted-foreground text-xs">Amount</td>
-            <td className="text-foreground">₹{Number(cc.deal_amount ?? 0).toLocaleString("en-IN")} Cr</td>
+            {caseTd("deal_amount", cc.deal_amount ? `₹${Number(cc.deal_amount).toLocaleString("en-IN")} Cr` : "—", String(cc.deal_amount ?? ""))}
             <td className="text-muted-foreground text-xs">Tenure</td>
-            <td className="text-foreground">{cc.tenure_months ?? "—"} months</td>
+            {caseTd("tenure_months", cc.tenure_months ? `${cc.tenure_months} months` : "—", String(cc.tenure_months ?? ""))}
           </tr>
           <tr className="border-b border-border/40">
             <td className="py-1.5 text-muted-foreground text-xs">IRR</td>
-            <td className="text-foreground">{cc.expected_irr ?? "—"}%</td>
+            {caseTd("expected_irr", cc.expected_irr ? `${cc.expected_irr}%` : "—", String(cc.expected_irr ?? ""))}
             <td className="text-muted-foreground text-xs">Industry</td>
-            <td className="text-foreground">{cc.industry ?? "—"}</td>
+            {caseTd("industry", cc.industry ?? "—", cc.industry ?? "")}
           </tr>
-          {cc.end_use && (
-            <tr className="border-b border-border/40">
-              <td className="py-1.5 text-muted-foreground text-xs">End Use</td>
-              <td colSpan={3} className="text-foreground">{cc.end_use}</td>
-            </tr>
-          )}
+          <tr className="border-b border-border/40">
+            <td className="py-1.5 text-muted-foreground text-xs">End Use</td>
+            {caseTd("end_use", cc.end_use ?? "—", cc.end_use ?? "")}
+            <td className="text-muted-foreground text-xs" />
+            <td />
+          </tr>
         </tbody>
       </table>
+
+      {/* Company profile mini-card */}
+      {company && (company.mca_cin || company.mca_category || company.mca_status) && (
+        <div className="border border-border/60 rounded p-3 bg-surface-2/30 space-y-1.5">
+          <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Company Profile</div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+            {[
+              ["CIN",           company.mca_cin],
+              ["PAN",           company.mca_pan],
+              ["Category",      company.mca_category],
+              ["Status",        company.mca_status],
+              ["Type",          company.mca_type],
+              ["Sector",        company.mca_nse_sector || company.mca_sector],
+              ["Incorporated",  company.mca_date_of_incorp],
+              ["Paid-Up Cap",   company.mca_paid_up_capital],
+            ].filter(([, v]) => v).map(([label, val]) => (
+              <div key={label as string} className="flex gap-1.5">
+                <span className="text-muted-foreground shrink-0">{label}:</span>
+                <span className="text-foreground font-medium">{val as string}</span>
+              </div>
+            ))}
+          </div>
+          {company.mca_about && (
+            <p className="text-xs text-foreground/70 leading-relaxed border-t border-border/40 pt-2 mt-1 whitespace-pre-wrap line-clamp-4">
+              {company.mca_about}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Key ratio snapshot */}
       {ratios.length > 0 && years.length > 0 && (
@@ -102,9 +223,7 @@ export function ICSummaryPanel({ cc, ratios }: { cc: CaseRow; ratios: RatioRow[]
                         </td>
                       );
                     })}
-                    <td className="text-right tabular-nums text-muted-foreground">
-                      {latest.benchmark != null ? formatRatio(name, Number(latest.benchmark)) : "—"}
-                    </td>
+                    {ratioTd(latest.id, "benchmark", latest.benchmark != null ? Number(latest.benchmark) : null, latest.benchmark != null ? formatRatio(name, Number(latest.benchmark)) : "—")}
                     <td className="text-right">
                       <StatusBadge status={s} />
                     </td>
@@ -646,21 +765,132 @@ export function ICRow({ label, value }: { label: string; value: string | number 
   );
 }
 
-export function ICClientProfile({ cc }: { cc: CaseRow }) {
+type MCADirector = {
+  id: string;
+  name: string;
+  din?: string | null;
+  designation?: string | null;
+  appointed_current?: string | null;
+  shareholding?: string | null;
+  age?: string | null;
+  gender?: string | null;
+};
+
+export function ICClientProfile({
+  cc,
+  company,
+  directors,
+}: {
+  cc: CaseRow;
+  company?: Record<string, string | null> | null;
+  directors?: MCADirector[] | null;
+  onCasePatch?: (field: string, val: string | number | null) => Promise<void>;
+}) {
   const product = PRODUCTS[cc.product_type];
+
+  const fmtCap = (v: string | null | undefined) => {
+    if (!v) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toLocaleString("en-IN") : v;
+  };
+
   return (
     <div className="space-y-4">
-      <table className="w-full">
-        <tbody>
-          <ICRow label="Client Name" value={cc.client_name} />
-          <ICRow label="Legal Constitution" value={cc.legal_constitution} />
-          <ICRow label="Industry / Sector" value={cc.industry} />
-          <ICRow label="Year Established" value={cc.year_established} />
-          <ICRow label="Product Applied For" value={product.label} />
-          <ICRow label="Principal Borrower" value={cc.principal_borrower} />
-          <ICRow label="Website" value={cc.website} />
-        </tbody>
-      </table>
+      {/* ── MCA Company Profile (when company data is present) ── */}
+      {company && (
+        <div className="space-y-4">
+          <SectionLabel>MCA / Corporate Profile</SectionLabel>
+          <table className="w-full">
+            <tbody>
+              {[
+                ["Legal Constitution",  company.mca_category],
+                ["Year Established",    company.mca_date_of_incorp],
+                ["MCA CIN",            company.mca_cin],
+                ["PAN",                company.mca_pan],
+                ["Category",           company.mca_category],
+                ["Sub-Category",       company.mca_sub_category],
+                ["Company Type",       company.mca_type],
+                ["Authorised Capital", fmtCap(company.mca_authorized_capital)],
+                ["Paid Up Capital",    fmtCap(company.mca_paid_up_capital)],
+                ["Status",             company.mca_status],
+                ["NSE Sector",         company.mca_nse_sector],
+                ["Sector",             company.mca_sector],
+                ["Products / Services",company.mca_products_services],
+                ["Email",              company.mca_email],
+                ["Telephone",          company.mca_telephone],
+                ["Incorporation Date", company.mca_date_of_incorp],
+                ["Last Balance Sheet", company.mca_date_last_bs],
+                ["Last AGM",           company.mca_date_last_agm],
+                ["Registered Address", company.registered_address],
+              ].map(([label, value]) =>
+                value ? (
+                  <tr key={label as string} className="border-b border-border/40">
+                    <td className="py-1.5 w-44 text-muted-foreground text-xs">{label}</td>
+                    <td className="py-1.5 text-foreground text-sm">{value as string}</td>
+                  </tr>
+                ) : null
+              )}
+            </tbody>
+          </table>
+
+          {/* Directors table */}
+          {directors && directors.length > 0 && (
+            <div>
+              <SectionLabel>Directors / Key Persons</SectionLabel>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="text-muted-foreground border-b border-border">
+                    <tr>
+                      {["Name", "DIN", "Designation", "Appointed", "Shareholding %", "Age"].map(h => (
+                        <th key={h} className="text-left py-1.5 px-2 font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {directors.map(d => (
+                      <tr key={d.id} className="border-b border-border/30">
+                        <td className="py-1.5 px-2 text-foreground font-medium">{d.name}</td>
+                        <td className="py-1.5 px-2 text-muted-foreground font-mono">{d.din ?? "—"}</td>
+                        <td className="py-1.5 px-2 text-foreground">{d.designation ?? "—"}</td>
+                        <td className="py-1.5 px-2 text-muted-foreground">{d.appointed_current ?? "—"}</td>
+                        <td className="py-1.5 px-2 text-foreground">{d.shareholding ?? "—"}</td>
+                        <td className="py-1.5 px-2 text-muted-foreground">{d.age ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* MCA About / Corpository narrative */}
+          {company.mca_about && (
+            <div>
+              <SectionLabel>MCA / Corpository Profile Narrative</SectionLabel>
+              <blockquote className="border-l-4 border-border bg-surface-2/40 rounded-r-lg px-4 py-3">
+                <p className="text-sm text-foreground/80 leading-relaxed whitespace-pre-wrap">{company.mca_about}</p>
+              </blockquote>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Fallback cc-based rows when no company data ── */}
+      {!company && (
+        <table className="w-full">
+          <tbody>
+            <ICRow label="Client Name" value={cc.client_name} />
+            <ICRow label="Legal Constitution" value={cc.legal_constitution} />
+            <ICRow label="Industry / Sector" value={cc.industry} />
+            <ICRow label="Year Established" value={cc.year_established} />
+            <ICRow label="Product Applied For" value={product.label} />
+            <ICRow label="Principal Borrower" value={cc.principal_borrower} />
+            <ICRow label="Website" value={cc.website} />
+          </tbody>
+        </table>
+      )}
+
+      {/* ── Promoter & Group (always shown below MCA block) ── */}
       {cc.promoter_details && (
         <div>
           <SectionLabel>Promoter Details</SectionLabel>

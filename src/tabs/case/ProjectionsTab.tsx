@@ -508,6 +508,7 @@ export function ProjectionsTab({
   docs = [],
   onDelete,
   onRetry,
+  embedded = false,
 }: {
   extracted: ExtractedRow[];
   cc: CaseRow;
@@ -520,6 +521,7 @@ export function ProjectionsTab({
   docs?: DocRow[];
   onDelete?: (doc: DocRow) => void;
   onRetry?: (doc: DocRow) => void;
+  embedded?: boolean;
 }) {
   const projRows = extracted.filter(r => r.statement_type === "projections");
   const histPL   = extracted.filter(r => r.statement_type === "profit_loss");
@@ -713,7 +715,7 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
           busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote}
           projAnalysis={projAnalysis} projAnalysisLoading={projAnalysisLoading}
           projAnalysisProgress={projAnalysisProgress} projAnalysisLabel={projAnalysisLabel}
-          onGenerateAnalysis={generateProjectionAnalysis} />
+          onGenerateAnalysis={generateProjectionAnalysis} embedded={embedded} />
       </div>
     );
   }
@@ -1161,7 +1163,7 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
       </Panel>
 
       {/* ── COMBINED AI MODEL vs MANAGEMENT PROJECTIONS ─────────────────────── */}
-      {model && (() => {
+      {model ? (() => {
         // Build one data point per FY combining both sources
         const combined = uploadedYears.map(fy => {
           const up = projData.find(d => d.fy === fy);
@@ -1266,10 +1268,20 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
             )}
           </Panel>
         );
-      })()}
+      })() : (
+        <Panel title="AI MODEL vs MANAGEMENT PROJECTIONS" ticker="HISTORICAL P&L REQUIRED" status="idle">
+          <div className="text-center py-8">
+            <div className="text-3xl mb-2 opacity-20">⚡</div>
+            <div className="text-[10px] font-semibold text-muted-foreground mb-1">Historical P&L not yet extracted</div>
+            <div className="text-[9px] text-muted-foreground/60 max-w-xs mx-auto">
+              Extract financials from the <strong>UPLOAD</strong> tab to build the AI projection model and compare it against management projections.
+            </div>
+          </div>
+        </Panel>
+      )}
 
       {/* ── PROJECTION SANITY CHECK ──────────────────────────────────────────── */}
-      {model && (
+      {model ? (
         <Panel title="PROJECTION SANITY CHECK" ticker={`${METHOD_LABEL[model.method]} · ${model.histYears}yr history`}>
 
           {/* Model quality + overall verdict */}
@@ -1386,19 +1398,32 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
             Positive variance = uploaded exceeds AI estimate.
           </div>
         </Panel>
+      ) : (
+        <Panel title="PROJECTION SANITY CHECK" ticker="AI MODEL REQUIRED" status="idle">
+          <div className="text-center py-6">
+            <div className="text-[10px] font-semibold text-muted-foreground mb-1">AI model not available</div>
+            <div className="text-[9px] text-muted-foreground/60 max-w-xs mx-auto">
+              Extract historical P&L financials to build the AI model and run a sanity check against management projections.
+            </div>
+          </div>
+        </Panel>
       )}
 
-      <ProjectionAnalysisPanel
-        analysis={projAnalysis}
-        loading={projAnalysisLoading}
-        progress={projAnalysisProgress}
-        label={projAnalysisLabel}
-        onGenerate={generateProjectionAnalysis}
-      />
+      {!embedded && (
+        <>
+          <ProjectionAnalysisPanel
+            analysis={projAnalysis}
+            loading={projAnalysisLoading}
+            progress={projAnalysisProgress}
+            label={projAnalysisLabel}
+            onGenerate={generateProjectionAnalysis}
+          />
 
-      <ProjectionMethodologyPanel />
+          <ProjectionMethodologyPanel />
 
-      <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
+          <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
+        </>
+      )}
     </div>
   );
 }
@@ -1408,7 +1433,7 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, progress, progressLabel, onGenerateNote,
-  projAnalysis, projAnalysisLoading, projAnalysisProgress, projAnalysisLabel, onGenerateAnalysis }: {
+  projAnalysis, projAnalysisLoading, projAnalysisProgress, projAnalysisLabel, onGenerateAnalysis, embedded = false }: {
   caseId: string;
   model: ModelOutput;
   histPL: ExtractedRow[];
@@ -1424,6 +1449,7 @@ function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, pr
   projAnalysisProgress: number;
   projAnalysisLabel: string;
   onGenerateAnalysis: () => void;
+  embedded?: boolean;
 }) {
   const { points: est } = model;
   const estYears = est.map(p => p.fy);
@@ -1575,17 +1601,21 @@ function EstimatedView({ caseId, model, histPL, unit, abbr, unitTicker, busy, pr
         </div>
       </Panel>
 
-      <ProjectionAnalysisPanel
-        analysis={projAnalysis}
-        loading={projAnalysisLoading}
-        progress={projAnalysisProgress}
-        label={projAnalysisLabel}
-        onGenerate={onGenerateAnalysis}
-      />
+      {!embedded && (
+        <>
+          <ProjectionAnalysisPanel
+            analysis={projAnalysis}
+            loading={projAnalysisLoading}
+            progress={projAnalysisProgress}
+            label={projAnalysisLabel}
+            onGenerate={onGenerateAnalysis}
+          />
 
-      <ProjectionMethodologyPanel />
+          <ProjectionMethodologyPanel />
 
-      <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
+          <IcNoteButton busy={busy} progress={progress} progressLabel={progressLabel} onGenerateNote={onGenerateNote} />
+        </>
+      )}
     </div>
   );
 }

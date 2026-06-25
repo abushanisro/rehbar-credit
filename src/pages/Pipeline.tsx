@@ -222,7 +222,7 @@ export default function Pipeline() {
     }
     setCases(prev => prev.map(x => x.id === id ? { ...x, status: col } : x));
     const { error } = await supabase.from("credit_cases").update({ status: col }).eq("id", id);
-    if (error) { toast.error("Failed to update status"); load(); }
+    if (error) { toast.error(`Status update failed: ${error.message}`); load(); }
     else { toast.success(`Moved to ${CASE_STATUS_META[col].label}`); }
   };
 
@@ -241,7 +241,7 @@ export default function Pipeline() {
       if (ti !== -1) ids.splice(ti, 0, sourceId); else ids.push(sourceId);
       saveOrder({ ...colOrder, [targetCol]: ids });
       const { error } = await supabase.from("credit_cases").update({ status: targetCol }).eq("id", sourceId);
-      if (error) { toast.error("Failed to update status"); load(); }
+      if (error) { toast.error(`Status update failed: ${error.message}`); load(); }
       else { toast.success(`Moved to ${CASE_STATUS_META[targetCol].label}`); }
     } else {
       const colCases = getSortedColCases(targetCol, cases.filter(x => x.status === targetCol));

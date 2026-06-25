@@ -2205,10 +2205,12 @@ function CaseViewInner() {
         };
         await supabase.from("credit_cases").update({ ic_note: mergedNote as Json }).eq("id", cc.id);
       }
+      const { error: statusErr } = await supabase.from("credit_cases").update({ status: "ic_review" }).eq("id", cc.id);
+      if (statusErr) throw new Error("Status update failed: " + statusErr.message);
       await reload();
       // Apply ic_note AFTER reload so this wins over any stale DB read
       if (narData?.ic_note) {
-        setCc(prev => prev ? { ...prev, ic_note: narData.ic_note as Json, status: "ic_review" as never } : prev);
+        setCc(prev => prev ? { ...prev, ic_note: narData.ic_note as Json, status: "ic_review" } : prev);
       }
       setTab("ic_note");
     } catch (e) {
@@ -2289,6 +2291,18 @@ function CaseViewInner() {
     const next = { ...current, custom_rows: { ...rows, [tableKey]: [...(rows[tableKey] ?? []), label] } };
     await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
     setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const saveCaseField = async (field: string, val: string | number | null) => {
+    if (!cc) return;
+    await supabase.from("credit_cases").update({ [field]: val } as never).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, [field]: val } : prev);
+  };
+
+  const saveRatioField = async (ratioId: string, field: "ratio_value" | "benchmark", val: number | null) => {
+    if (!cc) return;
+    await supabase.from("financial_ratios").update({ [field]: val }).eq("id", ratioId);
+    setRatios(prev => prev.map(r => r.id === ratioId ? { ...r, [field]: val } : r));
   };
 
   const handleIcNoteImport = async (file: File) => {
@@ -4883,13 +4897,22 @@ function CaseViewInner() {
             ic={(ic ?? {}) as IcNoteShape}
             userEmail={user?.email ?? ""}
             busy={busy}
+            progress={progress}
+            progressLabel={progressLabel}
+            docs={docs.filter(d => d.doc_class === "projections")}
             onGenerate={(notes) => runNarrative(notes)}
+            onDelete={handleDeleteDoc}
+            onRetry={handleRetry}
             onPatchSection={patchIcSection}
             onAddComment={addIcComment}
             onResolveComment={resolveIcComment}
             onAnnotationsChange={saveAnnotations}
             onCellEdit={saveCellEdit}
             onAddRow={saveCustomRow}
+            onCasePatch={saveCaseField}
+            onRatioPatch={saveRatioField}
+            company={linkedCompany}
+            directors={linkedDirs}
           />
 
           {/* PDF download (only when note exists) */}
@@ -4897,9 +4920,40 @@ function CaseViewInner() {
             <>
               <ICFinalRecommendation cc={cc} ratios={ratios} extracted={extracted} ic={ic!} />
               <DownloadBar onPdf={() => {
-                const icNote = ic as IcNoteShape;
-                const annSvg = annotationsToSvgString(icNote.annotations ?? [], 1200, 20000);
-                dlPdfIc(buildIcNoteHtmlFull(cc, extracted, ratios, ic!, annSvg), `${cc.case_code} IC Note`);
+                const docEl = document.getElementById("ic-note-doc");
+                if (!docEl) return;
+
+                // Capture all page styles so Tailwind + CSS vars work in the print window
+                const inlineStyles = Array.from(document.styleSheets)
+                  .map(ss => { try { return Array.from(ss.cssRules).map(r => r.cssText).join("\n"); } catch { return ""; } })
+                  .join("\n");
+                const linkTags = Array.from(document.styleSheets)
+                  .filter(ss => ss.href && !ss.href.startsWith(window.location.origin))
+                  .map(ss => `<link rel="stylesheet" href="${ss.href}">`)
+                  .join("\n");
+
+                const win = window.open("", "_blank", "width=1100,height=900");
+                if (!win) return;
+                win.document.write(`<!DOCTYPE html><html><head>
+                  <title>${cc.case_code ?? "IC Note"}</title>
+                  ${linkTags}
+                  <style>
+                    ${inlineStyles}
+                    *{box-sizing:border-box}
+                    body{background:#FAFAF6;-webkit-print-color-adjust:exact;print-color-adjust:exact;margin:0;padding:0}
+                    @page{size:A4;margin:8mm}
+                    [data-no-print]{display:none!important}
+                    button,input[type="range"],textarea{display:none!important}
+                    /* Unlock all flex/overflow constraints so content fully expands */
+                    #ic-note-doc{height:auto!important;min-height:0!important;border:none!important;display:flex!important;flex-direction:column!important}
+                    #ic-note-body-row{overflow:visible!important;flex:none!important;height:auto!important;min-height:0!important}
+                    #ic-note-scroll{overflow:visible!important;max-height:none!important;flex:1!important;height:auto!important;min-height:0!important}
+                    /* Remove page-level overflow clipping */
+                    html,body{overflow:visible!important;height:auto!important}
+                  </style>
+                </head><body>${docEl.outerHTML}</body></html>`);
+                win.document.close();
+                setTimeout(() => win.print(), 1500);
               }} />
             </>
           )}

@@ -22,11 +22,28 @@ import type { CaseRow as FullCaseRow, ExtractedRow, RatioRow } from "@/features/
 const IC_ACCESS_ROLES = ["ic_member", "credit_committee", "admin"];
 const HISTORY_STATUSES = ["approved", "conditionally_approved", "declined", "queries_resubmission"];
 
+type ICComment = {
+  id: string;
+  section_id: string;
+  text: string;
+  author_email: string;
+  created_at: string;
+};
+
+type ICVote = {
+  email: string;
+  vote: "for" | "against" | "abstain";
+  comment?: string | null;
+  created_at: string;
+};
+
 type ICNote = {
   sections?: Record<string, { markdown?: string }>;
   risks?: Array<{ category: string; risk: string; mitigant: string; severity: string }>;
   conditions_precedent?: string[];
   swot?: { strengths: string[]; weaknesses: string[]; opportunities: string[]; threats: string[] };
+  ic_comments?: ICComment[];
+  ic_votes?: ICVote[];
 };
 
 type ICCase = {
@@ -89,8 +106,21 @@ const HIST_DECISION: Record<string, { label: string; cls: string }> = {
   queries_resubmission:   { label: "Queries Resubmission",  cls: "bg-blue-50 text-blue-700 border-blue-200"    },
 };
 
+const VOTE_META: Record<string, { label: string; cls: string; badgeCls: string }> = {
+  for:     { label: "For",     cls: "border-green-400 text-green-700 hover:bg-green-50", badgeCls: "bg-green-50 text-green-700 border-green-200" },
+  against: { label: "Against", cls: "border-red-400 text-red-700 hover:bg-red-50",       badgeCls: "bg-red-50 text-red-700 border-red-200"       },
+  abstain: { label: "Abstain", cls: "border-gray-400 text-gray-600 hover:bg-gray-50",    badgeCls: "bg-gray-50 text-gray-600 border-gray-200"    },
+};
+
+const VOTE_ACTIVE_CLS: Record<string, string> = {
+  for:     "bg-green-600 text-white border-green-600 shadow-green-100 shadow-md",
+  against: "bg-red-600 text-white border-red-600 shadow-red-100 shadow-md",
+  abstain: "bg-gray-500 text-white border-gray-500 shadow-gray-100 shadow-md",
+};
+
 export default function ICReview() {
-  const { role } = useAuth();
+  const { role, user } = useAuth();
+  const userEmail = user?.email ?? null;
 
   const [pageView, setPageView]               = useState<"pending" | "history">("pending");
   const [pending, setPending]                 = useState<ICCase[]>([]);
@@ -109,6 +139,23 @@ export default function ICReview() {
   const [decisionChoice, setDecisionChoice]   = useState<DecisionChoice>(null);
   const [decisionNotes, setDecisionNotes]     = useState("");
   const [saving, setSaving]                   = useState(false);
+
+  // Company & directors state (Feature 4)
+  const [company, setCompany]     = useState<Record<string, string | null> | null>(null);
+  const [directors, setDirectors] = useState<Array<{
+    id: string; name: string; din?: string | null; designation?: string | null;
+    appointed_current?: string | null; shareholding?: string | null;
+    age?: string | null; gender?: string | null;
+  }>>([]);
+
+  // IC comment state (Feature 2) — keyed by section_id
+  const [commentDraft, setCommentDraft] = useState<Record<string, string>>({});
+  const [commentSaving, setCommentSaving] = useState(false);
+
+  // IC vote state (Feature 3)
+  const [myVote, setMyVote]         = useState<"for" | "against" | "abstain" | null>(null);
+  const [voteComment, setVoteComment] = useState("");
+  const [voteSaving, setVoteSaving] = useState(false);
 
   const loadPending = async () => {
     const { data } = await supabase
@@ -163,18 +210,41 @@ export default function ICReview() {
     setCaseDetail(null);
     setExtracted([]);
     setRatios([]);
+    setCompany(null);
+    setDirectors([]);
 
     Promise.all([
       supabase.from("credit_cases").select("*").eq("id", selectedId).single(),
       supabase.from("extracted_financials").select("*").eq("case_id", selectedId),
       supabase.from("financial_ratios").select("*").eq("case_id", selectedId).order("fiscal_year"),
-    ]).then(([cRes, eRes, rRes]) => {
-      if (cRes.data) setCaseDetail(cRes.data as FullCaseRow);
+    ]).then(async ([cRes, eRes, rRes]) => {
+      if (cRes.data) {
+        setCaseDetail(cRes.data as FullCaseRow);
+        // Feature 4: load company + directors
+        const companyId = (cRes.data as Record<string, unknown>).company_id as string | null | undefined;
+        if (companyId) {
+          const [compRes, dirRes] = await Promise.all([
+            supabase.from("companies").select("*").eq("id", companyId).single(),
+            supabase.from("company_directors").select("*").eq("company_id", companyId),
+          ]);
+          if (compRes.data) setCompany(compRes.data as Record<string, string | null>);
+          if (dirRes.data) setDirectors(dirRes.data as typeof directors);
+        }
+      }
       setExtracted((eRes.data ?? []) as ExtractedRow[]);
       setRatios((rRes.data ?? []) as RatioRow[]);
       setDetailLoading(false);
     });
   }, [selectedId]);
+
+  // Sync myVote from selected case ic_votes when case or user changes
+  useEffect(() => {
+    const c = [...pending, ...history].find(x => x.id === selectedId);
+    if (!c || !userEmail) { setMyVote(null); setVoteComment(""); return; }
+    const existingVote = (c.ic_note?.ic_votes ?? []).find(v => v.email === userEmail);
+    setMyVote(existingVote?.vote ?? null);
+    setVoteComment(existingVote?.comment ?? "");
+  }, [selectedId, pending, history, userEmail]);
 
   const activeList   = pageView === "pending" ? pending : history;
   const selectedCase = activeList.find(c => c.id === selectedId) ?? null;
@@ -198,6 +268,188 @@ export default function ICReview() {
     if (remaining.length === 0) setPageView("history");
   };
 
+  // ── Feature 2: save IC member comment ──────────────────────────────────────
+  const saveComment = async (sectionId: string) => {
+    if (!selectedCase || !userEmail) return;
+    const text = (commentDraft[sectionId] ?? "").trim();
+    if (!text) return;
+    setCommentSaving(true);
+    const currentNote: ICNote = selectedCase.ic_note ?? {};
+    const existing = currentNote.ic_comments ?? [];
+    const newComment: ICComment = {
+      id: crypto.randomUUID(),
+      section_id: sectionId,
+      text,
+      author_email: userEmail,
+      created_at: new Date().toISOString(),
+    };
+    const updated: ICNote = { ...currentNote, ic_comments: [...existing, newComment] };
+    const { error } = await supabase
+      .from("credit_cases")
+      .update({ ic_note: updated } as never)
+      .eq("id", selectedCase.id);
+    setCommentSaving(false);
+    if (error) { toast.error("Failed to save comment"); return; }
+    setCommentDraft(prev => ({ ...prev, [sectionId]: "" }));
+    // Optimistically update local state
+    const patchList = (list: ICCase[]) =>
+      list.map(c => c.id === selectedCase.id ? { ...c, ic_note: updated } : c);
+    setPending(patchList);
+    setHistory(patchList);
+  };
+
+  // ── Feature 3: save IC member vote ─────────────────────────────────────────
+  const saveVote = async () => {
+    if (!selectedCase || !userEmail || !myVote) return;
+    setVoteSaving(true);
+    const currentNote: ICNote = selectedCase.ic_note ?? {};
+    const existingVotes = (currentNote.ic_votes ?? []).filter(v => v.email !== userEmail);
+    const newVote: ICVote = {
+      email: userEmail,
+      vote: myVote,
+      comment: voteComment.trim() || null,
+      created_at: new Date().toISOString(),
+    };
+    const updated: ICNote = { ...currentNote, ic_votes: [...existingVotes, newVote] };
+    const { error } = await supabase
+      .from("credit_cases")
+      .update({ ic_note: updated } as never)
+      .eq("id", selectedCase.id);
+    setVoteSaving(false);
+    if (error) { toast.error("Failed to save vote"); return; }
+    toast.success("Vote recorded");
+    const patchList = (list: ICCase[]) =>
+      list.map(c => c.id === selectedCase.id ? { ...c, ic_note: updated } : c);
+    setPending(patchList);
+    setHistory(patchList);
+  };
+
+  // ── Feature 2: render comments block for a section ─────────────────────────
+  const renderComments = (sectionId: string) => {
+    const comments = (ic?.ic_comments ?? []).filter(c => c.section_id === sectionId);
+    const draft = commentDraft[sectionId] ?? "";
+    return (
+      <div className="mt-5 border-t border-border/40 pt-4">
+        {comments.length > 0 && (
+          <div className="space-y-2 mb-3">
+            {comments.map(c => (
+              <div key={c.id} className="bg-surface-2/50 border border-border/50 rounded-lg px-3 py-2">
+                <p className="text-sm text-foreground/80">{c.text}</p>
+                <p className="text-xs text-muted-foreground/60 mt-1">
+                  {c.author_email.split("@")[0]} · {new Date(c.created_at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2 items-center">
+          <input
+            type="text"
+            value={draft}
+            onChange={e => setCommentDraft(prev => ({ ...prev, [sectionId]: e.target.value }))}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveComment(sectionId); } }}
+            placeholder="Add an IC comment…"
+            className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary placeholder:text-muted-foreground/40"
+          />
+          <button
+            onClick={() => saveComment(sectionId)}
+            disabled={!draft.trim() || commentSaving || !userEmail}
+            className="px-3 py-2 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            title="Post comment"
+          >
+            ▶
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ── Feature 3: render Vote section ─────────────────────────────────────────
+  const renderVoteSection = () => {
+    const votes = ic?.ic_votes ?? [];
+    const tally = { for: 0, against: 0, abstain: 0 };
+    for (const v of votes) { tally[v.vote] = (tally[v.vote] ?? 0) + 1; }
+    const sorted = [...votes].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+    return (
+      <div className="space-y-6">
+        {/* My vote */}
+        <div>
+          <h3 className="text-base font-semibold text-foreground mb-1">Your Vote</h3>
+          <p className="text-sm text-muted-foreground mb-4">Record your individual vote on this credit case.</p>
+          <div className="flex gap-3 mb-4">
+            {(["for", "against", "abstain"] as const).map(v => (
+              <button
+                key={v}
+                onClick={() => setMyVote(v)}
+                className={cn(
+                  "px-5 py-3 rounded-lg border-2 font-semibold text-sm transition-all capitalize",
+                  myVote === v ? VOTE_ACTIVE_CLS[v] : cn("bg-card border-2", VOTE_META[v].cls)
+                )}
+              >
+                {VOTE_META[v].label}
+              </button>
+            ))}
+          </div>
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-foreground mb-1.5">
+              Comment <span className="text-muted-foreground font-normal">(optional)</span>
+            </label>
+            <textarea
+              value={voteComment}
+              onChange={e => setVoteComment(e.target.value)}
+              placeholder="Add any remarks or concerns alongside your vote…"
+              rows={3}
+              className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary placeholder:text-muted-foreground/40 resize-none"
+            />
+          </div>
+          <button
+            onClick={saveVote}
+            disabled={!myVote || voteSaving || !userEmail}
+            className={cn(
+              "px-6 py-2.5 rounded-lg text-sm font-semibold transition-all",
+              !myVote
+                ? "bg-surface-2 text-muted-foreground cursor-not-allowed border border-border"
+                : voteSaving
+                ? "bg-primary/70 text-white cursor-wait"
+                : "bg-primary text-white hover:bg-primary/90"
+            )}
+          >
+            {voteSaving ? "Saving…" : myVote ? "Submit Vote" : "Select a vote above"}
+          </button>
+        </div>
+
+        {/* Tally */}
+        <div className="border-t border-border/40 pt-5">
+          <h4 className="text-sm font-semibold text-foreground mb-3">Vote Tally</h4>
+          <div className="flex gap-4 mb-4">
+            {(["for", "against", "abstain"] as const).map(v => (
+              <div key={v} className={cn("flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium", VOTE_META[v].badgeCls)}>
+                <span className="capitalize">{VOTE_META[v].label}</span>
+                <span className="font-bold">{tally[v] ?? 0}</span>
+              </div>
+            ))}
+          </div>
+          {sorted.length === 0 ? (
+            <p className="text-sm text-muted-foreground italic">No votes recorded yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {sorted.map(v => (
+                <div key={v.email} className="flex items-start gap-3">
+                  <span className="text-xs text-foreground font-medium min-w-[120px] pt-0.5">{v.email.split("@")[0]}</span>
+                  <span className={cn("text-xs font-semibold px-2 py-0.5 rounded-full border capitalize shrink-0", VOTE_META[v.vote]?.badgeCls)}>
+                    {VOTE_META[v.vote]?.label ?? v.vote}
+                  </span>
+                  {v.comment && <span className="text-xs text-muted-foreground">{v.comment}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   // ── Section content renderer ────────────────────────────────────────────────
   const renderSectionContent = (sectionId: string) => {
     const md = ic?.sections?.[sectionId]?.markdown ?? "";
@@ -208,7 +460,12 @@ export default function ICReview() {
       case "executive_summary":
         return <div className="space-y-4">{caseDetail && <ICSummaryPanel cc={caseDetail} ratios={ratios} />}<BulletOnlyMd text={md} /></div>;
       case "client_promoter":
-        return <div className="space-y-4">{caseDetail && <ICClientProfile cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
+        return (
+          <div className="space-y-4">
+            {caseDetail && <ICClientProfile cc={caseDetail} company={company} directors={directors} />}
+            <BulletOnlyMd text={md} />
+          </div>
+        );
       case "investment_structure":
         return <div className="space-y-4">{caseDetail && <ICInvestmentStructure cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
       case "rehbar_funding_history":
@@ -530,6 +787,19 @@ export default function ICReview() {
                             <div className="text-xs font-medium">SWOT Analysis</div>
                           </button>
                         )}
+
+                        {/* Vote nav item (Feature 3) */}
+                        <button
+                          onClick={() => setActiveSection("_vote")}
+                          className={cn("w-full text-left px-4 py-3 border-b border-border/40 transition-colors border-l-[3px]",
+                            activeSection === "_vote" ? "bg-primary/8 border-l-primary text-primary" : "border-l-transparent text-muted-foreground hover:text-foreground hover:bg-surface-2"
+                          )}
+                        >
+                          <div className="text-xs font-medium">Vote</div>
+                          {ic?.ic_votes && ic.ic_votes.length > 0 && (
+                            <div className="text-[10px] text-muted-foreground/60 mt-0.5">{ic.ic_votes.length} vote{ic.ic_votes.length !== 1 ? "s" : ""}</div>
+                          )}
+                        </button>
                       </div>
 
                       {/* Section content */}
@@ -562,6 +832,7 @@ export default function ICReview() {
                                 </tbody>
                               </table>
                             </div>
+                            {renderComments("_risks")}
                           </div>
                         ) : activeSection === "_conditions" ? (
                           <div>
@@ -576,6 +847,7 @@ export default function ICReview() {
                                 </li>
                               ))}
                             </ol>
+                            {renderComments("_conditions")}
                           </div>
                         ) : activeSection === "_swot" ? (
                           <div>
@@ -600,6 +872,14 @@ export default function ICReview() {
                                 </div>
                               ))}
                             </div>
+                            {renderComments("_swot")}
+                          </div>
+                        ) : activeSection === "_vote" ? (
+                          <div>
+                            <div className="flex items-baseline gap-2 mb-5 pb-3 border-b border-border">
+                              <h3 className="text-base font-semibold text-foreground">IC Member Vote</h3>
+                            </div>
+                            {renderVoteSection()}
                           </div>
                         ) : (() => {
                           const sec = IC_SECTIONS.find(s => s.id === activeSection);
@@ -610,6 +890,7 @@ export default function ICReview() {
                                 <h3 className="text-base font-semibold text-foreground">{sec?.title}</h3>
                               </div>
                               {renderSectionContent(activeSection)}
+                              {renderComments(activeSection)}
                             </div>
                           );
                         })()}
