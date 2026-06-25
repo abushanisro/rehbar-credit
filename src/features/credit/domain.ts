@@ -196,6 +196,7 @@ export const IC_SECTIONS = [
   { id: "risk_assessment",      roman: "X",    title: "RISK ASSESSMENT & MITIGATION",                        short: "Risk Assessment",   desc: "Business, industry, financial, transaction risks + mitigants" },
   { id: "visit_reference",      roman: "XI",   title: "VISIT REPORT & EXEC RECOMMENDATION",                  short: "Visit Report",      desc: "Site visit, reference checks (vendors, bankers, customers), exec recommendation" },
   { id: "product_specifics",    roman: "XII",  title: "SPECIFIC PRODUCT REQUIREMENTS & EXEMPTIONS",          short: "Product Reqs",      desc: "Product-rule application (PF/TF projections, PLS reporting, HL FOIR/LTV, etc.)" },
+  { id: "triangulation_analysis", roman: "XIII", title: "TRIANGULATION ANALYSIS (GST × BSA × ITR)",           short: "Triangulation",     desc: "Accumn cross-source verification: profile match/mismatch, financial summary cross-check, customer/supplier concentration, circular/related party transactions. AI feedback on data quality and key flags." },
 ] as const;
 
 export type ICSectionId = (typeof IC_SECTIONS)[number]["id"];

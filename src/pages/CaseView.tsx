@@ -48,6 +48,7 @@ import type { IcNoteShape } from "@/tabs/case/ic/ICNoteDocument";
 import { annotationsToSvgString } from "@/tabs/case/ic/ICAnnotationLayer";
 import { buildIcNoteHtml as buildIcNoteHtmlFull, buildIcNotePrintCss } from "@/tabs/case/ic/buildIcNoteHtml";
 import { TriangulationTab } from "@/tabs/case/TriangulationTab";
+import { VisitReportTab } from "@/tabs/case/VisitReportTab";
 import type { TriangulationData } from "@/lib/triangulation-excel-parser";
 
 type CaseRow = Tables<"credit_cases">;
@@ -457,7 +458,7 @@ function CaseViewInner() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [tab, setTabRaw] = useState<"review" | "provisional" | "ratios" | "projections" | "ic_note" | "bank" | "gst" | "cibil" | "triangulation" | "partner">("review");
+  const [tab, setTabRaw] = useState<"review" | "provisional" | "ratios" | "projections" | "ic_note" | "bank" | "gst" | "cibil" | "triangulation" | "visit_report" | "partner">("review");
   const [entity, setEntity] = useState<"main" | "partner">("main");
   const [partnerSubTab, setPartnerSubTab] = useState<"review" | "ratios" | "bank" | "gst">("review");
   const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
@@ -3591,6 +3592,7 @@ function CaseViewInner() {
             ["gst",            "GST"],
             ["cibil",          "CIBIL"],
             ["triangulation",  "Triangulation"],
+            ["visit_report",   "Visit Report"],
             ["ic_note",        "IC Note"],
           ] as const).map(([k, l]) => (
             <button
@@ -4900,7 +4902,11 @@ function CaseViewInner() {
             progress={progress}
             progressLabel={progressLabel}
             docs={docs.filter(d => d.doc_class === "projections")}
+            allDocs={mainDocs}
             onGenerate={(notes) => runNarrative(notes)}
+            onUpload={(f, cls, fy) => handleUpload(f, cls, fy)}
+            onCancel={handleCancelUpload}
+            onEdit={handleEditDoc}
             onDelete={handleDeleteDoc}
             onRetry={handleRetry}
             onPatchSection={patchIcSection}
@@ -4913,6 +4919,7 @@ function CaseViewInner() {
             onRatioPatch={saveRatioField}
             company={linkedCompany}
             directors={linkedDirs}
+            triangulationData={triangulationData?.report_data ?? null}
           />
 
           {/* PDF download (only when note exists) */}
@@ -5107,6 +5114,14 @@ function CaseViewInner() {
         <TriangulationTab
           cc={cc}
           data={triangulationData}
+          user={user!}
+          onReload={reload}
+        />
+      )}
+
+      {tab === "visit_report" && (
+        <VisitReportTab
+          cc={cc}
           user={user!}
           onReload={reload}
         />
@@ -5587,9 +5602,9 @@ function BankStatementTab({ cc, data, docs, user, bsaData, onReload }: { cc: Cas
         </>
       )}
 
-      {/* ── BSA Import (Perfios Consolidated Excel) ── */}
+      {/* ── BSA Import (Accumn Consolidated Excel) ── */}
       <Panel
-        title="Bank Statement Analysis (BSA)" ticker="Perfios Excel"
+        title="Bank Statement Analysis (BSA)" ticker="Accumn Excel"
         status={bsaData ? "live" : "idle"}
         actions={bsaData ? (
           <button onClick={deleteBsa} className="text-[9px] tracking-widest text-destructive/70 border border-destructive/30 px-2 py-0.5 hover:bg-destructive/10">
@@ -5599,7 +5614,7 @@ function BankStatementTab({ cc, data, docs, user, bsaData, onReload }: { cc: Cas
       >
         {!bsaData ? (
           <div className="space-y-2">
-            <p className="text-xs text-muted-foreground">Import a Perfios Consolidated BSA Excel (.xlsx) to display pre-computed banking analytics.</p>
+            <p className="text-xs text-muted-foreground">Import an Accumn Consolidated BSA Excel (.xlsx) to display pre-computed banking analytics.</p>
             <label className={`flex items-center gap-2 text-[10px] tracking-widest px-3 py-1.5 border transition-colors cursor-pointer ${bsaBusy ? "border-muted text-muted-foreground opacity-40 cursor-not-allowed" : "border-primary text-primary hover:bg-primary hover:text-primary-foreground"}`}>
               <input type="file" accept=".xlsx,.xls" className="hidden" disabled={bsaBusy}
                 onChange={async e => { const f = e.target.files?.[0]; if (f) { e.target.value = ""; await handleBsaUpload(f); } }} />

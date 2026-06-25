@@ -385,7 +385,7 @@ function buildAccumnChunks(report: AccumnReport | null | undefined, clientName: 
 function buildTriangulationChunks(data: TriangData | null | undefined, clientName: string): Array<{ content: string; chunk_type: string; metadata: Record<string, unknown> }> {
   if (!data?.report_data) return [];
   const d = data.report_data;
-  const lines = [`[PERFIOS TRIANGULATION REPORT — GST × BSA × ITR — ${clientName}]`];
+  const lines = [`[ACCUMN TRIANGULATION REPORT — GST × BSA × ITR — ${clientName}]`];
 
   // Profile mismatches
   const mismatches = (d.profileDetails ?? []).filter(p => p.result === "Mismatch");

@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, Fragment } from "react";
 import { IC_SECTIONS } from "@/features/credit/domain";
+import type { DocClass } from "@/features/credit/domain";
 import type { CaseRow, ExtractedRow, RatioRow, DocRow } from "@/features/case/types";
 import {
   ICSummaryPanel, ICHistoricalTables, ICProjectionsTable,
@@ -7,6 +8,9 @@ import {
   ICRehbarHistory, ICVisitReference, ICProductSpecifics,
 } from "./ICComponents";
 import { ProjectionsTab } from "@/tabs/case/ProjectionsTab";
+import { TriangulationDisplay } from "@/tabs/case/TriangulationTab";
+import type { TriangulationData } from "@/lib/triangulation-excel-parser";
+import { UploadGrid } from "@/components/case/UploadGrid";
 import { ICAnnotationLayer, annotationsToSvgString } from "./ICAnnotationLayer";
 import type { Annotation, DrawTool } from "./ICAnnotationLayer";
 
@@ -166,7 +170,7 @@ function BulletMd({ text, skipTables = false }: { text: string; skipTables?: boo
 
 function SectionPanel({
   sectionId, cc, extracted, ratios, cellEdits, customRows, onCellEdit, onAddRow, onCasePatch, onRatioPatch, company, directors,
-  busy, progress, progressLabel, docs, onGenerateNote, onDelete, onRetry,
+  busy, progress, progressLabel, docs, allDocs, onGenerateNote, onUpload, onCancel, onEdit, onDelete, onRetry, triangulationData,
 }: {
   sectionId: string;
   cc: CaseRow;
@@ -184,9 +188,14 @@ function SectionPanel({
   progress?: number;
   progressLabel?: string;
   docs?: DocRow[];
+  allDocs?: DocRow[];
   onGenerateNote?: () => void;
+  onUpload?: (f: File, cls: DocClass, fy: number | null) => void;
+  onCancel?: () => void;
+  onEdit?: (id: string, doc_class: string, fiscal_year: number | null) => void;
   onDelete?: (doc: DocRow) => void;
   onRetry?: (doc: DocRow) => void;
+  triangulationData?: TriangulationData | null;
 }) {
   const provisional = ((cc.ic_note as Record<string, unknown> | null)?.provisional ?? []) as Array<{ fiscal_year: number; months_covered?: number; pl?: Array<{ label: string; value: number | null; override_value?: number | null }>; bs?: Array<{ label: string; value: number | null; override_value?: number | null }> }>;
 
@@ -225,6 +234,9 @@ function SectionPanel({
     case "rehbar_funding_history": return <ICRehbarHistory cc={cc} />;
     case "visit_reference":        return <ICVisitReference cc={cc} />;
     case "product_specifics":      return <ICProductSpecifics cc={cc} />;
+    case "triangulation_analysis": return triangulationData
+      ? <TriangulationDisplay data={triangulationData} />
+      : <div style={{ fontSize: 11, color: IC.muted, fontStyle: "italic", padding: "12px 0" }}>No Accumn triangulation report uploaded. Upload from the Triangulation tab.</div>;
     default:                       return null;
   }
 }
@@ -334,7 +346,11 @@ export function ICNoteDocument({
   progress,
   progressLabel,
   docs,
+  allDocs,
   onGenerate,
+  onUpload,
+  onCancel,
+  onEdit,
   onDelete,
   onRetry,
   onPatchSection,
@@ -347,6 +363,7 @@ export function ICNoteDocument({
   onRatioPatch,
   company,
   directors,
+  triangulationData,
 }: {
   cc: CaseRow;
   extracted: ExtractedRow[];
@@ -357,7 +374,11 @@ export function ICNoteDocument({
   progress?: number;
   progressLabel?: string;
   docs?: DocRow[];
+  allDocs?: DocRow[];
   onGenerate: (notes?: string) => void;
+  onUpload?: (f: File, cls: DocClass, fy: number | null) => void;
+  onCancel?: () => void;
+  onEdit?: (id: string, doc_class: string, fiscal_year: number | null) => void;
   onDelete?: (doc: DocRow) => void;
   onRetry?: (doc: DocRow) => void;
   onPatchSection: (sectionId: string, markdown: string) => Promise<void>;
@@ -370,6 +391,7 @@ export function ICNoteDocument({
   onRatioPatch?: (ratioId: string, field: "ratio_value" | "benchmark", val: number | null) => Promise<void>;
   company?: Record<string, string | null> | null;
   directors?: Record<string, string | null>[] | null;
+  triangulationData?: TriangulationData | null;
 }) {
   const [editBlock, setEditBlock]                       = useState<{ sectionId: string; blockIdx: number; val: string } | null>(null);
   const [showComments, setShowComments]                 = useState(false);
@@ -587,7 +609,7 @@ export function ICNoteDocument({
   const hasDataPanel = (id: string) => [
     "executive_summary","historical_financial","projections","key_ratios",
     "client_promoter","investment_structure","rehbar_funding_history",
-    "visit_reference","product_specifics",
+    "visit_reference","product_specifics","triangulation_analysis",
   ].includes(id);
 
   return (
@@ -774,7 +796,7 @@ export function ICNoteDocument({
               );
             })}
             <div style={{ height: 1, background: "rgba(212,201,176,0.1)", margin: "8px 0" }} />
-            {[["R", "Risk Register"], ["CP", "Conditions Precedent"], ["SW", "SWOT Analysis"]].map(([abbr, label]) => (
+            {[["CP", "Conditions Precedent"], ["SW", "SWOT Analysis"]].map(([abbr, label]) => (
               <div key={abbr} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 14px" }}>
                 <span style={{ fontSize: 8, fontFamily: "'Playfair Display', Georgia, serif", fontWeight: 700, color: "rgba(212,201,176,0.3)", width: 16 }}>{abbr}</span>
                 <span style={{ fontSize: 9, color: "rgba(250,250,246,0.3)", fontFamily: "'Source Serif 4', Georgia, serif" }}>{label}</span>
@@ -880,9 +902,14 @@ export function ICNoteDocument({
                       progress={progress}
                       progressLabel={progressLabel}
                       docs={docs}
+                      allDocs={allDocs}
                       onGenerateNote={() => onGenerate()}
+                      onUpload={onUpload}
+                      onCancel={onCancel}
+                      onEdit={onEdit}
                       onDelete={onDelete}
                       onRetry={onRetry}
+                      triangulationData={triangulationData}
                     />
                   </div>
                 )}
@@ -1017,52 +1044,6 @@ export function ICNoteDocument({
               </Fragment>
             );
           })}
-
-          {/* ── Risk Register ───────────────────────────────────────────────── */}
-          {ic.risks && ic.risks.length > 0 && (
-            <div style={{ padding: "32px 36px 28px", borderBottom: `1px solid ${IC.rule}` }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 16 }}>
-                <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 28, fontWeight: 900, color: IC.gold, lineHeight: 1 }}>R</div>
-                <div style={{ borderLeft: `2px solid ${IC.navy}`, paddingLeft: 12 }}>
-                  <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 13, fontWeight: 700, color: IC.navy, letterSpacing: "0.02em" }}>
-                    RISK REGISTER
-                  </div>
-                </div>
-              </div>
-              <div style={{ height: 1, background: IC.rule, marginBottom: 16 }} />
-              <div style={{ overflowX: "auto", borderRadius: 3, border: `1px solid ${IC.rule}` }}>
-                <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse", fontFamily: "'Source Serif 4', Georgia, serif" }}>
-                  <thead>
-                    <tr style={{ background: IC.navy, borderBottom: `1px solid rgba(212,201,176,0.2)` }}>
-                      {["Category","Risk Factor","Mitigant","Severity"].map(h => (
-                        <th key={h} style={{ textAlign: "left", padding: "8px 12px", fontSize: 7.5, letterSpacing: "0.14em", color: IC.goldLt, textTransform: "uppercase", fontWeight: 700, whiteSpace: "nowrap" }}>
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ic.risks.map((r, i) => {
-                      const sevBg = r.severity === "high" ? IC.failBg : r.severity === "medium" ? IC.cautBg : IC.passBg;
-                      const sevColor = r.severity === "high" ? IC.fail : r.severity === "medium" ? IC.caution : IC.pass;
-                      return (
-                        <tr key={i} style={{ borderBottom: `1px solid ${IC.rule}`, background: i % 2 === 1 ? "rgba(212,201,176,0.07)" : "transparent" }}>
-                          <td style={{ padding: "7px 12px", fontSize: 9, fontWeight: 700, color: IC.gold, textTransform: "uppercase", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>{r.category}</td>
-                          <td style={{ padding: "7px 12px", color: IC.ink, fontSize: 11 }}>{r.risk}</td>
-                          <td style={{ padding: "7px 12px", color: IC.muted, fontSize: 11 }}>{r.mitigant}</td>
-                          <td style={{ padding: "7px 12px", textAlign: "center" }}>
-                            <span style={{ fontSize: 8, fontWeight: 700, padding: "3px 8px", borderRadius: 3, background: sevBg, color: sevColor, letterSpacing: "0.1em" }}>
-                              {r.severity?.toUpperCase()}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
 
           {/* ── Conditions Precedent ────────────────────────────────────────── */}
           {ic.conditions_precedent && ic.conditions_precedent.length > 0 && (

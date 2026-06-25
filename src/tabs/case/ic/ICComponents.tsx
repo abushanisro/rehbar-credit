@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { supabase } from "@/integrations/supabase/client";
 import {
   PRODUCTS, RATIO_DISPLAY_NAMES, formatRatio,
 } from "@/features/credit/domain";
@@ -962,38 +963,231 @@ export function ICRehbarHistory({ cc }: { cc: CaseRow }) {
   );
 }
 
+interface VisitAttachment {
+  id: string;
+  file_name: string;
+  file_path: string;
+  mime_type: string;
+  category: string;
+  uploaded_at: string;
+  signedUrl: string;
+}
+
 export function ICVisitReference({ cc }: { cc: CaseRow }) {
+  const icNote = (cc.ic_note as Record<string, unknown> | null) ?? {};
+  const vr = icNote["visit_report"] as {
+    checklist?: Record<string, { status: string; source: string; notes: string }>;
+    overall_notes?: string;
+    exec_recommendation?: string;
+  } | undefined;
+
+  const CHECKS = [
+    { key: "banker_reference",   label: "Banker Reference",        defaultSource: "Principal Bank" },
+    { key: "vendor_check",       label: "Vendor / Supplier Check", defaultSource: "Key Suppliers" },
+    { key: "customer_reference", label: "Customer Reference",      defaultSource: "Major Clients" },
+    { key: "site_visit",         label: "Site Visit",              defaultSource: "Business Premises" },
+  ];
+
+  // Local statuses — seeded from saved data, editable inline
+  const [statuses, setStatuses] = useState<Record<string, string>>(() =>
+    Object.fromEntries(CHECKS.map(c => [c.key, vr?.checklist?.[c.key]?.status ?? "pending"])),
+  );
+  const [saving, setSaving] = useState<string | null>(null);
+
+  const [attachments, setAttachments] = useState<VisitAttachment[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase
+        .from("visit_report_attachments" as never)
+        .select("*")
+        .eq("case_id", cc.id)
+        .order("uploaded_at", { ascending: true });
+      if (cancelled || !data) return;
+      const rows = data as Omit<VisitAttachment, "signedUrl">[];
+      const signed = await Promise.all(
+        rows.map(async r => {
+          const { data: sd } = await supabase.storage.from("case-files").createSignedUrl(r.file_path, 3600);
+          return { ...r, signedUrl: sd?.signedUrl ?? "" };
+        }),
+      );
+      if (!cancelled) setAttachments(signed);
+    })();
+    return () => { cancelled = true; };
+  }, [cc.id]);
+
+  async function updateStatus(key: string, newStatus: string) {
+    setStatuses(s => ({ ...s, [key]: newStatus }));
+    setSaving(key);
+    try {
+      const existing = (cc.ic_note as Record<string, unknown> | null) ?? {};
+      const existingVr = (existing["visit_report"] as Record<string, unknown>) ?? {};
+      const existingChecklist = (existingVr["checklist"] as Record<string, unknown>) ?? {};
+      const existingItem = (existingChecklist[key] as Record<string, unknown>) ?? {};
+      const updated = {
+        ...existing,
+        visit_report: {
+          ...existingVr,
+          checklist: {
+            ...existingChecklist,
+            [key]: { ...existingItem, status: newStatus },
+          },
+        },
+      };
+      await supabase.from("credit_cases").update({ ic_note: updated }).eq("id", cc.id);
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const statusSelectCls = (s: string) =>
+    s === "done" ? "bg-emerald-50 text-emerald-800 border-emerald-300" :
+    s === "na"   ? "bg-slate-100 text-slate-600 border-slate-300" :
+                   "bg-amber-50 text-amber-800 border-amber-300";
+
+  const photos    = attachments.filter(a => a.category === "photo");
+  const documents = attachments.filter(a => a.category === "document");
+
+  function fileIcon(name: string) {
+    if (name.match(/\.pdf$/i))   return "📄";
+    if (name.match(/\.xlsx?$/i)) return "📊";
+    if (name.match(/\.docx?$/i)) return "📝";
+    return "📁";
+  }
+
   return (
-    <div className="space-y-4">
-      {cc.analyst_notes ? (
-        <div>
-          <SectionLabel>Analyst Notes / Site Visit Observations</SectionLabel>
-          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.analyst_notes}</p>
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground italic">No analyst notes recorded. Add visit report, reference check findings, and executive recommendation via Edit on the case header.</p>
-      )}
-      <div className="border-t border-border/40 pt-4">
+    <div className="space-y-5">
+      {/* ── Reference checklist ─────────────────────────────────────────── */}
+      <div>
         <SectionLabel>Reference Check Status</SectionLabel>
         <table className="w-full text-sm">
           <thead className="text-muted-foreground border-b border-border">
             <tr>
               <th className="text-left py-1.5 font-medium">Check Type</th>
               <th className="text-left font-medium">Source</th>
-              <th className="text-left font-medium">Status</th>
+              <th className="text-left font-medium w-32">Status</th>
             </tr>
           </thead>
           <tbody>
-            {[["Banker Reference","Principal Bank","Pending"],["Vendor / Supplier Check","Key Suppliers","Pending"],["Customer Reference","Major Clients","Pending"],["Site Visit","Business Premises","Pending"]].map(([t,s,st]) => (
-              <tr key={t} className="border-b border-border/30">
-                <td className="py-1.5 text-foreground">{t}</td>
-                <td className="text-muted-foreground">{s}</td>
-                <td><span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">{st}</span></td>
-              </tr>
-            ))}
+            {CHECKS.map(({ key, label, defaultSource }) => {
+              const item  = vr?.checklist?.[key];
+              const status = statuses[key] ?? "pending";
+              return (
+                <tr key={key} className="border-b border-border/30">
+                  <td className="py-2 text-foreground">{label}</td>
+                  <td className="text-muted-foreground text-xs">{item?.source || defaultSource}</td>
+                  <td className="py-1.5">
+                    <div className="relative">
+                      <select
+                        value={status}
+                        disabled={saving === key}
+                        onChange={e => updateStatus(key, e.target.value)}
+                        className={`appearance-none w-full text-[10px] font-bold tracking-widest border px-2 py-1 pr-6 cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary transition-colors ${statusSelectCls(status)} ${saving === key ? "opacity-50 cursor-wait" : ""}`}
+                      >
+                        <option value="pending">PENDING</option>
+                        <option value="done">DONE</option>
+                        <option value="na">N/A</option>
+                      </select>
+                      <span className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] opacity-50">▾</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {/* ── Per-check findings ──────────────────────────────────────────── */}
+      {CHECKS.some(({ key }) => vr?.checklist?.[key]?.notes) && (
+        <div className="space-y-2">
+          <SectionLabel>Reference Check Findings</SectionLabel>
+          {CHECKS.map(({ key, label }) => {
+            const notes = vr?.checklist?.[key]?.notes;
+            if (!notes) return null;
+            return (
+              <div key={key} className="border-l-2 border-primary/30 pl-3 py-1">
+                <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-0.5">{label}</div>
+                <p className="text-xs text-foreground leading-relaxed whitespace-pre-wrap">{notes}</p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Site visit observations ─────────────────────────────────────── */}
+      {vr?.overall_notes ? (
+        <div>
+          <SectionLabel>Site Visit Observations</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{vr.overall_notes}</p>
+        </div>
+      ) : cc.analyst_notes ? (
+        <div>
+          <SectionLabel>Analyst Notes</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{cc.analyst_notes}</p>
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground italic">No visit observations recorded. Add via the Visit Report tab.</p>
+      )}
+
+      {/* ── Exec recommendation ─────────────────────────────────────────── */}
+      {vr?.exec_recommendation && (
+        <div>
+          <SectionLabel>Executive Recommendation</SectionLabel>
+          <p className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">{vr.exec_recommendation}</p>
+        </div>
+      )}
+
+      {/* ── Facility photos ─────────────────────────────────────────────── */}
+      {photos.length > 0 && (
+        <div>
+          <SectionLabel>Facility Photos ({photos.length})</SectionLabel>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
+            {photos.map(att => (
+              <div key={att.id} className="border border-border/60 overflow-hidden">
+                <a href={att.signedUrl} target="_blank" rel="noopener noreferrer">
+                  <img
+                    src={att.signedUrl}
+                    alt={att.file_name}
+                    className="w-full h-32 object-cover"
+                  />
+                </a>
+                <div className="px-2 py-1 bg-muted/20 border-t border-border/40">
+                  <div className="text-[8px] text-muted-foreground truncate" title={att.file_name}>{att.file_name}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Documents ───────────────────────────────────────────────────── */}
+      {documents.length > 0 && (
+        <div>
+          <SectionLabel>Documents ({documents.length})</SectionLabel>
+          <div className="space-y-1.5 mt-2">
+            {documents.map(att => (
+              <a
+                key={att.id}
+                href={att.signedUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2.5 border border-border/60 px-3 py-2 hover:bg-muted/20 transition-colors"
+              >
+                <span className="text-base shrink-0">{fileIcon(att.file_name)}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-primary truncate">{att.file_name}</div>
+                  <div className="text-[9px] text-muted-foreground">
+                    {new Date(att.uploaded_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+                  </div>
+                </div>
+                <span className="text-[9px] text-muted-foreground shrink-0">↗</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -58,7 +58,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function TriangulationDisplay({ data }: { data: TriangulationData }) {
+export function TriangulationDisplay({ data }: { data: TriangulationData }) {
   return (
     <div className="space-y-6">
       {/* ── Source Date Range ───────────────────────────────────────────── */}
@@ -377,7 +377,7 @@ export function TriangulationTab({
 
   const handleFile = async (file: File) => {
     if (!isTriangulationExcel(file) && !file.name.toLowerCase().endsWith(".xlsx") && !file.name.toLowerCase().endsWith(".xls")) {
-      toast.error("Please upload a Perfios triangulation Excel file (.xlsx)");
+      toast.error("Please upload an Accumn triangulation Excel file (.xlsx)");
       return;
     }
     setBusy(true);
@@ -410,10 +410,10 @@ export function TriangulationTab({
       {/* Upload panel */}
       <div className="border border-border p-4 space-y-3">
         <div className="text-[9px] tracking-widest text-muted-foreground uppercase">
-          Triangulation Import — Perfios Excel
+          Triangulation Import — Accumn Excel
         </div>
         <div className="text-[10px] text-muted-foreground">
-          Upload the Perfios multi-source triangulation Excel (GST × BSA × ITR cross-reference).
+          Upload the Accumn multi-source triangulation Excel (GST × BSA × ITR cross-reference).
           Extracts profile details, financial summary, customer/supplier concentration, and circular transactions.
         </div>
         <input

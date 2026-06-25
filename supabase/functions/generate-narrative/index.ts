@@ -470,7 +470,7 @@ function buildCibilSection(rows: CibilReportRow[]): string {
 function buildTriangulationSection(row: TriangulationReportRow | null | undefined): string {
   if (!row?.report_data) return "";
   const d = row.report_data;
-  const lines: string[] = ["**Perfios Triangulation Report (GST × BSA × ITR)**"];
+  const lines: string[] = ["**Accumn Triangulation Report (GST × BSA × ITR)**"];
 
   // Profile mismatches
   const mismatches = (d.profileDetails ?? []).filter(p => p.result === "Mismatch");
@@ -509,6 +509,36 @@ function buildTriangulationSection(row: TriangulationReportRow | null | undefine
   }
 
   return lines.join("\n");
+}
+
+function buildVisitReportSection(vr: Record<string, unknown> | undefined): string {
+  if (!vr) return "No visit report data recorded.";
+  const lines: string[] = [];
+
+  const checklist = vr["checklist"] as Record<string, { status: string; source: string; notes: string }> | undefined;
+  if (checklist) {
+    lines.push("**Reference Checks:**");
+    const CHECK_LABELS: Record<string, string> = {
+      banker_reference:   "Banker Reference",
+      vendor_check:       "Vendor / Supplier Check",
+      customer_reference: "Customer Reference",
+      site_visit:         "Site Visit",
+    };
+    for (const [key, label] of Object.entries(CHECK_LABELS)) {
+      const item = checklist[key];
+      if (!item) continue;
+      const status = item.status === "done" ? "✓ DONE" : item.status === "na" ? "N/A" : "⏳ PENDING";
+      lines.push(`- ${label} [${item.source || "—"}]: ${status}${item.notes ? ` — ${item.notes}` : ""}`);
+    }
+  }
+
+  if (vr["overall_notes"]) lines.push(`\n**Site Visit Observations:** ${vr["overall_notes"]}`);
+  if (vr["exec_recommendation"]) lines.push(`\n**Executive Recommendation:** ${vr["exec_recommendation"]}`);
+
+  const atts = vr["attachments"] as unknown[] | undefined;
+  if (atts?.length) lines.push(`\n${atts.length} facility photo/document attachment${atts.length > 1 ? "s" : ""} on record.`);
+
+  return lines.length ? lines.join("\n") : "No visit report data recorded.";
 }
 
 function buildProjectionCredibility(financials: FinRow[]): string {
@@ -750,6 +780,9 @@ Deno.serve(async (req) => {
     // Provisional data lives in ic_note.provisional on the case, not in extracted_financials
     const icNoteJson = (cc.ic_note ?? {}) as Record<string, unknown>;
     const provisionalPeriods = (icNoteJson["provisional"] ?? []) as ProvPeriod[];
+
+    // Visit report data for Section XI
+    const visitReport = icNoteJson["visit_report"] as Record<string, unknown> | undefined;
     const provisionalBlock = buildProvisionalSection(provisionalPeriods).slice(0, 1_400);
 
     const tables     = buildTables((financials ?? []) as FinRow[], (ratios ?? []) as RatioRow[], provisionalPeriods);
@@ -758,7 +791,7 @@ Deno.serve(async (req) => {
     const accumnReport = (accumnRows as AccumnReportRow[] | null | undefined)?.[0]?.report_data ?? null;
     const accumnBlock  = buildAccumnSection(accumnReport).slice(0, 1_800);
     const cibilBlock   = buildCibilSection((cibilRows as CibilReportRow[] | null | undefined) ?? []);
-    const triBlock     = buildTriangulationSection((triRows as TriangulationReportRow[] | null | undefined)?.[0]).slice(0, 1_400);
+    const triBlock     = buildTriangulationSection((triRows as TriangulationReportRow[] | null | undefined)?.[0]).slice(0, 2_500);
     const projBlock    = buildProjectionCredibility((financials ?? []) as FinRow[]);
 
     // Bank trend analysis — detect sharp credit decline
@@ -781,7 +814,7 @@ Deno.serve(async (req) => {
     // Each phase targets ~2,500 tokens → ~40s at 60 tok/s → safe inside 115s.
 
     const PHASE1_IDS = ["executive_summary","client_promoter","investment_structure","rehbar_funding_history","historical_financial","projections"];
-    const PHASE2_IDS = ["key_ratios","cash_flow","due_diligence","risk_assessment","visit_reference","product_specifics"];
+    const PHASE2_IDS = ["key_ratios","cash_flow","due_diligence","risk_assessment","visit_reference","product_specifics","triangulation_analysis"];
 
     const activeIds = (phase === 2) ? PHASE2_IDS : PHASE1_IDS;
 
@@ -796,8 +829,9 @@ Deno.serve(async (req) => {
       cash_flow:             "Avg monthly credits vs proposed rental (coverage ratio), ABB adequacy, bounce signal, visible EMI lenders. Flag: >50% credit decline = REVENUE CONTRACTION; <40% banking vs GST = ROUTING RISK.",
       due_diligence:         "GST compliance: turnover vs P&L variance, late filings, ITC utilisation. Accumn: top customers/suppliers (name/%), circular transactions. Triangulation cross-check if available.",
       risk_assessment:       "Risk table: | Category | Risk | Observation | Mitigant | Severity |. Min 6 risks: business, financial, transaction. Severity: HIGH/MEDIUM/LOW.",
-      visit_reference:       "Site visit summary, reference checks (banker/vendor/customer). Management observations. Use 'Not provided — analyst to confirm' for missing fields.",
-      product_specifics:     "SOP rules for this product type — confirmed or excepted. Projection waiver with SOP §XII basis. Policy exceptions with justification.",
+      visit_reference:       "Use the VISIT REPORT DATA block. Summarise: (1) site visit status + key observations; (2) reference check outcomes per type (Done/Pending/N/A) + any specific findings noted; (3) exec recommendation if provided. Flag any Pending checks as pre-disbursement conditions. Use 'Not provided — analyst to confirm' for missing fields.",
+      product_specifics:        "SOP rules for this product type — confirmed or excepted. Projection waiver with SOP §XII basis. Policy exceptions with justification.",
+      triangulation_analysis:   "UI renders the full Accumn triangulation tables. Analyst observations only (no tables). Cover: (1) Profile verification — list any mismatches found (Name/DOB/Address) and their significance; (2) Financial cross-check — compare GST revenue vs ITR Revenue from Operations vs Banking Credits, flag divergence %; (3) Customer/supplier concentration — top 2 customers by % rev, any single-customer risk > 40%; (4) Circular/related-party transactions — count flagged, largest exposure, whether arms-length nature is confirmed; (5) Overall data quality — are the three sources consistent, any unexplained gaps. Flag: ROUTING RISK if banking credits < 30% of GST revenue.",
     };
 
     const systemPrompt = `You are a Senior Credit Analyst at Rehbar Financial Services. Drafting an IC Credit Appraisal Note for experienced IC members.
@@ -841,6 +875,9 @@ ${cibilBlock || "No CIBIL data."}
 
 ━━━ TRIANGULATION ━━━
 ${triBlock || "No triangulation data."}
+
+━━━ VISIT REPORT DATA ━━━
+${buildVisitReportSection(visitReport)}
 
 ━━━ PRODUCT CONTEXT ━━━${buildRagBlock("investment_structure")}${buildRagBlock("product_specifics")}${buildRagBlock("risk_assessment")}
 
