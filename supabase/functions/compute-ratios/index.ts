@@ -205,7 +205,7 @@ Deno.serve(async (req) => {
       for (const t of (thresholds ?? []).filter((t) => t.industry === industry)) tMap[t.ratio_name] = t;
     }
 
-    // Group by year
+    // Group by year (historical + projections from extracted_financials)
     const yearMap = new Map<number, { pl: Record<string, number|null>; bs: Record<string, number|null>; cf: Record<string, number|null> }>();
     for (const f of financials ?? []) {
       const y = yearMap.get(f.fiscal_year) ?? { pl: {}, bs: {}, cf: {} };
@@ -213,11 +213,38 @@ Deno.serve(async (req) => {
       if (f.statement_type === "profit_loss") y.pl = { ...y.pl, ...dict };
       if (f.statement_type === "balance_sheet") y.bs = { ...y.bs, ...dict };
       if (f.statement_type === "cash_flow") y.cf = { ...y.cf, ...dict };
+      if (f.statement_type === "projections") {
+        // Strip "Projected " prefix so normalizeFinancials sees canonical names
+        const stripped: Record<string, number|null> = {};
+        for (const [k, v] of Object.entries(dict)) stripped[k.replace(/^Projected\s+/i, "")] = v;
+        y.pl = { ...y.pl, ...stripped };
+        y.bs = { ...y.bs, ...stripped };
+      }
       yearMap.set(f.fiscal_year, y);
     }
 
+    // Add provisional periods from ic_note (annualize P&L flow items; BS is point-in-time)
+    type ProvPeriod = { fiscal_year: number; months_covered: number; pl: LineItem[]; bs: LineItem[]; cf: LineItem[] };
+    const provisional = (((cc.ic_note as Record<string, unknown>)?.provisional) ?? []) as ProvPeriod[];
+    // Sort ascending by months_covered so the most complete period for a FY wins
+    const provSorted = [...provisional].sort((a, b) => (a.months_covered ?? 12) - (b.months_covered ?? 12));
+    for (const period of provSorted) {
+      const fy = period.fiscal_year;
+      if (!fy) continue;
+      const mult = (period.months_covered ?? 12) > 0 ? 12 / (period.months_covered ?? 12) : 1;
+      const existing = yearMap.get(fy) ?? { pl: {}, bs: {}, cf: {} };
+      const provPl = toDict(period.pl);
+      const annualPl: Record<string, number|null> = {};
+      for (const [k, v] of Object.entries(provPl)) annualPl[k] = v !== null ? v * mult : null;
+      yearMap.set(fy, {
+        pl: { ...existing.pl, ...annualPl },
+        bs: { ...existing.bs, ...toDict(period.bs) },
+        cf: existing.cf,
+      });
+    }
+
     if (yearMap.size === 0) {
-      return new Response(JSON.stringify({ error: "No confirmed financials" }), {
+      return new Response(JSON.stringify({ error: "No financials found" }), {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }

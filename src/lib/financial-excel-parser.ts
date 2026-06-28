@@ -13,9 +13,12 @@ export interface FinLineItem {
   sort_order?: number;
 }
 
+export type FinancialFormat = "corpository" | "simple";
+
 export interface ParsedFinancialStatement {
   stmt_type: "balance_sheet" | "profit_loss" | "cash_flow";
   unit: string;
+  format: FinancialFormat;
   fiscal_years: number[];
   line_items_by_fy: Record<number, FinLineItem[]>;
 }
@@ -121,6 +124,14 @@ export async function parseFinancialExcel(file: File): Promise<ParsedFinancialSt
 
     if (allRows.length === 0) continue;
 
+    // Detect Corpository format by presence of known section header rows
+    const CORP_HEADERS = new Set([
+      "SHAREHOLDERS FUND", "NON CURRENT LIABILITIES", "CURRENT LIABILITIES",
+      "FIXED ASSET", "NON CURRENT ASSETS", "CURRENT ASSETS",
+    ]);
+    const corpHeaderCount = allRows.filter(r => CORP_HEADERS.has(r.label.toUpperCase())).length;
+    const format: FinancialFormat = corpHeaderCount >= 2 ? "corpository" : "simple";
+
     // Build line_items_by_fy
     const line_items_by_fy: Record<number, FinLineItem[]> = {};
     for (const fy of fiscal_years) {
@@ -149,7 +160,7 @@ export async function parseFinancialExcel(file: File): Promise<ParsedFinancialSt
       }
       existing.fiscal_years.sort((a, b) => a - b);
     } else {
-      results.push({ stmt_type: stmtType, unit, fiscal_years, line_items_by_fy });
+      results.push({ stmt_type: stmtType, unit, format, fiscal_years, line_items_by_fy });
     }
   }
 

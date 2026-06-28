@@ -72,95 +72,19 @@
     --sidebar-ring:               25 82% 51%;
   }
 
-  /* ── Dark mode ─────────────────────────────────────────────────────────────── */
-  :root.dark {
-    --background: 222 47% 11%;        /* #0F172A slate-900 */
-    --foreground: 210 40% 96%;        /* #F1F5F9 slate-100 */
-
-    --surface:    220 40% 14%;        /* #1E293B slate-800 */
-    --surface-2:  217 33% 18%;        /* #253347 */
-    --surface-3:  215 28% 22%;        /* #2D3F52 */
-
-    --card:             220 40% 14%;
-    --card-foreground:  210 40% 96%;
-
-    --popover:            220 40% 14%;
-    --popover-foreground: 210 40% 96%;
-
-    --primary:            25 82% 51%;
-    --primary-foreground: 0 0% 100%;
-
-    --secondary:            215 28% 22%;
-    --secondary-foreground: 210 40% 96%;
-
-    --muted:            215 28% 22%;
-    --muted-foreground: 215 20% 55%;
-
-    --accent:            36 91% 56%;
-    --accent-foreground: 222 47% 11%;
-
-    --destructive:            0 72% 60%;
-    --destructive-foreground: 0 0% 100%;
-
-    --success:            142 72% 42%;
-    --success-foreground: 0 0% 100%;
-
-    --warning:            32 95% 55%;
-    --warning-foreground: 222 47% 11%;
-
-    --border: 215 25% 27%;
-    --input:  220 40% 14%;
-    --ring:   25 82% 51%;
-
-    --grid-line: 215 25% 22%;
-
-    --shadow-panel:    0 1px 3px hsl(0 0% 0% / 0.3), 0 1px 2px hsl(0 0% 0% / 0.2);
-    --shadow-card:     0 4px 6px -1px hsl(0 0% 0% / 0.25), 0 2px 4px -2px hsl(0 0% 0% / 0.15);
-    --shadow-elevated: 0 10px 15px -3px hsl(0 0% 0% / 0.3), 0 4px 6px -2px hsl(0 0% 0% / 0.2);
-    --shadow-glow:     0 0 0 3px hsl(25 82% 51% / 0.25);
-    --gradient-scan:   none;
-
-    --sidebar-background:         222 47% 9%;
-    --sidebar-foreground:         210 40% 96%;
-    --sidebar-primary:            25 82% 51%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent:             215 28% 22%;
-    --sidebar-accent-foreground:  210 40% 96%;
-    --sidebar-border:             215 25% 27%;
-    --sidebar-ring:               25 82% 51%;
-  }
-
-  /* Legacy alias: existing code adds "light" class → keep as no-op since :root is now light */
-  :root.light {
-    /* :root defaults are already light — no overrides needed */
-  }
 }
 
 @layer base {
   * { @apply border-border; }
 
-  html.theme-switching *,
-  html.theme-switching *::before,
-  html.theme-switching *::after {
-    transition:
-      background-color 0.2s ease,
-      border-color 0.2s ease,
-      color 0.2s ease,
-      box-shadow 0.2s ease !important;
-  }
-
-  html {
-    transition: background-color 0.2s ease, color 0.2s ease;
-  }
-
-  html, body, #root { height: 100%; }
+  html { height: 100%; }
+  body, #root { min-height: 100%; }
 
   body {
     @apply bg-background text-foreground antialiased;
     font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
-    transition: background-color 0.2s ease, color 0.2s ease;
   }
 
   ::selection {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { TerminalLayout } from "@/components/terminal/TerminalLayout";
@@ -17,6 +18,8 @@ import {
   ICVisitReference,
   ICProductSpecifics,
 } from "@/tabs/case/ic/ICComponents";
+import { TriangulationDisplay } from "@/tabs/case/TriangulationTab";
+import type { TriangulationData } from "@/lib/triangulation-excel-parser";
 import type { CaseRow as FullCaseRow, ExtractedRow, RatioRow } from "@/features/case/types";
 
 const IC_ACCESS_ROLES = ["ic_member", "credit_committee", "admin"];
@@ -121,6 +124,7 @@ const VOTE_ACTIVE_CLS: Record<string, string> = {
 export default function ICReview() {
   const { role, user } = useAuth();
   const userEmail = user?.email ?? null;
+  const [searchParams] = useSearchParams();
 
   const [pageView, setPageView]               = useState<"pending" | "history">("pending");
   const [pending, setPending]                 = useState<ICCase[]>([]);
@@ -139,6 +143,8 @@ export default function ICReview() {
   const [decisionChoice, setDecisionChoice]   = useState<DecisionChoice>(null);
   const [decisionNotes, setDecisionNotes]     = useState("");
   const [saving, setSaving]                   = useState(false);
+
+  const [triangulationData, setTriangulationData] = useState<TriangulationData | null>(null);
 
   // Company & directors state (Feature 4)
   const [company, setCompany]     = useState<Record<string, string | null> | null>(null);
@@ -165,7 +171,11 @@ export default function ICReview() {
       .order("created_at", { ascending: false });
     const rows = (data ?? []) as ICCase[];
     setPending(rows);
-    if (rows.length > 0 && !selectedId) setSelectedId(rows[0].id);
+    const caseParam = searchParams.get("case");
+    if (rows.length > 0) {
+      const match = caseParam ? rows.find(r => r.case_code === caseParam) : null;
+      if (!selectedId) setSelectedId((match ?? rows[0]).id);
+    }
   };
 
   const loadHistory = async () => {
@@ -212,12 +222,14 @@ export default function ICReview() {
     setRatios([]);
     setCompany(null);
     setDirectors([]);
+    setTriangulationData(null);
 
     Promise.all([
       supabase.from("credit_cases").select("*").eq("id", selectedId).single(),
       supabase.from("extracted_financials").select("*").eq("case_id", selectedId),
       supabase.from("financial_ratios").select("*").eq("case_id", selectedId).order("fiscal_year"),
-    ]).then(async ([cRes, eRes, rRes]) => {
+      supabase.from("triangulation_data" as never).select("report_data").eq("case_id", selectedId).maybeSingle() as Promise<{ data: { report_data: TriangulationData } | null }>,
+    ]).then(async ([cRes, eRes, rRes, triRes]) => {
       if (cRes.data) {
         setCaseDetail(cRes.data as FullCaseRow);
         // Feature 4: load company + directors
@@ -233,6 +245,7 @@ export default function ICReview() {
       }
       setExtracted((eRes.data ?? []) as ExtractedRow[]);
       setRatios((rRes.data ?? []) as RatioRow[]);
+      if (triRes?.data?.report_data) setTriangulationData(triRes.data.report_data);
       setDetailLoading(false);
     });
   }, [selectedId]);
@@ -481,11 +494,52 @@ export default function ICReview() {
       case "due_diligence":
         return md ? <BulletOnlyMd text={md} /> : <p className="text-sm text-muted-foreground italic">No due diligence notes recorded by the analyst.</p>;
       case "risk_assessment":
-        return md ? <BulletOnlyMd text={md} /> : <p className="text-sm text-muted-foreground italic">No risk narrative recorded. See the Risk Register section.</p>;
+        return (
+          <div className="space-y-5">
+            {ic?.risks && ic.risks.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="border-b border-border bg-surface-2/40">
+                      {["Category", "Risk", "Mitigant", "Severity"].map(h => (
+                        <th key={h} className="text-left py-3 px-4 text-xs font-medium text-muted-foreground">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ic.risks.map((r, i) => (
+                      <tr key={i} className="border-b border-border/40 hover:bg-surface-2/40">
+                        <td className="py-3 px-4 text-sm text-muted-foreground whitespace-nowrap">{r.category}</td>
+                        <td className="py-3 px-4 text-sm">{r.risk}</td>
+                        <td className="py-3 px-4 text-sm text-muted-foreground">{r.mitigant}</td>
+                        <td className="py-3 px-4">
+                          <span className={cn("text-xs font-medium px-2.5 py-1 rounded-full border capitalize", SEVERITY_STYLE[r.severity?.toLowerCase()] ?? "bg-slate-50 text-slate-600 border-slate-200")}>
+                            {r.severity}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {md ? <BulletOnlyMd text={md} /> : !ic?.risks?.length && <p className="text-sm text-muted-foreground italic">No risk narrative recorded.</p>}
+          </div>
+        );
       case "visit_reference":
         return <div className="space-y-4">{caseDetail && <ICVisitReference cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
       case "product_specifics":
         return <div className="space-y-4">{caseDetail && <ICProductSpecifics cc={caseDetail} />}<BulletOnlyMd text={md} /></div>;
+      case "triangulation_analysis":
+        return (
+          <div className="space-y-4">
+            {triangulationData
+              ? <TriangulationDisplay data={triangulationData} />
+              : <p className="text-sm text-muted-foreground italic">No Accumn triangulation report uploaded for this case.</p>
+            }
+            <BulletOnlyMd text={md} />
+          </div>
+        );
       default:
         return md ? <BulletOnlyMd text={md} /> : <p className="text-sm text-muted-foreground italic">No content recorded for this section.</p>;
     }
@@ -753,18 +807,6 @@ export default function ICReview() {
                           </button>
                         ))}
 
-                        {ic?.risks && ic.risks.length > 0 && (
-                          <button
-                            onClick={() => setActiveSection("_risks")}
-                            className={cn("w-full text-left px-4 py-3 border-b border-border/40 transition-colors border-l-[3px]",
-                              activeSection === "_risks" ? "bg-primary/8 border-l-primary text-primary" : "border-l-transparent text-muted-foreground hover:text-foreground hover:bg-surface-2"
-                            )}
-                          >
-                            <div className="text-xs font-medium">Risk Register</div>
-                            <div className="text-[10px] text-muted-foreground/60 mt-0.5">{ic.risks.length} risks</div>
-                          </button>
-                        )}
-
                         {ic?.conditions_precedent && ic.conditions_precedent.length > 0 && (
                           <button
                             onClick={() => setActiveSection("_conditions")}
@@ -804,37 +846,7 @@ export default function ICReview() {
 
                       {/* Section content */}
                       <div className="flex-1 min-w-0 p-6 overflow-y-auto">
-                        {activeSection === "_risks" ? (
-                          <div>
-                            <h3 className="text-base font-semibold text-foreground mb-4">Risk Register</h3>
-                            <div className="overflow-x-auto">
-                              <table className="w-full text-sm border-collapse">
-                                <thead>
-                                  <tr className="border-b border-border bg-surface-2/40">
-                                    {["Category", "Risk", "Mitigant", "Severity"].map(h => (
-                                      <th key={h} className="text-left py-3 px-4 text-xs font-medium text-muted-foreground">{h}</th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {ic!.risks!.map((r, i) => (
-                                    <tr key={i} className="border-b border-border/40 hover:bg-surface-2/40">
-                                      <td className="py-3 px-4 text-sm text-muted-foreground whitespace-nowrap">{r.category}</td>
-                                      <td className="py-3 px-4 text-sm">{r.risk}</td>
-                                      <td className="py-3 px-4 text-sm text-muted-foreground">{r.mitigant}</td>
-                                      <td className="py-3 px-4">
-                                        <span className={cn("text-xs font-medium px-2.5 py-1 rounded-full border capitalize", SEVERITY_STYLE[r.severity?.toLowerCase()] ?? "bg-slate-50 text-slate-600 border-slate-200")}>
-                                          {r.severity}
-                                        </span>
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                            {renderComments("_risks")}
-                          </div>
-                        ) : activeSection === "_conditions" ? (
+                        {activeSection === "_conditions" ? (
                           <div>
                             <h3 className="text-base font-semibold text-foreground mb-4">Conditions Precedent</h3>
                             <ol className="space-y-3">

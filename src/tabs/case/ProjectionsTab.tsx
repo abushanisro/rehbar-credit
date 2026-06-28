@@ -21,6 +21,7 @@ import {
 import type { ExtractedRow, CaseRow, LineItem, DocRow } from "@/features/case/types";
 import { unitAbbr, fmtUnit } from "@/features/case/utils";
 import { UploadGrid } from "@/components/case/UploadGrid";
+import { buildProjectionsTemplate, downloadBuffer } from "@/lib/excel-templates";
 
 // ─── Recharts tooltip style ───────────────────────────────────────────────────
 const TT: React.CSSProperties = {
@@ -134,10 +135,23 @@ function getv(items: LineItem[], label: string): number | null {
   return it.override_value !== undefined && it.override_value !== null ? it.override_value : it.value;
 }
 
+/** Factor to convert a unit's native value to Lakhs (e.g., Crores → 100, INR → 1e-5). */
+function toLakhsFactor(unit: string | null | undefined): number {
+  if (!unit) return 1;
+  const u = unit.toLowerCase().trim();
+  if (u.includes("crore"))   return 100;
+  if (u.includes("lakh"))    return 1;
+  if (u.includes("million")) return 10;
+  if (u.includes("thousand")) return 0.01;
+  if (u === "inr" || u === "rupees" || u === "") return 1e-5;
+  return 1;
+}
+
 function buildModel(
   histPL: ExtractedRow[],
   histBS: ExtractedRow[],
   nForward: number,
+  histScale = 1, // multiply historical values to normalize units to match projection unit
 ): ModelOutput | null {
   if (histPL.length === 0 || nForward < 1) return null;
 
@@ -145,13 +159,25 @@ function buildModel(
   const hist = sorted.map(row => {
     const pl = (row.line_items ?? []) as unknown as LineItem[];
     const bs = ((histBS.find(b => b.fiscal_year === row.fiscal_year)?.line_items ?? []) as unknown as LineItem[]);
+    const scale = (v: number | null) => v != null ? v * histScale : null;
+    // Multi-label helpers for robustness across different extraction formats
+    const gv = (...lbls: string[]) => { for (const l of lbls) { const v = getv(pl, l); if (v != null) return v; } return null; };
+    const gb = (...lbls: string[]) => { for (const l of lbls) { const v = getv(bs, l); if (v != null) return v; } return null; };
+    // Compute EBITDA from components when available — more reliable than a direct EBITDA row
+    const hPbt  = gv("Profit Before Tax", "Net Profit Before Tax", "PBT", "Profit Before Interest and Tax");
+    const hInt  = gv("Interest Expense", "Finance Cost", "Finance Costs", "Interest and Finance Charges", "Borrowing Costs");
+    const hDepr = gv("Depreciation", "Depreciation & Amortization", "Depreciation & Amortisation", "Depreciation and Amortization");
+    const computedEbitda = hPbt != null && hInt != null && hDepr != null ? hPbt + hInt + hDepr : null;
+    const lt = gb("Long Term Borrowings", "Long-term Borrowings", "Non-current Borrowings");
+    const st = gb("Short Term Borrowings", "Short-term Borrowings", "Current Borrowings", "Working Capital Loans");
+    const derivedDebt = (lt != null || st != null) ? (lt ?? 0) + (st ?? 0) : null;
     return {
       fy:        row.fiscal_year,
-      turnover:  getv(pl, "Turnover"),
-      ebitda:    getv(pl, "EBITDA"),
-      pat:       getv(pl, "PAT"),
-      networth:  getv(bs, "Net Worth"),
-      totalDebt: getv(bs, "Total Debt"),
+      turnover:  scale(gv("Turnover", "Revenue from Operations", "Net Revenue", "Total Revenue", "Net Sales")),
+      ebitda:    scale(computedEbitda ?? gv("EBITDA", "Earnings Before Interest Tax and Depreciation")),
+      pat:       scale(gv("PAT", "Net Profit After Tax", "Profit After Tax", "Net Profit", "Profit for the Year")),
+      networth:  scale(gb("Net Worth", "Shareholders Equity", "Total Equity", "Net Worth / Equity")),
+      totalDebt: scale(gb("Total Debt", "Total Borrowings") ?? derivedDebt),
     };
   });
 
@@ -386,20 +412,28 @@ const SEV_CLS: Record<Severity, string> = {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Direct Excel import parser ────────────────────────────────────────────────
+// ORDER MATTERS: more-specific patterns must come before broader ones.
 const PROJ_LABEL_MAP: Array<[RegExp, string]> = [
-  [/turn.*over|revenue|net\s*sales?/i,          "Projected Turnover"],
-  [/\bebitda\b/i,                               "Projected EBITDA"],
-  [/profit\s*after\s*tax|^pat$|\bnet\s*profit\b/i, "Projected PAT"],
-  [/profit\s*before\s*tax|^pbt$/i,              "Projected Profit Before Tax"],
-  [/\bebit\b/i,                                 "Projected EBIT"],
-  [/gross\s*profit/i,                           "Projected Gross Profit"],
-  [/net\s*worth|shareholders?\s*equity|equity\s*capital/i, "Projected Net Worth"],
-  [/total\s*debt|borrowing/i,                   "Projected Total Debt"],
-  [/depreciation/i,                             "Projected Depreciation"],
-  [/interest|finance\s*cost/i,                  "Projected Interest Expense"],
-  [/cogs|cost\s*of\s*goods/i,                   "Projected COGS"],
-  [/total\s*assets?/i,                          "Projected Total Assets"],
-  [/operating\s*exp/i,                          "Projected Operating Expenses"],
+  // PBT must come before PAT — "Net Profit Before Tax" contains "net profit" which would otherwise hit PAT
+  [/profit\s*before\s*tax|^pbt$/i,                             "Projected Profit Before Tax"],
+  [/profit\s*after\s*tax|^pat$|\bnet\s*profit\b/i,             "Projected PAT"],
+  [/turn.*over|revenue|net\s*sales?/i,                          "Projected Turnover"],
+  [/\bebitda\b/i,                                               "Projected EBITDA"],
+  [/\bebit\b/i,                                                 "Projected EBIT"],
+  [/gross\s*profit/i,                                           "Projected Gross Profit"],
+  [/net\s*worth|shareholders?\s*equity|equity\s*capital/i,      "Projected Net Worth"],
+  [/total\s*debt\b/i,                                           "Projected Total Debt"],
+  [/long[\s-]*term\s+borrow/i,                                  "Projected LT Borrowings"],
+  [/short[\s-]*term\s+borrow|cc\s*\/?\s*od|working\s+capital\s+loan/i, "Projected ST Borrowings"],
+  [/depreciation/i,                                             "Projected Depreciation"],
+  [/interest|finance\s*cost/i,                                  "Projected Interest Expense"],
+  [/cogs|cost\s*of\s*goods|cost\s*of\s*materials|purchases?/i, "Projected COGS"],
+  [/total\s*assets?/i,                                          "Projected Total Assets"],
+  [/operating\s*exp/i,                                          "Projected Operating Expenses"],
+  [/share\s*capital|paid[\s-]*up\s*capital/i,                   "Projected Share Capital"],
+  [/reserves?\s*[&+]?\s*surplus|other\s*equity|retained\s*earning/i, "Projected Reserves"],
+  [/employee|staff|salari|personnel/i,                          "Projected Employee Expense"],
+  [/provision\s*for\s*(income\s*)?tax|income\s*tax\s*provision/i, "Projected Tax"],
 ];
 
 function mapProjLabel(raw: string): string {
@@ -424,14 +458,35 @@ async function parseProjectionExcel(
   const buf  = await file.arrayBuffer();
   const wb   = XLSX.read(buf, { type: "array", raw: false, cellText: true });
 
-  // Try each sheet; use the first one that has year-column headers
+  // Merge line items across ALL data sheets (P&L + Balance Sheet + any others).
+  // Instruction/assumption sheets are skipped.
+  const mergedItems: Record<number, LineItem[]> = {};
+  let mergedUnit = "Lakhs";
+
+  const extractYearCols = (row: string[]) => {
+    const found: { col: number; fy: number }[] = [];
+    for (let c = 1; c < row.length; c++) {
+      const cell = String(row[c] ?? "").trim();
+      const m = cell.match(/(?:fy\s*)?(\d{2,4})(?:\s*[-–]\s*\d{2,4})?/i);
+      if (m) {
+        const yr = parseInt(m[1]);
+        const fy = yr < 100 ? 2000 + yr : yr;
+        if (fy >= 2015 && fy <= 2045) found.push({ col: c, fy });
+      }
+    }
+    return found;
+  };
+
   for (const sheetName of wb.SheetNames) {
+    // Skip instruction / assumption sheets — they don't carry financial line items
+    if (/claude|instruction|assumption/i.test(sheetName)) continue;
+
     const ws = wb.Sheets[sheetName];
     if (!ws) continue;
     const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "", raw: false }) as string[][];
     if (rows.length < 2) continue;
 
-    // Detect unit from any cell in first 8 rows
+    // Detect unit from first 8 rows
     let unit = "Lakhs";
     for (const row of rows.slice(0, 8)) {
       const found = row.find(c => /amount\s*in\s*(rs|inr|lakh|crore|thousands?)/i.test(String(c)));
@@ -439,36 +494,36 @@ async function parseProjectionExcel(
         const s = String(found).toLowerCase();
         if (/crore/i.test(s)) unit = "Crores";
         else if (/thousand/i.test(s)) unit = "Thousands";
+        else if (/lakh/i.test(s)) unit = "Lakhs";
         break;
       }
     }
+    mergedUnit = unit;
 
-    // Find header row: first row where ≥1 column matches a year pattern
+    // Find header row — Priority 1: PARTICULARS row; Priority 2: first row with year patterns
     let headerIdx = -1;
-    const fyColumns: { col: number; fy: number }[] = [];
+    let fyColumns: { col: number; fy: number }[] = [];
 
-    for (let i = 0; i < Math.min(rows.length, 12); i++) {
-      const row = rows[i];
-      const found: typeof fyColumns = [];
-      for (let c = 1; c < row.length; c++) {
-        const cell = String(row[c]).trim();
-        // FY25, FY2025, FY25-26, FY2025-26, 2025, 2025-26
-        const m = cell.match(/(?:fy\s*)?(\d{2,4})(?:\s*[-–]\s*\d{2,4})?/i);
-        if (m) {
-          const yr = parseInt(m[1]);
-          const fy = yr < 100 ? 2000 + yr : yr;
-          if (fy >= 2015 && fy <= 2045) found.push({ col: c, fy });
-        }
+    for (let i = 0; i < Math.min(rows.length, 20); i++) {
+      if (String(rows[i][0] ?? "").trim().toUpperCase() === "PARTICULARS") {
+        const found = extractYearCols(rows[i]);
+        if (found.length > 0) { headerIdx = i; fyColumns = found; break; }
       }
-      if (found.length > 0) { headerIdx = i; fyColumns.push(...found); break; }
     }
-
+    if (headerIdx === -1) {
+      for (let i = 0; i < Math.min(rows.length, 12); i++) {
+        const found = extractYearCols(rows[i]);
+        if (found.length > 0) { headerIdx = i; fyColumns = found; break; }
+      }
+    }
     if (headerIdx === -1 || fyColumns.length === 0) continue;
 
-    // Collect line items per FY
-    const fyItems: Record<number, LineItem[]> = {};
-    for (const { fy } of fyColumns) fyItems[fy] = [];
+    // Ensure FY buckets exist
+    for (const { fy } of fyColumns) {
+      if (!mergedItems[fy]) mergedItems[fy] = [];
+    }
 
+    // Parse data rows and merge into the shared buckets
     for (let i = headerIdx + 1; i < rows.length; i++) {
       const row = rows[i];
       const rawLabel = String(row[0] ?? "").trim();
@@ -478,22 +533,22 @@ async function parseProjectionExcel(
       for (const { col, fy } of fyColumns) {
         const val = parseIndianNum(row[col]);
         if (val == null) continue;
-        // deduplicate — if label already added, overwrite
-        const arr = fyItems[fy];
+        const arr = mergedItems[fy];
         const idx = arr.findIndex(it => it.label === label);
+        // Keep the first sheet's value if already present (P&L takes precedence over BS for shared labels)
         if (idx === -1) arr.push({ label, value: val, confidence: 90, reviewed: false });
-        else arr[idx] = { ...arr[idx], value: val };
       }
     }
-
-    const result = Object.entries(fyItems)
-      .filter(([, items]) => items.length > 0)
-      .map(([fyStr, items]) => ({ fiscal_year: Number(fyStr), line_items: items, unit }));
-
-    if (result.length > 0) return result;
   }
 
-  throw new Error("No fiscal year columns found in the Excel. Make sure column headers include a year (e.g. FY26, FY2026, 2026).");
+  const result = Object.entries(mergedItems)
+    .filter(([, items]) => items.length > 0)
+    .map(([fyStr, items]) => ({ fiscal_year: Number(fyStr), line_items: items, unit: mergedUnit }));
+
+  if (result.length === 0)
+    throw new Error("No fiscal year columns found in the Excel. Make sure column headers include a year (e.g. FY26, FY2026, 2026).");
+
+  return result;
 }
 
 export function ProjectionsTab({
@@ -527,7 +582,10 @@ export function ProjectionsTab({
   const histPL   = extracted.filter(r => r.statement_type === "profit_loss");
   const histBS   = extracted.filter(r => r.statement_type === "balance_sheet");
 
-  const unit       = projRows[0]?.unit ?? histPL[0]?.unit ?? null;
+  // Use projection unit for display when projections exist; otherwise fall back to historical unit.
+  // When histScale normalises INR→Lakhs, force display to "Lakhs" so labels are correct.
+  const rawUnit    = projRows[0]?.unit ?? histPL[0]?.unit ?? null;
+  const unit       = (projRows.length > 0 && rawUnit == null) ? "Lakhs" : rawUnit;
   const abbr       = unitAbbr(unit);
   const unitTicker = fmtUnit(unit);
 
@@ -540,7 +598,17 @@ export function ProjectionsTab({
   const uploadedYears = useMemo(() => [...new Set(projRows.map(r => r.fiscal_year))].sort(), [projRows]);
   const nForward      = uploadedYears.length > 0 ? uploadedYears.length : 3;
 
-  const model = useMemo(() => buildModel(histPL, histBS, nForward), [histPL, histBS, nForward]);
+  // Normalize historical values to match projection unit (e.g. INR→Lakhs when hist is raw INR)
+  const histUnit = histPL[0]?.unit ?? null;
+  const projUnit = projRows[0]?.unit ?? histPL[0]?.unit ?? null;
+  const histScale = projRows.length > 0
+    ? toLakhsFactor(histUnit) / toLakhsFactor(projUnit ?? "Lakhs")
+    : 1;
+
+  const model = useMemo(
+    () => buildModel(histPL, histBS, nForward, histScale),
+    [histPL, histBS, nForward, histScale],
+  );
 
   const hasFullDetail = projRows.some(r =>
     (r.line_items as unknown as LineItem[]).some(li => li.label === "Revenue")
@@ -555,6 +623,7 @@ export function ProjectionsTab({
 
   const [importBusy, setImportBusy] = useState(false);
   const [directBusy, setDirectBusy] = useState(false);
+  const [promptCopied, setPromptCopied] = useState(false);
   const [projAnalysis,        setProjAnalysis]        = useState<string | null>(null);
   const [projAnalysisLoading, setProjAnalysisLoading] = useState(false);
   const [projAnalysisProgress, setProjAnalysisProgress] = useState(0);
@@ -673,14 +742,48 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
             <button
               onClick={() => directImportFileRef.current?.click()}
               disabled={directBusy || busy}
-              className="bg-accent/10 text-accent border border-accent/30 rounded px-3 py-1.5 text-xs font-medium hover:bg-accent/20 transition-colors disabled:opacity-50"
+              className="flex items-center gap-2 bg-primary text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-sm hover:bg-primary/90 active:scale-[0.98] disabled:opacity-50 transition-all"
             >
-              {directBusy ? "Importing…" : "⚡ Direct Excel Import (no AI)"}
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              {directBusy ? "Importing…" : "Import Financial Excel"}
             </button>
-            <span className="text-xs text-muted-foreground">Instant · no token cost · structured Excel only</span>
-            {directBusy && (
-              <span className="text-xs text-accent animate-pulse">Parsing…</span>
-            )}
+            <div className="h-8 w-px bg-border hidden sm:block" />
+            <button
+              onClick={async () => {
+                const buf = await buildProjectionsTemplate();
+                downloadBuffer("Rehbar_Projections_Template.xlsx", buf);
+              }}
+              disabled={directBusy || busy}
+              className="flex items-center gap-1.5 text-sm text-muted-foreground border border-border rounded-lg px-4 py-2 hover:text-foreground hover:border-primary/50 hover:bg-surface transition-colors disabled:opacity-50"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Download Template
+            </button>
+            <button
+              onClick={async () => {
+                await navigator.clipboard.writeText(
+                  "I have attached two files: a financial PDF and an Excel template.\n\nExtract every figure from the PDF and fill in the Excel template — base year actuals in the first data column, projection years in the remaining columns. Rename the column headers to match the actual fiscal years in the PDF. All amounts in ₹ Lakhs. Do not change any row labels in column A. Also fill the Assumptions sheet with key drivers from the PDF (revenue growth %, EBITDA margin %, capex, debt repayment). Return only the completed Excel file."
+                );
+                setPromptCopied(true);
+                setTimeout(() => setPromptCopied(false), 2000);
+              }}
+              className="flex items-center gap-1.5 text-sm text-primary/70 border border-primary/30 rounded-lg px-4 py-2 hover:text-primary hover:border-primary/60 hover:bg-primary/5 transition-colors"
+              title="Copy a ready-to-use Claude prompt — attach the template + PDF in Claude chat and paste this"
+            >
+              {promptCopied ? "✓ Copied" : "⧉ Copy AI Prompt"}
+            </button>
+            <div className="flex flex-col leading-tight">
+              <span className="text-xs font-medium text-foreground/70">Fastest way to add financials</span>
+              <span className="text-[11px] text-muted-foreground">Fill the template · upload · done. Balance Sheet, P&amp;L, Cash Flow.</span>
+            </div>
           </div>
         </div>
       )}
@@ -723,18 +826,40 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
   // ── Projections uploaded — full view + sanity check ───────────────────────
   const projData = uploadedYears.map(fy => {
     const items = ((projRows.find(r => r.fiscal_year === fy)?.line_items ?? []) as unknown as LineItem[]);
-    const pbt     = liVal(items, "PBT");
-    const finCost = liVal(items, "Finance Cost");
-    const depr    = liVal(items, "Depreciation");
+    // Labels after mapProjLabel: "Projected Profit Before Tax", "Projected Interest Expense", "Projected Depreciation"
+    const pbt     = liVal(items, "Projected Profit Before Tax") ?? liVal(items, "PBT");
+    const finCost = liVal(items, "Projected Interest Expense")  ?? liVal(items, "Finance Cost");
+    const depr    = liVal(items, "Projected Depreciation")      ?? liVal(items, "Depreciation");
     const ebitda  = liVal(items, "Projected EBITDA") ??
       (pbt != null && finCost != null && depr != null ? pbt + finCost + depr : null);
+
+    // Net Worth: computed row (blank in template) → derive from Share Capital + Reserves
+    const networth = liVal(items, "Projected Net Worth") ?? liVal(items, "Net Worth") ?? (() => {
+      const sc  = liVal(items, "Projected Share Capital");
+      const res = liVal(items, "Projected Reserves");
+      if (sc != null && res != null) return sc + res;
+      return null;
+    })();
+
+    // Total Debt: derive from LT + ST borrowings if direct "Projected Total Debt" is absent
+    const totalDebt = liVal(items, "Projected Total Debt") ?? liVal(items, "Total Debt") ?? (() => {
+      const lt = liVal(items, "Projected LT Borrowings");
+      const st = liVal(items, "Projected ST Borrowings");
+      if (lt != null || st != null) return (lt ?? 0) + (st ?? 0);
+      return null;
+    })();
+
+    const pat = liVal(items, "Projected PAT") ?? liVal(items, "PAT");
+    const cfoEst = pat != null || depr != null ? (pat ?? 0) + (depr ?? 0) : null;
     return {
       fy,
       turnover:  liVal(items, "Projected Turnover")   ?? liVal(items, "Revenue"),
       ebitda,
-      pat:       liVal(items, "Projected PAT")        ?? liVal(items, "PAT"),
-      networth:  liVal(items, "Projected Net Worth")  ?? liVal(items, "Net Worth"),
-      totalDebt: liVal(items, "Projected Total Debt") ?? liVal(items, "Total Debt"),
+      pat,
+      networth,
+      totalDebt,
+      interest:  finCost,
+      cfo:       cfoEst,  // OCF proxy: PAT + Depreciation
     };
   });
 
@@ -746,6 +871,7 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
       patMargin:    d.turnover && d.pat        ? (d.pat    / d.turnover) * 100 : null,
       debtEbitda:   d.ebitda && d.ebitda !== 0 && d.totalDebt ? d.totalDebt / d.ebitda : null,
       roe:          d.networth && d.networth !== 0 && d.pat ? (d.pat / d.networth) * 100 : null,
+      icr:          d.ebitda != null && d.interest != null && d.interest !== 0 ? d.ebitda / d.interest : null,
       revGrowth:    prev?.turnover && d.turnover && prev.turnover !== 0
         ? ((d.turnover - prev.turnover) / Math.abs(prev.turnover)) * 100 : null,
     };
@@ -758,7 +884,8 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
   const histYears = [...new Set(histPL.map(r => r.fiscal_year))].sort();
   const histDataBridge = histYears.map(fy => {
     const pl = ((histPL.find(r => r.fiscal_year === fy)?.line_items ?? []) as unknown as LineItem[]);
-    return { label: `FY${fy}`, actual: liVal(pl, "Turnover"), projected: null as number | null };
+    const raw = liVal(pl, "Turnover");
+    return { label: `FY${fy}`, actual: raw != null ? raw * histScale : null, projected: null as number | null };
   });
   const bridgeData = [
     ...histDataBridge,
@@ -798,6 +925,44 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
     { label: "Revenue Growth YoY",      fn: (m: typeof projMetrics[0]) => m.revGrowth != null ? (m.revGrowth > 0 ? "+" : "") + m.revGrowth.toFixed(1) + "%" : "—" },
   ];
 
+  // ── Historical actuals map — fills "ACTUAL" column for base/historical years ──
+  type HistActual = { turnover: number|null; ebitda: number|null; pat: number|null; networth: number|null; totalDebt: number|null; cfo: number|null };
+  const histActuals: Record<number, HistActual> = {};
+  for (const row of histPL) {
+    const pl = (row.line_items ?? []) as unknown as LineItem[];
+    const bsRow = histBS.find(b => b.fiscal_year === row.fiscal_year);
+    const bs = ((bsRow?.line_items ?? []) as unknown as LineItem[]);
+    const sc = (v: number | null) => v != null ? v * histScale : null;
+    const gv = (...lbls: string[]) => { for (const l of lbls) { const it = pl.find(i => i.label === l); if (it) return it.override_value ?? it.value; } return null; };
+    const gb = (...lbls: string[]) => { for (const l of lbls) { const it = bs.find(i => i.label === l); if (it) return it.override_value ?? it.value; } return null; };
+    const hPbt  = gv("Profit Before Tax","Net Profit Before Tax","PBT");
+    const hInt  = gv("Interest Expense","Finance Cost","Finance Costs","Interest and Finance Charges");
+    const hDepr = gv("Depreciation","Depreciation & Amortization","Depreciation & Amortisation","Depreciation and Amortization");
+    const computedEbitda = hPbt != null && hInt != null && hDepr != null ? hPbt + hInt + hDepr : null;
+    const lt = gb("Long Term Borrowings","Long-term Borrowings","Non-current Borrowings");
+    const st = gb("Short Term Borrowings","Short-term Borrowings","Current Borrowings","Working Capital Loans");
+    const histPat = gv("PAT","Net Profit After Tax","Profit After Tax","Net Profit","Profit for the Year");
+    const histCFO = gv("Cash from Operations","Net Cash from Operations","Net Cash from Operating Activities")
+      ?? (histPat != null && hDepr != null ? histPat + hDepr : null);
+    histActuals[row.fiscal_year] = {
+      turnover:  sc(gv("Turnover","Revenue from Operations","Net Revenue","Total Revenue","Net Sales")),
+      ebitda:    sc(computedEbitda ?? gv("EBITDA")),
+      pat:       sc(histPat),
+      networth:  sc(gb("Net Worth","Shareholders Equity","Total Equity")),
+      totalDebt: sc(gb("Total Debt","Total Borrowings") ?? ((lt!=null||st!=null) ? (lt??0)+(st??0) : null)),
+      cfo:       sc(histCFO),
+    };
+  }
+
+  // Last historical depreciation for model CFO estimation (PAT + Depr proxy)
+  const lastHistDepr = (() => {
+    if (histPL.length === 0) return null;
+    const lastPL = (histPL[histPL.length - 1].line_items ?? []) as unknown as LineItem[];
+    const it = lastPL.find(i => ["Depreciation","Depreciation & Amortization","Depreciation & Amortisation"].includes(i.label));
+    if (!it) return null;
+    return (it.override_value ?? it.value) * histScale;
+  })();
+
   // Sanity check
   const riskFlags = model ? assessRisks(projData, model, abbr ? ` ${abbr}` : "") : [];
   const sanityRows = [
@@ -806,14 +971,17 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
     { label: "PAT",        uk: "pat"       as const, ek: "pat"       as const },
     { label: "Net Worth",  uk: "networth"  as const, ek: "networth"  as const },
     { label: "Total Debt", uk: "totalDebt" as const, ek: "totalDebt" as const },
+    { label: "Est. CFO",   uk: "cfo"       as const, ek: "cfo"       as const },
   ];
 
-  // Overall accuracy verdict
+  // Overall accuracy verdict — use model points for future years, histActuals for base years
   const keyVarPcts: number[] = [];
   for (const { uk, ek } of sanityRows.slice(0, 3)) {
     for (const d of projData) {
-      const est = model?.points.find(e => e.fy === d.fy);
-      const vi = varInfo(d[uk] as number | null, est?.[ek] as number | null ?? null);
+      const modelPt = model?.points.find(e => e.fy === d.fy);
+      const estVal = modelPt?.[ek as keyof typeof modelPt] as number | null
+        ?? histActuals[d.fy]?.[uk as keyof HistActual] ?? null;
+      const vi = varInfo(d[uk] as number | null, estVal);
       if (vi.pct != null) keyVarPcts.push(vi.pct);
     }
   }
@@ -826,13 +994,17 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
     : { text: avgVar! > 0 ? "✕ VERY OPTIMISTIC" : "✕ VERY CONSERVATIVE", cls: "text-destructive",
         note: `Projections deviate ${avgVar! > 0 ? "significantly above" : "significantly below"} model by ~${absAvg.toFixed(1)}% on average. Requires strong justification.` };
 
-  const compChartData = uploadedYears.map(fy => ({
-    fy: `FY${fy}`,
-    uploaded:  projData.find(d => d.fy === fy)?.turnover ?? null,
-    estimated: model?.points.find(e => e.fy === fy)?.turnover ?? null,
-    upper:     model?.points.find(e => e.fy === fy)?.upper ?? null,
-    lower:     model?.points.find(e => e.fy === fy)?.lower ?? null,
-  }));
+  const compChartData = uploadedYears.map(fy => {
+    const modelPt = model?.points.find(e => e.fy === fy);
+    const histAct = histActuals[fy]?.turnover ?? null;
+    return {
+      fy: `FY${fy}`,
+      uploaded:  projData.find(d => d.fy === fy)?.turnover ?? null,
+      estimated: modelPt?.turnover ?? histAct,   // fall back to historical actual for base years
+      upper:     modelPt?.upper ?? null,
+      lower:     modelPt?.lower ?? null,
+    };
+  });
 
   return (
     <div className="space-y-3">
@@ -1308,7 +1480,7 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
           </div>
 
           {/* Uploaded vs Estimated turnover chart with confidence band */}
-          {compChartData.length > 0 && (
+          {compChartData.length > 0 && !embedded && (
             <div className="mb-3">
               <div className="text-[9px] tracking-widest text-muted-foreground mb-1.5">TURNOVER: UPLOADED vs AI MODEL (with 90 % confidence band)</div>
               <div className="h-44">
@@ -1334,47 +1506,106 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
           )}
 
           {/* Metric-by-metric variance table */}
-          <table className="w-full text-xs mb-3">
+          <div className={embedded ? "overflow-x-auto" : ""}>
+          <table className={`w-full mb-3 ${embedded ? "text-[9px]" : "text-xs"}`} style={embedded ? { minWidth: 700 } : undefined}>
             <thead className="text-muted-foreground border-b border-border">
               <tr>
-                <th className="text-left py-1 min-w-[100px]">METRIC</th>
+                <th className={`text-left min-w-[80px] ${embedded ? "py-0.5" : "py-1"}`}>METRIC</th>
                 {uploadedYears.map(y => (
-                  <th key={y} colSpan={3} className="text-center border-l border-border/30 py-1 px-1">FY{y}</th>
+                  <th key={y} colSpan={embedded ? 2 : 3} className={`text-center border-l border-border/30 px-1 ${embedded ? "py-0.5" : "py-1"}`}>FY{y}</th>
                 ))}
               </tr>
-              <tr className="text-[9px]">
+              <tr className="text-[8px]">
                 <th />
-                {uploadedYears.map(y => [
-                  <th key={`${y}-u`} className="text-right text-primary/70 border-l border-border/20 pr-1 pb-1">UPLOADED</th>,
-                  <th key={`${y}-e`} className="text-right text-accent/60 pr-1 pb-1">AI MODEL</th>,
-                  <th key={`${y}-v`} className="text-right pr-2 pb-1">VAR %</th>,
-                ])}
+                {uploadedYears.map(y => {
+                  const isBase = y <= (model.baseFY ?? 0) && !!histActuals[y];
+                  const cols = [
+                    <th key={`${y}-u`} className="text-right text-primary/70 border-l border-border/20 pr-1 pb-0.5">{embedded ? "UPL" : "UPLOADED"}</th>,
+                    <th key={`${y}-e`} className={`text-right pr-1 pb-0.5 ${isBase ? "text-success/70" : "text-accent/60"}`}>
+                      {isBase ? "ACT" : embedded ? "MDL" : "AI MODEL"}
+                    </th>,
+                  ];
+                  if (!embedded) cols.push(<th key={`${y}-v`} className="text-right pr-2 pb-1">VAR %</th>);
+                  return cols;
+                })}
               </tr>
             </thead>
             <tbody>
               {sanityRows.map(({ label, uk, ek }) => (
                 <tr key={label} className="border-b border-border/20 hover:bg-surface/30">
-                  <td className="py-1.5 text-foreground/80 font-medium">{label}</td>
+                  <td className={`text-foreground/80 font-medium ${embedded ? "py-0.5" : "py-1.5"}`}>{label}</td>
                   {uploadedYears.map(fy => {
-                    const up  = projData.find(d => d.fy === fy)?.[uk] as number | null ?? null;
-                    const est = model.points.find(e => e.fy === fy)?.[ek] as number | null ?? null;
+                    const up = projData.find(d => d.fy === fy)?.[uk] as number | null ?? null;
+                    const modelPt = model.points.find(e => e.fy === fy);
+                    const modelEst: number | null = uk === "cfo"
+                      ? (modelPt?.pat != null ? modelPt.pat + (lastHistDepr ?? 0) : null)
+                      : modelPt?.[ek as keyof typeof modelPt] as number | null ?? null;
+                    const histEst = histActuals[fy]?.[uk as keyof HistActual] ?? null;
+                    const isBase = fy <= (model.baseFY ?? 0) && histEst != null;
+                    const est = modelEst ?? histEst;
                     const vi  = varInfo(up, est);
-                    return [
+                    const cols = [
                       <td key={`${fy}-u`} className="text-right tabular-nums text-primary border-l border-border/20 pr-1">
                         {fmt(up)}{abbr && up != null && <span className="text-[8px] text-muted-foreground ml-0.5">{abbr}</span>}
                       </td>,
-                      <td key={`${fy}-e`} className="text-right tabular-nums text-accent/60 pr-1">
+                      <td key={`${fy}-e`} className={`text-right tabular-nums pr-1 ${isBase ? "text-success/70" : "text-accent/60"}`}>
                         {fmt(est)}{abbr && est != null && <span className="text-[8px] text-muted-foreground ml-0.5">{abbr}</span>}
                       </td>,
+                    ];
+                    if (!embedded) cols.push(
                       <td key={`${fy}-v`} className={`text-right tabular-nums font-semibold text-[10px] pr-2 ${vi.cls}`}>
                         {vi.label}{vi.verdict ? <span className="text-[8px] opacity-70 ml-1">{vi.verdict}</span> : null}
                       </td>,
-                    ];
+                    );
+                    return cols;
                   })}
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
+
+          {/* Industry Benchmarks */}
+          {(() => {
+            const BENCH: { label: string; bench: string; inv?: boolean; lo: number; hi: number; vals: (number|null)[]; fmtV: (v: number|null) => string }[] = [
+              { label: "Revenue Growth",  bench: "10–25%",  lo: 10,  hi: 25,       vals: projMetrics.map(m => m.revGrowth),    fmtV: v => v != null ? (v>0?"+":"")+v.toFixed(1)+"%" : "—" },
+              { label: "EBITDA Margin",   bench: "8–18%",   lo: 8,   hi: 18,       vals: projMetrics.map(m => m.ebitdaMargin), fmtV: v => v != null ? v.toFixed(1)+"%" : "—" },
+              { label: "PAT Margin",      bench: "4–10%",   lo: 4,   hi: 10,       vals: projMetrics.map(m => m.patMargin),    fmtV: v => v != null ? v.toFixed(1)+"%" : "—" },
+              { label: "Interest Cover",  bench: "> 1.5x",  lo: 1.5, hi: Infinity, vals: projMetrics.map(m => m.icr),          fmtV: v => v != null ? v.toFixed(2)+"x" : "—" },
+              { label: "Debt / EBITDA",   bench: "< 4x", inv: true, lo: 0, hi: 4,  vals: projMetrics.map(m => m.debtEbitda),  fmtV: v => v != null ? v.toFixed(2)+"x" : "—" },
+              { label: "ROE",             bench: "12–20%",  lo: 12,  hi: 20,       vals: projMetrics.map(m => m.roe),          fmtV: v => v != null ? v.toFixed(1)+"%" : "—" },
+            ];
+            const benchSt = (lo: number, hi: number, inv: boolean | undefined, v: number | null): string => {
+              if (v == null) return "text-muted-foreground/40";
+              if (inv) return v <= hi ? "text-success" : v <= hi * 1.5 ? "text-warning" : "text-destructive";
+              return v >= lo && v <= hi * 2 ? "text-success" : v >= lo * 0.7 ? "text-warning" : "text-destructive";
+            };
+            return (
+              <div className={`mb-3 ${embedded ? "overflow-x-auto" : "mt-2"}`}>
+                <div className="text-[9px] tracking-widest text-muted-foreground font-bold mb-1">INDUSTRY BENCHMARKS · NBFC / ENERGY SERVICES</div>
+                <table className={`w-full ${embedded ? "text-[8px]" : "text-[10px]"}`} style={embedded ? { minWidth: 500 } : undefined}>
+                  <thead className="text-muted-foreground border-b border-border">
+                    <tr>
+                      <th className={`text-left pr-2 ${embedded ? "py-0.5" : "py-1"}`}>METRIC</th>
+                      <th className="text-right pr-2 text-primary/60 italic font-normal">BENCH</th>
+                      {uploadedYears.map(y => <th key={y} className="text-right pr-1">FY{y}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {BENCH.map(({ label, bench, inv, lo, hi, vals, fmtV }) => (
+                      <tr key={label} className="border-b border-border/20">
+                        <td className={`pr-2 text-foreground/80 ${embedded ? "py-0.5" : "py-1"}`}>{label}</td>
+                        <td className="text-right pr-2 text-primary/50 italic">{bench}</td>
+                        {vals.map((v, i) => (
+                          <td key={i} className={`text-right pr-1 tabular-nums font-medium ${benchSt(lo, hi, inv, v)}`}>{fmtV(v)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
 
           {/* Risk Flags */}
           {riskFlags.length > 0 && (

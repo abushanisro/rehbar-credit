@@ -198,41 +198,69 @@ export function ICSummaryPanel({
       {ratios.length > 0 && years.length > 0 && (
         <div>
           <SectionLabel>Key Ratio Snapshot</SectionLabel>
-          <table className="w-full text-xs">
-            <thead className="text-muted-foreground border-b border-border">
-              <tr>
-                <th className="text-left py-1.5 font-medium">Ratio</th>
-                {years.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
-                <th className="text-right font-medium">Benchmark</th>
-                <th className="text-right font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {KEY.map(name => {
-                const rows = ratios.filter(r => r.ratio_name === name);
-                if (rows.length === 0) return null;
-                const latest = rows.sort((a, b) => b.fiscal_year - a.fiscal_year)[0];
-                const s = latest.threshold_status ?? "na";
-                return (
-                  <tr key={name} className="border-b border-border/30">
-                    <td className="py-1.5 text-foreground">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
-                    {years.map(y => {
-                      const r = ratios.find(x => x.ratio_name === name && x.fiscal_year === y);
-                      return (
-                        <td key={y} className="text-right tabular-nums text-foreground">
-                          {formatRatio(name, r?.ratio_value != null ? Number(r.ratio_value) : null)}
-                        </td>
-                      );
-                    })}
-                    {ratioTd(latest.id, "benchmark", latest.benchmark != null ? Number(latest.benchmark) : null, latest.benchmark != null ? formatRatio(name, Number(latest.benchmark)) : "—")}
-                    <td className="text-right">
-                      <StatusBadge status={s} />
-                    </td>
+          {(() => {
+            // Only show years that have at least one meaningful KEY ratio value
+            // (non-null, non-zero). Zero = computation failed, treat as blank.
+            const realVal = (r: RatioRow | undefined): number | null => {
+              if (!r || r.ratio_value == null) return null;
+              const n = Number(r.ratio_value);
+              return Number.isFinite(n) && n !== 0 ? n : null;
+            };
+            const meaningfulYears = years.filter(y =>
+              KEY.some(name => realVal(ratios.find(x => x.ratio_name === name && x.fiscal_year === y)) != null)
+            );
+            // Determine best latest row per ratio (last year with real value)
+            const latestFor = (name: string) =>
+              [...ratios.filter(r => r.ratio_name === name && realVal(r) != null)]
+                .sort((a, b) => b.fiscal_year - a.fiscal_year)[0]
+              ?? ratios.filter(r => r.ratio_name === name).sort((a, b) => b.fiscal_year - a.fiscal_year)[0];
+
+            return (
+              <table className="w-full text-xs">
+                <thead className="text-muted-foreground border-b border-border">
+                  <tr>
+                    <th className="text-left py-1.5 font-medium">Ratio</th>
+                    {meaningfulYears.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
+                    <th className="text-right font-medium">Benchmark</th>
+                    <th className="text-right font-medium">Status</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                </thead>
+                <tbody>
+                  {KEY.map(name => {
+                    const allRows = ratios.filter(r => r.ratio_name === name);
+                    if (allRows.length === 0) return null;
+                    const hasAnyReal = meaningfulYears.some(y => realVal(ratios.find(x => x.ratio_name === name && x.fiscal_year === y)) != null);
+                    if (!hasAnyReal) return null;
+                    const latest = latestFor(name);
+                    const s = latest?.threshold_status ?? "na";
+                    return (
+                      <tr key={name} className="border-b border-border/30">
+                        <td className="py-1.5 text-foreground">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
+                        {meaningfulYears.map(y => {
+                          const r = ratios.find(x => x.ratio_name === name && x.fiscal_year === y);
+                          const val = realVal(r);
+                          return (
+                            <td key={y} className="text-right tabular-nums text-foreground">
+                              {formatRatio(name, val)}
+                            </td>
+                          );
+                        })}
+                        {ratioTd(
+                          latest?.id ?? "",
+                          "benchmark",
+                          latest?.benchmark != null ? Number(latest.benchmark) : null,
+                          latest?.benchmark != null ? formatRatio(name, Number(latest.benchmark)) : "—",
+                        )}
+                        <td className="text-right">
+                          <StatusBadge status={s} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            );
+          })()}
         </div>
       )}
     </div>
@@ -703,55 +731,234 @@ export function ICProjectionsTable({
   );
 }
 
-export function ICRatioTable({ ratios }: { ratios: RatioRow[] }) {
-  if (ratios.length === 0) return <div className="text-muted-foreground text-sm">No ratios computed. Run ratio analysis first.</div>;
-  const years = Array.from(new Set(ratios.map(r => r.fiscal_year))).sort();
+// ── Projection ratio helpers ───────────────────────────────────────────────────
+function pv(items: LineItem[], ...labels: string[]): number | null {
+  for (const lbl of labels) {
+    const it = items.find(i => i.label === lbl);
+    if (it) return it.override_value ?? it.value;
+  }
+  return null;
+}
+function pct(a: number | null, b: number | null): number | null {
+  if (a == null || b == null || b === 0) return null;
+  return (a / b) * 100;
+}
+function ratio(a: number | null, b: number | null): number | null {
+  if (a == null || b == null || b === 0) return null;
+  return a / b;
+}
+function growth(curr: number | null, prev: number | null): number | null {
+  if (curr == null || prev == null || prev === 0) return null;
+  return ((curr - prev) / Math.abs(prev)) * 100;
+}
+function projStatus(name: string, val: number | null): "green" | "amber" | "red" | "na" {
+  if (val == null) return "na";
+  const rules: Record<string, [number, number]> = {
+    rev_growth:    [15, 5],
+    ebitda_margin: [20, 10],
+    pat_margin:    [10, 5],
+    icr:           [2,  1],
+  };
+  if (name === "debt_equity") return val <= 1.5 ? "green" : val <= 3 ? "amber" : "red";
+  const [hi, lo] = rules[name] ?? [0, 0];
+  return val >= hi ? "green" : val >= lo ? "amber" : "red";
+}
+function fmtProj(name: string, val: number | null): string {
+  if (val == null) return "—";
+  if (name === "debt_equity" || name === "icr") return val.toFixed(2) + "x";
+  return val.toFixed(1) + "%";
+}
+
+export function ICRatioTable({ ratios, extracted }: { ratios: RatioRow[]; extracted?: ExtractedRow[] }) {
+  const allYears = Array.from(new Set(ratios.map(r => r.fiscal_year))).sort();
+  // Only show years where at least one ratio has a real (non-zero, non-null) value
+  const years = allYears.filter(y =>
+    ratios.some(r => r.fiscal_year === y && r.ratio_value != null && Number(r.ratio_value) !== 0)
+  );
   const categories = Array.from(new Set(ratios.map(r => r.category)));
+
+  // ── Projected ratio computation ────────────────────────────────────────────
+  const projRows   = (extracted ?? []).filter(r => r.statement_type === "projections").sort((a, b) => a.fiscal_year - b.fiscal_year);
+  const histPLRows = (extracted ?? []).filter(r => r.statement_type === "profit_loss").sort((a, b) => a.fiscal_year - b.fiscal_year);
+  const histBSRows = (extracted ?? []).filter(r => r.statement_type === "balance_sheet").sort((a, b) => a.fiscal_year - b.fiscal_year);
+  const projYears  = projRows.map(r => r.fiscal_year);
+  const lastHistPLItems = histPLRows.length ? (histPLRows[histPLRows.length - 1].line_items as unknown as LineItem[]) : [];
+  const lastHistBSItems = histBSRows.length ? (histBSRows[histBSRows.length - 1].line_items as unknown as LineItem[]) : [];
+
+  interface ProjPoint {
+    fy: number;
+    rev_growth:    number | null;
+    ebitda_margin: number | null;
+    pat_margin:    number | null;
+    debt_equity:   number | null;
+    icr:           number | null;
+    revenue:       number | null;
+    ebitda:        number | null;
+    pat:           number | null;
+    networth:      number | null;
+    debt:          number | null;
+  }
+
+  const projPoints: ProjPoint[] = projRows.map((row, idx) => {
+    const items     = (row.line_items as unknown as LineItem[]);
+    const prevItems = idx === 0 ? lastHistPLItems
+      : (projRows[idx - 1].line_items as unknown as LineItem[]);
+    const bsItems   = idx === 0 ? lastHistBSItems
+      : ((extracted ?? []).find(r => r.statement_type === "balance_sheet" && r.fiscal_year === projRows[idx - 1].fiscal_year)?.line_items as unknown as LineItem[] ?? lastHistBSItems);
+
+    const rev    = pv(items, "Turnover", "Revenue", "Total Revenue", "Net Revenue");
+    const prevRev = pv(prevItems, "Turnover", "Revenue", "Total Revenue", "Net Revenue");
+    const ebitda = pv(items, "EBITDA");
+    const pat    = pv(items, "PAT", "Net Profit", "Profit After Tax");
+    const ebit   = pv(items, "EBIT");
+    const interest = pv(items, "Interest Expense", "Finance Cost", "Financial Cost");
+    const debt   = pv(items, "Total Debt", "Total Borrowings", "Long Term Borrowings");
+    const nw     = pv(items, "Net Worth", "Networth", "Shareholders Equity")
+      ?? (pv(bsItems, "Net Worth", "Networth") != null
+          ? (pv(bsItems, "Net Worth", "Networth")! + (pat ?? 0))
+          : null);
+
+    const icrNumerator = ebit ?? ebitda;
+    return {
+      fy: row.fiscal_year,
+      revenue: rev,
+      ebitda, pat, networth: nw, debt,
+      rev_growth:    growth(rev, prevRev),
+      ebitda_margin: pct(ebitda, rev),
+      pat_margin:    pct(pat, rev),
+      debt_equity:   ratio(debt, nw),
+      icr:           ratio(icrNumerator, interest),
+    };
+  });
+
+  const PROJ_RATIO_ROWS: { key: keyof ProjPoint; label: string }[] = [
+    { key: "rev_growth",    label: "Revenue Growth" },
+    { key: "ebitda_margin", label: "EBITDA Margin" },
+    { key: "pat_margin",    label: "PAT Margin" },
+    { key: "debt_equity",   label: "Debt / Equity" },
+    { key: "icr",           label: "Interest Coverage (ICR)" },
+  ];
 
   return (
     <div className="space-y-5">
-      {categories.map(cat => {
-        const names = Array.from(new Set(ratios.filter(r => r.category === cat).map(r => r.ratio_name)));
-        return (
-          <div key={cat}>
-            <SectionLabel>{cat}</SectionLabel>
-            <table className="w-full text-xs">
-              <thead className="text-muted-foreground border-b border-border">
-                <tr>
-                  <th className="text-left py-1.5 font-medium">Ratio</th>
-                  {years.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
-                  <th className="text-right font-medium">Benchmark</th>
-                </tr>
-              </thead>
-              <tbody>
-                {names.map(name => {
-                  const latest = ratios.filter(r => r.ratio_name === name).sort((a, b) => b.fiscal_year - a.fiscal_year)[0];
-                  const latestStatus = latest?.threshold_status ?? "na";
-                  return (
-                    <tr key={name} className="border-b border-border/30">
-                      <td className="py-1.5 text-foreground">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
-                      {years.map(y => {
-                        const r = ratios.find(x => x.ratio_name === name && x.fiscal_year === y);
-                        const val = r?.ratio_value != null ? Number(r.ratio_value) : null;
-                        const s = r?.threshold_status ?? "na";
-                        return (
-                          <td key={y} className="text-right pr-2">
-                            <span className="tabular-nums text-foreground mr-1.5">{formatRatio(name, val)}</span>
-                            <StatusBadge status={s} />
-                          </td>
-                        );
-                      })}
-                      <td className="text-right tabular-nums text-muted-foreground">
-                        {latest?.benchmark != null ? formatRatio(name, Number(latest.benchmark)) : "—"}
+      {/* ── Historical ratios ───────────────────────────────────────────── */}
+      {ratios.length === 0 ? (
+        <div className="text-muted-foreground text-sm">No ratios computed. Run ratio analysis first.</div>
+      ) : (
+        categories.map(cat => {
+          const names = Array.from(new Set(ratios.filter(r => r.category === cat).map(r => r.ratio_name)));
+          return (
+            <div key={cat}>
+              <SectionLabel>{cat}</SectionLabel>
+              <table className="w-full text-xs">
+                <thead className="text-muted-foreground border-b border-border">
+                  <tr>
+                    <th className="text-left py-1.5 font-medium">Ratio</th>
+                    {years.map(y => <th key={y} className="text-right font-medium">FY{y}</th>)}
+                    <th className="text-right font-medium">Benchmark</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {names.map(name => {
+                    const latest = ratios.filter(r => r.ratio_name === name).sort((a, b) => b.fiscal_year - a.fiscal_year)[0];
+                    return (
+                      <tr key={name} className="border-b border-border/30">
+                        <td className="py-1.5 text-foreground">{RATIO_DISPLAY_NAMES[name] ?? name}</td>
+                        {years.map(y => {
+                          const r = ratios.find(x => x.ratio_name === name && x.fiscal_year === y);
+                          const val = r?.ratio_value != null ? Number(r.ratio_value) : null;
+                          return (
+                            <td key={y} className="text-right pr-2">
+                              <span className="tabular-nums text-foreground mr-1.5">{formatRatio(name, val)}</span>
+                              <span className="ic-yr-badge"><StatusBadge status={r?.threshold_status ?? "na"} /></span>
+                            </td>
+                          );
+                        })}
+                        <td className="text-right tabular-nums text-muted-foreground">
+                          {latest?.benchmark != null ? formatRatio(name, Number(latest.benchmark)) : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })
+      )}
+
+      {/* ── Projected ratios ────────────────────────────────────────────── */}
+      {projPoints.length > 0 && (
+        <div>
+          <SectionLabel>
+            <span>PROJECTED RATIOS</span>
+            <span className="ml-2 text-[9px] font-normal text-primary/60 tracking-normal normal-case">
+              Computed from uploaded projections
+            </span>
+          </SectionLabel>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border">
+                <th className="text-left py-1.5 font-medium text-muted-foreground">Ratio</th>
+                {projPoints.map(p => (
+                  <th key={p.fy} className="text-right font-medium text-primary/70">
+                    FY{p.fy}
+                    <span className="ml-1 text-[8px] font-normal text-primary/40 italic">proj</span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {PROJ_RATIO_ROWS.map(({ key, label }) => (
+                <tr key={key} className="border-b border-border/20">
+                  <td className="py-1.5 text-foreground/80">{label}</td>
+                  {projPoints.map(p => {
+                    const val = p[key] as number | null;
+                    const s = projStatus(key, val);
+                    return (
+                      <td key={p.fy} className="text-right pr-2">
+                        <span className="tabular-nums text-foreground/80 mr-1.5 italic">{fmtProj(key, val)}</span>
+                        <span className="ic-yr-badge"><StatusBadge status={s} /></span>
                       </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        );
-      })}
+                    );
+                  })}
+                </tr>
+              ))}
+              {/* Absolute values row */}
+              <tr className="border-t border-border/40 bg-muted/20">
+                <td colSpan={projPoints.length + 1} className="py-0.5 text-[9px] text-muted-foreground/60 font-medium tracking-widest uppercase pl-0.5">
+                  Absolute Values ({histPLRows[0]?.unit ?? "Lakhs"})
+                </td>
+              </tr>
+              {([
+                ["revenue", "Revenue"],
+                ["ebitda",  "EBITDA"],
+                ["pat",     "PAT"],
+                ["networth","Net Worth"],
+                ["debt",    "Total Debt"],
+              ] as [keyof ProjPoint, string][]).map(([key, label]) => (
+                <tr key={key} className="border-b border-border/20">
+                  <td className="py-1 text-muted-foreground/70 text-[10px]">{label}</td>
+                  {projPoints.map(p => {
+                    const val = p[key] as number | null;
+                    return (
+                      <td key={p.fy} className="text-right pr-2 tabular-nums text-foreground/70 text-[10px] italic">
+                        {val != null ? val.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {projPoints.length === 0 && projRows.length === 0 && (
+        <div className="text-[10px] text-muted-foreground/60 italic border border-dashed border-border/40 rounded px-3 py-2">
+          Upload projections in the Projections tab to see projected ratio analysis here.
+        </div>
+      )}
     </div>
   );
 }
@@ -940,25 +1147,151 @@ export function ICInvestmentStructure({ cc }: { cc: CaseRow }) {
   );
 }
 
+type PriorFacility = {
+  id: string; product: string;
+  sanctioned_amount: number | null; disbursed_amount: number | null; outstanding: number | null;
+  sanction_date: string; closure_date: string;
+  status: "Active" | "Closed" | "NPA" | "Restructured" | "Written Off";
+  max_dpd: number | null; notes: string;
+};
+type CreditReference = {
+  id: string; ref_type: "Bank" | "Trade" | "Other";
+  entity_name: string; contact: string; relationship: string; notes: string;
+};
+type RehbarHistory = {
+  has_prior_exposure: boolean;
+  facilities: PriorFacility[];
+  analyst_notes: string;
+  credit_references: CreditReference[];
+};
+
+const STATUS_CLS_IC: Record<PriorFacility["status"], string> = {
+  Active:         "bg-green-50 text-green-700 border border-green-200",
+  Closed:         "bg-muted text-muted-foreground border border-border",
+  NPA:            "bg-red-50 text-red-700 border border-red-200",
+  Restructured:   "bg-amber-50 text-amber-700 border border-amber-200",
+  "Written Off":  "bg-red-100 text-red-800 border border-red-300",
+};
+
+function fmtL(v: number | null) {
+  if (v == null) return "—";
+  return "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 2 }) + "L";
+}
+
 export function ICRehbarHistory({ cc }: { cc: CaseRow }) {
+  const rh = ((cc.ic_note as Record<string, unknown> | null)?.["rehbar_history"] as RehbarHistory | undefined) ?? null;
+  const hasPrior = rh?.has_prior_exposure ?? false;
+  const facilities = rh?.facilities ?? [];
+  const references = rh?.credit_references ?? [];
+  const notes      = rh?.analyst_notes?.trim() ?? "";
+
   return (
     <div className="space-y-4">
+      {/* ── Funder Profile ──────────────────────────────────────────────── */}
       <div className="rounded-lg border border-border bg-muted/30 p-4">
         <SectionLabel>Rehbar Financial Services — Funder Profile</SectionLabel>
         <table className="w-full">
           <tbody>
-            <ICRow label="Legal Entity" value="Rehbar Financial Services" />
-            <ICRow label="Business Model" value="Sharia-compliant NBFC — asset financing & structured credit" />
-            <ICRow label="Core Products" value="Operating Lease · Finance Lease · PLS · Project Finance · Trade Finance · Home Loan" />
+            <ICRow label="Legal Entity"     value="Rehbar Financial Services" />
+            <ICRow label="Business Model"   value="Sharia-compliant NBFC — asset financing & structured credit" />
+            <ICRow label="Core Products"    value="Operating Lease · Finance Lease · PLS · Project Finance · Trade Finance · Home Loan" />
             <ICRow label="Return Framework" value="Fixed rental / IRR / profit-share depending on product" />
-            <ICRow label="Website" value="rehbar.co.in" />
+            <ICRow label="Website"          value="rehbar.co.in" />
           </tbody>
         </table>
       </div>
+
+      {/* ── Prior Exposure ──────────────────────────────────────────────── */}
       <div>
         <SectionLabel>Prior Exposure to {cc.client_name}</SectionLabel>
-        <p className="text-sm text-muted-foreground italic">No prior Rehbar funding history on record for this client. This appears to be a new relationship.</p>
+        {!hasPrior ? (
+          <p className="text-sm text-muted-foreground italic">No prior Rehbar funding history on record for this client. This appears to be a new relationship.</p>
+        ) : facilities.length === 0 ? (
+          <p className="text-sm text-muted-foreground italic">Prior relationship noted — no facility records entered.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[640px]">
+              <thead>
+                <tr className="border-b border-border text-muted-foreground text-[10px]">
+                  <th className="text-left py-1.5 pr-3 font-medium">PRODUCT</th>
+                  <th className="text-right pr-3 font-medium">SANCTIONED</th>
+                  <th className="text-right pr-3 font-medium">DISBURSED</th>
+                  <th className="text-right pr-3 font-medium">O/S</th>
+                  <th className="text-center pr-3 font-medium">SANCTION DATE</th>
+                  <th className="text-center pr-3 font-medium">CLOSURE DATE</th>
+                  <th className="text-center pr-3 font-medium">STATUS</th>
+                  <th className="text-center pr-3 font-medium">MAX DPD</th>
+                  <th className="text-left font-medium">NOTES</th>
+                </tr>
+              </thead>
+              <tbody>
+                {facilities.map(f => (
+                  <tr key={f.id} className="border-b border-border/20">
+                    <td className="py-1.5 pr-3 font-medium text-foreground/90">{f.product}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmtL(f.sanctioned_amount)}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmtL(f.disbursed_amount)}</td>
+                    <td className="text-right pr-3 tabular-nums">{fmtL(f.outstanding)}</td>
+                    <td className="text-center pr-3 text-muted-foreground/70">{f.sanction_date || "—"}</td>
+                    <td className="text-center pr-3 text-muted-foreground/70">{f.closure_date || "—"}</td>
+                    <td className="text-center pr-3">
+                      <span className={`px-1.5 py-0.5 text-[9px] font-bold tracking-widest rounded ${STATUS_CLS_IC[f.status]}`}>
+                        {f.status}
+                      </span>
+                    </td>
+                    <td className={`text-center pr-3 tabular-nums font-medium ${(f.max_dpd ?? 0) > 0 ? "text-destructive" : ""}`}>
+                      {f.max_dpd != null ? `${f.max_dpd}d` : "—"}
+                    </td>
+                    <td className="text-muted-foreground/70 text-[10px] max-w-[160px]">{f.notes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
+
+      {/* ── Credit References ───────────────────────────────────────────── */}
+      {references.length > 0 && (
+        <div>
+          <SectionLabel>Credit References</SectionLabel>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[480px]">
+              <thead>
+                <tr className="border-b border-border text-muted-foreground text-[10px]">
+                  <th className="text-left py-1.5 pr-3 font-medium">TYPE</th>
+                  <th className="text-left pr-3 font-medium">ENTITY</th>
+                  <th className="text-left pr-3 font-medium">CONTACT</th>
+                  <th className="text-left pr-3 font-medium">RELATIONSHIP</th>
+                  <th className="text-left font-medium">NOTES</th>
+                </tr>
+              </thead>
+              <tbody>
+                {references.map(r => (
+                  <tr key={r.id} className="border-b border-border/20">
+                    <td className="py-1.5 pr-3">
+                      <span className="px-1.5 py-0.5 text-[9px] font-bold tracking-widest bg-muted text-muted-foreground rounded">
+                        {r.ref_type}
+                      </span>
+                    </td>
+                    <td className="pr-3 font-medium text-foreground/90">{r.entity_name || "—"}</td>
+                    <td className="pr-3 text-muted-foreground/70">{r.contact || "—"}</td>
+                    <td className="pr-3 text-muted-foreground/70">{r.relationship || "—"}</td>
+                    <td className="text-muted-foreground/70 text-[10px]">{r.notes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Analyst Notes ───────────────────────────────────────────────── */}
+      {notes && (
+        <div>
+          <SectionLabel>Analyst Notes</SectionLabel>
+          <p className="text-sm text-foreground/80 whitespace-pre-wrap leading-relaxed">{notes}</p>
+        </div>
+      )}
     </div>
   );
 }

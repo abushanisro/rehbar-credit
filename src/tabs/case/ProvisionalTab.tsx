@@ -16,6 +16,7 @@ import { useState, useRef, useEffect } from "react";
 import { Panel } from "@/components/terminal/Panel";
 import type { CaseRow, ExtractedRow, LineItem } from "@/features/case/types";
 import { unitAbbr, fmtUnit } from "@/features/case/utils";
+import { buildProvisionalTemplate, downloadBuffer } from "@/lib/excel-templates";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -377,10 +378,36 @@ async function parseSimpleAnnualExcel(
       }
     }
     parsedAny = true;
-    break;
   }
 
   if (!parsedAny) throw new Error("No fiscal year columns found. Make sure column headers include a year (e.g. FY24, FY2024, 2024).");
+
+  // Derive computed fields for each period
+  for (const p of periodMap.values()) {
+    const gv = (sec: "pl" | "bs", lbl: string) => getv(p[sec], lbl) ?? 0;
+    const gp     = gv("pl", "Turnover") - gv("pl", "Cost of Goods Sold");
+    const ebitda = gp - gv("pl", "Operating Expenses");
+    const ebit   = ebitda - gv("pl", "Depreciation");
+    const pbt    = ebit - gv("pl", "Interest Expense");
+    const pat    = pbt - gv("pl", "Tax");
+    if (gv("pl", "Gross Profit")      === 0 && gp     !== 0) p.pl = setv(p.pl, "Gross Profit",      gp);
+    if (gv("pl", "EBITDA")            === 0 && ebitda !== 0) p.pl = setv(p.pl, "EBITDA",            ebitda);
+    if (gv("pl", "EBIT")              === 0 && ebit   !== 0) p.pl = setv(p.pl, "EBIT",              ebit);
+    if (gv("pl", "Profit Before Tax") === 0 && pbt    !== 0) p.pl = setv(p.pl, "Profit Before Tax", pbt);
+    if (gv("pl", "PAT")               === 0 && pat    !== 0) p.pl = setv(p.pl, "PAT",               pat);
+    const nw = gv("bs", "Share Capital") + gv("bs", "Reserves & Surplus");
+    const td = gv("bs", "Long Term Borrowings") + gv("bs", "Short Term Borrowings");
+    const cl = gv("bs", "Trade Payables") + gv("bs", "Other Current Liabilities") + gv("bs", "Short Term Borrowings");
+    const ca = gv("bs", "Inventory") + gv("bs", "Trade Receivables") + gv("bs", "Cash & Bank") + gv("bs", "Other Current Assets");
+    const ta = gv("bs", "Fixed Assets (Net)") + ca;
+    if (gv("bs", "Net Worth")           === 0 && nw !== 0) p.bs = setv(p.bs, "Net Worth",           nw);
+    if (gv("bs", "Total Debt")          === 0 && td !== 0) p.bs = setv(p.bs, "Total Debt",          td);
+    if (gv("bs", "Current Liabilities") === 0 && cl !== 0) p.bs = setv(p.bs, "Current Liabilities", cl);
+    if (gv("bs", "Current Assets")      === 0 && ca !== 0) p.bs = setv(p.bs, "Current Assets",      ca);
+    if (gv("bs", "Total Assets")        === 0 && ta !== 0) p.bs = setv(p.bs, "Total Assets",        ta);
+    if (gv("bs", "Total Liabilities")   === 0 && ta !== 0) p.bs = setv(p.bs, "Total Liabilities",   ta);
+  }
+
   return Array.from(periodMap.values());
 }
 
@@ -482,26 +509,43 @@ function parsePeriodHeader(header: string): { fiscal_year: number; months_covere
     july:7,august:8,september:9,october:10,november:11,december:12,
     jan:1,feb:2,mar:3,apr:4,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12,
   };
-  const m = String(header).match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)[,.]?\s*(\d{4})/i);
-  if (!m) return null;
-  const monthNum = MONTHS[m[2].toLowerCase()];
-  const year = parseInt(m[3]);
-  if (!monthNum || !year) return null;
 
-  // Indian FY: Apr = month-1, Mar = month-12; FY label = year when Mar ends
-  let fiscal_year: number, months_covered: number;
-  if (monthNum >= 4) { fiscal_year = year + 1; months_covered = monthNum - 3; }
-  else               { fiscal_year = year;     months_covered = monthNum + 9; }
+  // Detect qualifier prefix like "Audited", "Provisional", "Projected"
+  const qualM = String(header).match(/^(audited|provisional|projected|unaudited)\b\s*/i);
+  const qualifier = qualM ? qualM[1].charAt(0).toUpperCase() + qualM[1].slice(1).toLowerCase() : null;
+  const h = qualM ? header.slice(qualM[0].length) : header;
 
-  const fyShort = String(fiscal_year).slice(2);
-  const ABBR = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const label = months_covered >= 12 ? `FY${fiscal_year}` : `${ABBR[monthNum]} FY${fyShort}`;
-  const period_type: PeriodType =
-    months_covered >= 12 ? "annual" : months_covered === 9 ? "nine_month" :
-    months_covered === 6 ? "half_yearly" : months_covered === 3 ? "quarterly" :
-    months_covered === 1 ? "monthly" : "ytd";
+  const makePeriod = (monthNum: number, year: number) => {
+    let fiscal_year: number, months_covered: number;
+    if (monthNum >= 4) { fiscal_year = year + 1; months_covered = monthNum - 3; }
+    else               { fiscal_year = year;     months_covered = monthNum + 9; }
+    const fyShort = String(fiscal_year).slice(2);
+    const ABBR = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const base = months_covered >= 12 ? `FY${fiscal_year}` : `${ABBR[monthNum]} FY${fyShort}`;
+    const label = qualifier ? `${base} (${qualifier})` : base;
+    const period_type: PeriodType =
+      months_covered >= 12 ? "annual" : months_covered === 9 ? "nine_month" :
+      months_covered === 6 ? "half_yearly" : months_covered === 3 ? "quarterly" :
+      months_covered === 1 ? "monthly" : "ytd";
+    return { fiscal_year, months_covered, label, period_type };
+  };
 
-  return { fiscal_year, months_covered, label, period_type };
+  // Format 1: "31st March, 2024" or "31 March 2024"
+  const m1 = h.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)[,.]?\s*(\d{4})/i);
+  if (m1) {
+    const monthNum = MONTHS[m1[2].toLowerCase()];
+    const year = parseInt(m1[3]);
+    if (monthNum && year) return makePeriod(monthNum, year);
+  }
+
+  // Format 2: "31/03/2024" DD/MM/YYYY (Indian date format)
+  const m2 = h.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (m2) {
+    const day = parseInt(m2[1]), month = parseInt(m2[2]), year = parseInt(m2[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return makePeriod(month, year);
+  }
+
+  return null;
 }
 
 async function parseSchIIIFormat(buf: ArrayBuffer, existingPeriods: ProvPeriod[]): Promise<ProvPeriod[]> {
@@ -723,15 +767,19 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
     }
   }
 
-  // Detect Sch III format: has separate BS / P&L / Cashflow sheets with date-header columns
-  const hasSchIIISheets = wb.SheetNames.some(n => /^bs$/i.test(n.trim()) || /balance\s*sheet/i.test(n)) &&
-    (wb.SheetNames.some(n => /p\s*[&]\s*l|profit.*loss/i.test(n)) || wb.SheetNames.some(n => /cash\s*flow/i.test(n)));
-  const hasDateHeader = !hasSchIIISheets && wb.SheetNames.some(sn => {
+  // Detect Sch III format: requires actual date-style column headers like "31st March, 2024"
+  // (sheet name alone is not enough — our own template also has "Balance Sheet" / "P&L" sheets)
+  const hasDateHeader = wb.SheetNames.some(sn => {
     const ws = wb.Sheets[sn]; if (!ws) return false;
     const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" }) as string[][];
-    return rows.slice(0, 12).some(r => r.some(c => /\d+\s*(?:st|nd|rd|th)?\s+[a-z]+\s+\d{4}/i.test(String(c))));
+    return rows.slice(0, 12).some(r => r.some(c => {
+      const s = String(c);
+      return /\d+\s*(?:st|nd|rd|th)?\s+[a-z]+\s+\d{4}/i.test(s) ||
+             /\b(?:audited|provisional|projected|unaudited)\s+\d{1,2}\/\d{1,2}\/\d{4}\b/i.test(s) ||
+             /\b\d{1,2}\/\d{1,2}\/\d{4}\b/.test(s);
+    }));
   });
-  if (hasSchIIISheets || hasDateHeader) {
+  if (hasDateHeader) {
     return parseSchIIIFormat(buf, existingPeriods);
   }
 
@@ -745,16 +793,20 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
     const rows  = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" }) as string[][];
     if (rows.length < 2) continue;
 
-    const isBS  = sheetName.toLowerCase().includes("balance") || sheetName.toLowerCase().includes("bs");
-    const isPL  = sheetName.toLowerCase().includes("p&l") || sheetName.toLowerCase().includes("profit") || sheetName.toLowerCase().includes("pl");
+    if (/claude\s*instruction/i.test(sheetName)) continue;
+    const isBS  = sheetName.toLowerCase().includes("balance") || sheetName.toLowerCase() === "bs";
+    const isPL  = sheetName.toLowerCase().includes("p&l") || sheetName.toLowerCase().includes("profit") || /^pl$/i.test(sheetName.trim());
     const isCF  = sheetName.toLowerCase().includes("cash");
-    if (!isBS && !isPL && !isCF) continue;
-    const section: "pl" | "bs" | "cf" = isBS ? "bs" : isCF ? "cf" : "pl";
+    // "auto" = generic sheet — classify each row by label
+    const section: "pl" | "bs" | "cf" | "auto" = isBS ? "bs" : isCF ? "cf" : isPL ? "pl" : "auto";
 
     let headerIdx = rows.findIndex(r => String(r[0] ?? "").toUpperCase().includes("PARTICULARS"));
     if (headerIdx === -1) headerIdx = 0;
     const headerRow = rows[headerIdx].map(c => String(c).trim());
-    const colLabels = headerRow.slice(1).filter(l => l && !l.startsWith("__"));
+    // Exclude meta rows, empty headers, and the aliases reference column
+    const colLabels = headerRow.slice(1).filter(l =>
+      l && !l.startsWith("__") && !/^aliases?\b/i.test(l) && !/reference only/i.test(l) && !/also known as/i.test(l)
+    );
 
     const metaMonths: number[]   = [];
     const metaFY: number[]       = [];
@@ -770,18 +822,30 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
       if (key === "__unit__")           { metaUnit.push(...row.slice(1).filter((_, j) => j < colLabels.length).map(v => String(v) || "Lakhs")); continue; }
     }
 
-    const fy = new Date().getFullYear();
+    const curFY = new Date().getFullYear();
+    // colKey[c] = the periods-map key to write data for column c (deduplicates same FY+months)
+    const colKey: string[] = [];
     for (let c = 0; c < colLabels.length; c++) {
       const label = colLabels[c];
-      if (!periods.has(label)) {
+      if (periods.has(label)) { colKey.push(label); continue; }
+      // Detect FY from label like "FY2024 (Audited)", "FY2026 (Provisional)", "FY25", "2024-2025"
+      const fyMatch = label.match(/\b(20\d{2})\b/);
+      const detectedFY = fyMatch ? parseInt(fyMatch[1]) : (metaFY[c] ?? curFY);
+      const mc = metaMonths[c] ?? 12;
+      // Deduplicate: if a period with the same FY+months already exists, reuse it
+      const dup = [...periods.entries()].find(([, p]) => p.fiscal_year === detectedFY && p.months_covered === mc);
+      if (dup) {
+        colKey.push(dup[0]);
+      } else {
         periods.set(label, {
           id: crypto.randomUUID(), label,
-          period_type: (metaType[c] ?? "quarterly") as PeriodType,
-          fiscal_year: metaFY[c] ?? fy,
-          months_covered: metaMonths[c] ?? 3,
+          period_type: (metaType[c] ?? "annual") as PeriodType,
+          fiscal_year: detectedFY,
+          months_covered: mc,
           unit: metaUnit[c] ?? "Lakhs",
           pl: blank(PL_LABELS), bs: blank(BS_LABELS), cf: blank(CF_LABELS),
         });
+        colKey.push(label);
       }
     }
 
@@ -789,16 +853,58 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
       const row = rows[i];
       const lineLabel = String(row[0] ?? "").trim();
       if (!lineLabel || lineLabel.startsWith("__") || lineLabel === "---") continue;
+      // Skip section header rows (no numeric values in any data column) and instruction text
+      if (/^claude\s+instructions?/i.test(lineLabel)) continue;
+      const hasAnyValue = colKey.some((_, c) => {
+        const v = row[c + 1];
+        return v !== "" && v != null && !isNaN(Number(v));
+      });
+      // Skip rows where ALL data columns are blank and the label is not a known line item
+      const isKnownLabel = (PL_LABELS as readonly string[]).includes(lineLabel) ||
+        (BS_LABELS as readonly string[]).includes(lineLabel) ||
+        (CF_LABELS as readonly string[]).includes(lineLabel);
+      if (!hasAnyValue && !isKnownLabel) continue;
 
-      for (let c = 0; c < colLabels.length; c++) {
-        const col = colLabels[c];
-        const p   = periods.get(col);
+      const classified = classifyLabel(lineLabel);
+      const rowSection: "pl" | "bs" | "cf" = section !== "auto"
+        ? section
+        : (classified?.section ?? "pl");
+      const rowLabel = classified?.std ?? lineLabel;
+
+      for (let c = 0; c < colKey.length; c++) {
+        const p = periods.get(colKey[c]);
         if (!p) continue;
         const raw = row[c + 1];
         const val = raw === "" || raw == null ? null : Number(raw);
-        p[section] = setv(p[section], lineLabel, isNaN(val as number) ? null : val);
+        p[rowSection] = setv(p[rowSection], rowLabel, isNaN(val as number) ? null : val);
       }
     }
+  }
+
+  // Derive computed fields for each period
+  for (const p of periods.values()) {
+    const gv = (sec: "pl" | "bs", lbl: string) => getv(p[sec], lbl) ?? 0;
+    const gp     = gv("pl", "Turnover") - gv("pl", "Cost of Goods Sold");
+    const ebitda = gp - gv("pl", "Operating Expenses");
+    const ebit   = ebitda - gv("pl", "Depreciation");
+    const pbt    = ebit - gv("pl", "Interest Expense");
+    const pat    = pbt - gv("pl", "Tax");
+    if (gv("pl", "Gross Profit")      === 0 && gp     !== 0) p.pl = setv(p.pl, "Gross Profit",      gp);
+    if (gv("pl", "EBITDA")            === 0 && ebitda !== 0) p.pl = setv(p.pl, "EBITDA",            ebitda);
+    if (gv("pl", "EBIT")              === 0 && ebit   !== 0) p.pl = setv(p.pl, "EBIT",              ebit);
+    if (gv("pl", "Profit Before Tax") === 0 && pbt    !== 0) p.pl = setv(p.pl, "Profit Before Tax", pbt);
+    if (gv("pl", "PAT")               === 0 && pat    !== 0) p.pl = setv(p.pl, "PAT",               pat);
+    const nw = gv("bs", "Share Capital") + gv("bs", "Reserves & Surplus");
+    const td = gv("bs", "Long Term Borrowings") + gv("bs", "Short Term Borrowings");
+    const cl = gv("bs", "Trade Payables") + gv("bs", "Other Current Liabilities") + gv("bs", "Short Term Borrowings");
+    const ca = gv("bs", "Inventory") + gv("bs", "Trade Receivables") + gv("bs", "Cash & Bank") + gv("bs", "Other Current Assets");
+    const ta = gv("bs", "Fixed Assets (Net)") + ca;
+    if (gv("bs", "Net Worth")           === 0 && nw !== 0) p.bs = setv(p.bs, "Net Worth",           nw);
+    if (gv("bs", "Total Debt")          === 0 && td !== 0) p.bs = setv(p.bs, "Total Debt",          td);
+    if (gv("bs", "Current Liabilities") === 0 && cl !== 0) p.bs = setv(p.bs, "Current Liabilities", cl);
+    if (gv("bs", "Current Assets")      === 0 && ca !== 0) p.bs = setv(p.bs, "Current Assets",      ca);
+    if (gv("bs", "Total Assets")        === 0 && ta !== 0) p.bs = setv(p.bs, "Total Assets",        ta);
+    if (gv("bs", "Total Liabilities")   === 0 && ta !== 0) p.bs = setv(p.bs, "Total Liabilities",   ta);
   }
 
   return Array.from(periods.values());
@@ -926,7 +1032,7 @@ function AddPeriodForm({ onAdd, onCancel, existingPeriods }: {
 
 function FinTable({
   section, periods, labels, showAnnualized, auditedItems, auditedUnit,
-  onEdit,
+  onEdit, onEditAudited,
 }: {
   section: "pl" | "bs";
   periods: ProvPeriod[];
@@ -935,9 +1041,12 @@ function FinTable({
   auditedItems: LineItem[] | null;
   auditedUnit?: string;
   onEdit: (periodId: string, section: "pl" | "bs", label: string, value: number | null) => void;
+  onEditAudited?: (label: string, value: number | null) => void;
 }) {
-  const [editCell, setEditCell] = useState<{ id: string; label: string } | null>(null);
-  const [editVal, setEditVal]   = useState("");
+  const [editCell,      setEditCell]      = useState<{ id: string; label: string } | null>(null);
+  const [editVal,       setEditVal]       = useState("");
+  const [auditEditLabel, setAuditEditLabel] = useState<string | null>(null);
+  const [auditEditVal,   setAuditEditVal]   = useState("");
 
   const startEdit = (id: string, label: string, cur: number | null) => {
     const pUnit = periods.find(pp => pp.id === id)?.unit ?? "Lakhs";
@@ -952,6 +1061,19 @@ function FinTable({
     const v = fromL(isNaN(vL as number) ? null : vL, pUnit);
     onEdit(editCell.id, section, editCell.label, v);
     setEditCell(null);
+  };
+
+  const startAuditEdit = (label: string, cur: number | null) => {
+    setAuditEditLabel(label);
+    const curL = toL(cur, auditedUnit ?? "Lakhs");
+    setAuditEditVal(curL != null ? String(parseFloat(curL.toFixed(4))) : "");
+  };
+  const commitAuditEdit = () => {
+    if (!auditEditLabel) return;
+    const vL = auditEditVal.trim() === "" ? null : parseFloat(auditEditVal);
+    const v  = fromL(isNaN(vL as number) ? null : vL, auditedUnit ?? "Lakhs");
+    onEditAudited?.(auditEditLabel, v);
+    setAuditEditLabel(null);
   };
 
   if (periods.length === 0) return <div className="text-[10px] text-muted-foreground">No periods added yet.</div>;
@@ -993,7 +1115,30 @@ function FinTable({
                 <td className="py-1 pr-4 text-foreground/80">{label}</td>
 
                 {auditedItems && (
-                  <td className="text-right pr-3 tabular-nums text-muted-foreground/60">{fmtN(toL(auditedVal, auditedUnit ?? "Lakhs"))}</td>
+                  <td className="text-right pr-3 tabular-nums">
+                    {auditEditLabel === label ? (
+                      <input
+                        autoFocus
+                        type="number"
+                        value={auditEditVal}
+                        onChange={e => setAuditEditVal(e.target.value)}
+                        onBlur={commitAuditEdit}
+                        onKeyDown={e => { if (e.key === "Enter") commitAuditEdit(); if (e.key === "Escape") setAuditEditLabel(null); }}
+                        className="w-20 bg-input border border-warning px-1 py-0.5 text-right text-xs focus:outline-none font-mono"
+                        title="Edit audited value (₹ Lakhs)"
+                      />
+                    ) : (
+                      <span
+                        onClick={() => onEditAudited && startAuditEdit(label, auditedVal)}
+                        className={`tabular-nums ${onEditAudited ? "cursor-pointer hover:text-warning hover:underline hover:underline-offset-2" : "text-muted-foreground/60"}`}
+                        title={onEditAudited ? "Click to edit audited value" : undefined}
+                      >
+                        {auditedVal != null ? (
+                          <span className="text-muted-foreground/70">{fmtN(toL(auditedVal, auditedUnit ?? "Lakhs"))}</span>
+                        ) : "—"}
+                      </span>
+                    )}
+                  </td>
                 )}
 
                 {periods.map(p => {
@@ -1056,28 +1201,53 @@ function FinTable({
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export function ProvisionalTab({
-  cc, periods: initialPeriods, extracted, onSave,
+  cc, periods: initialPeriods, extracted, onSave, onEditAudited,
 }: {
   cc: CaseRow;
   periods: ProvPeriod[];
   extracted: ExtractedRow[];
   onSave: (periods: ProvPeriod[]) => Promise<void>;
+  onEditAudited?: (section: "pl" | "bs", label: string, value: number | null) => Promise<void>;
 }) {
   const [periods,    setPeriods]  = useState<ProvPeriod[]>(
     initialPeriods.map(p => ({ ...p, cf: p.cf ?? blank(CF_LABELS) }))
   );
+  const [promptCopied, setPromptCopied] = useState(false);
   const [adding,      setAdding]    = useState(false);
   const [saving,      setSaving]    = useState(false);
   const [saved,       setSaved]     = useState(false);
-  const [importing,   setImp]       = useState(false);
   const [directImp,   setDirectImp] = useState(false);
   const [showAnn,     setShowAnn]   = useState(true);
   const [showBS,      setShowBS]    = useState(true);
-  const [selectedFY,  setSelectedFY] = useState<number | null>(null);
-  const fileRef        = useRef<HTMLInputElement>(null);
   const directFileRef  = useRef<HTMLInputElement>(null);
   const saveTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstRender  = useRef(true);
+  const historyRef     = useRef<ProvPeriod[][]>([initialPeriods.map(p => ({ ...p, cf: p.cf ?? blank(CF_LABELS) }))]);
+  const historyIdxRef  = useRef(0);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  const pushHistory = (next: ProvPeriod[]) => {
+    historyRef.current = historyRef.current.slice(0, historyIdxRef.current + 1);
+    historyRef.current.push(next);
+    historyIdxRef.current = historyRef.current.length - 1;
+    setCanUndo(historyIdxRef.current > 0);
+    setCanRedo(false);
+  };
+  const handleUndo = () => {
+    if (historyIdxRef.current <= 0) return;
+    historyIdxRef.current--;
+    setPeriods(historyRef.current[historyIdxRef.current]);
+    setCanUndo(historyIdxRef.current > 0);
+    setCanRedo(true);
+  };
+  const handleRedo = () => {
+    if (historyIdxRef.current >= historyRef.current.length - 1) return;
+    historyIdxRef.current++;
+    setPeriods(historyRef.current[historyIdxRef.current]);
+    setCanUndo(true);
+    setCanRedo(historyIdxRef.current < historyRef.current.length - 1);
+  };
 
   // Auto-save 800ms after any periods change (skip initial mount)
   useEffect(() => {
@@ -1110,21 +1280,22 @@ export function ProvisionalTab({
     return a.months_covered - b.months_covered;
   });
 
-  // ── Per-FY grouping ────────────────────────────────────────────────────────
+  // ── Per-FY grouping (used for YoY comparison table only) ──────────────────
   const fyGroups = sorted.reduce<Record<number, ProvPeriod[]>>((acc, p) => {
     (acc[p.fiscal_year] ??= []).push(p);
     return acc;
   }, {});
-  const fyList    = Object.keys(fyGroups).map(Number).sort();
-  const activeFY  = (selectedFY && fyGroups[selectedFY]) ? selectedFY : (fyList[fyList.length - 1] ?? null);
-  const viewPeriods = activeFY ? (fyGroups[activeFY] ?? []) : sorted;
+  const fyList      = Object.keys(fyGroups).map(Number).sort();
+  const viewPeriods = sorted;
 
   const latest = viewPeriods[viewPeriods.length - 1];
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
   const handleAdd = (p: ProvPeriod) => {
-    setPeriods(prev => [...prev, p]);
+    const next = [...periods, p];
+    setPeriods(next);
+    pushHistory(next);
     setAdding(false);
   };
 
@@ -1136,34 +1307,25 @@ export function ProvisionalTab({
 
   const handleRemove = (id: string) => {
     if (!window.confirm("Remove this period?")) return;
-    setPeriods(prev => prev.filter(p => p.id !== id));
-  };
-
-  const handleImport = async (file: File) => {
-    setImp(true);
-    try {
-      const next = await importProvisionalExcel(file, periods);
-      setPeriods(next);
-    } catch (e) {
-      alert("Import failed: " + (e instanceof Error ? e.message : String(e)));
-    } finally {
-      setImp(false);
-    }
+    const next = periods.filter(p => p.id !== id);
+    setPeriods(next);
+    pushHistory(next);
   };
 
   const handleDirectImport = async (file: File) => {
     setDirectImp(true);
     try {
-      const next = await parseSimpleAnnualExcel(file, periods);
+      const next = await importProvisionalExcel(file, periods);
       setPeriods(next);
+      pushHistory(next);
     } catch (e) {
-      alert("Direct import failed: " + (e instanceof Error ? e.message : String(e)));
+      alert("Import failed: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setDirectImp(false);
     }
   };
 
-  const handleExport = () => exportProvisionalExcel(viewPeriods, `${cc.case_code}_FY${activeFY ?? ""}`);
+  const handleExport = () => exportProvisionalExcel(sorted, cc.case_code);
 
   // ── KPI source: prefer the annual summary period; fall back to latest partial ─
   const annualPeriod  = viewPeriods.find(p => p.months_covered >= 12);
@@ -1186,79 +1348,117 @@ export function ProvisionalTab({
     <div className="space-y-3">
 
       {/* ── Toolbar ─────────────────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2 sticky top-[168px] z-20 bg-background -mx-3 px-3 pt-1 pb-2 border-b border-border/30">
-        <input ref={fileRef} type="file" accept=".xlsx,.xls" className="hidden"
-          onChange={e => { const f = e.target.files?.[0]; if (f) handleImport(f); e.target.value = ""; }} />
+      <div className="sticky top-[168px] z-20 bg-white -mx-3 px-4 py-2 border-b border-border shadow-sm">
         <input ref={directFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden"
           onChange={e => { const f = e.target.files?.[0]; if (f) handleDirectImport(f); e.target.value = ""; }} />
 
-        <button onClick={() => setAdding(a => !a)} disabled={adding}
-          className="text-[10px] tracking-widest border border-accent/50 text-accent px-3 py-1.5 hover:bg-accent/10 disabled:opacity-40">
-          + ADD PERIOD
-        </button>
-        <button onClick={() => directFileRef.current?.click()} disabled={directImp || importing}
-          className="text-[10px] tracking-widest border border-primary/50 text-primary px-3 py-1.5 hover:bg-primary/10 disabled:opacity-50"
-          title="Import annual Excel directly — columns = FY years, rows = line items. No AI, instant.">
-          {directImp ? "IMPORTING…" : "⬆ DIRECT ANNUAL IMPORT"}
-        </button>
-        <button onClick={() => fileRef.current?.click()} disabled={importing || directImp}
-          className="text-[10px] tracking-widest border border-border text-muted-foreground px-3 py-1.5 hover:text-foreground hover:border-primary/50 disabled:opacity-50"
-          title="Import Sch III / monthly tracking / round-trip template Excel">
-          {importing ? "IMPORTING…" : "⬆ IMPORT EXCEL"}
-        </button>
-        <button onClick={async () => {
-          const XLSX = await import("xlsx");
-          const wb = XLSX.utils.book_new();
-          const periods = ["Q1 FY25", "Q2 FY25", "H1 FY25", "FY2025"];
-          const hdr = ["Particulars", ...periods];
-          const mkSheet = (labels: string[]) =>
-            XLSX.utils.aoa_to_sheet([hdr, ["// Fill values in same unit (Lakhs/Crores). Add/remove period columns as needed."], ...labels.map(l => [l, "", "", "", ""])]);
-          XLSX.utils.book_append_sheet(wb, mkSheet(PL_LABELS), "P&L");
-          XLSX.utils.book_append_sheet(wb, mkSheet(BS_LABELS), "Balance Sheet");
-          XLSX.utils.book_append_sheet(wb, mkSheet(CF_LABELS), "Cash Flow");
-          XLSX.writeFile(wb, "provisional_template.xlsx");
-        }} className="text-[10px] tracking-widest border border-accent/40 text-accent/80 px-3 py-1.5 hover:text-accent hover:border-accent/60">
-          ⬇ BLANK TEMPLATE
-        </button>
-        {sorted.length > 0 && (
-          <button onClick={handleExport}
-            className="text-[10px] tracking-widest border border-border text-muted-foreground px-3 py-1.5 hover:text-foreground hover:border-primary/50">
-            ⬇ EXPORT EXCEL
+        {/* Primary row */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={() => directFileRef.current?.click()} disabled={directImp}
+            className="flex items-center gap-2 bg-primary text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-sm hover:bg-primary/90 active:scale-[0.98] disabled:opacity-50 transition-all">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            {directImp ? "Importing…" : "Import Financial Excel"}
           </button>
-        )}
-        <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground cursor-pointer ml-1">
-          <input type="checkbox" checked={showAnn} onChange={e => setShowAnn(e.target.checked)} className="accent-primary" />
-          SHOW ANNUALIZED
-        </label>
+          <div className="h-8 w-px bg-border hidden sm:block" />
+          <button onClick={async () => { const buf = await buildProvisionalTemplate(); downloadBuffer("Rehbar_Provisional_MIS_Template.xlsx", buf); }}
+            className="flex items-center gap-1.5 text-sm text-muted-foreground border border-border rounded-lg px-4 py-2 hover:text-foreground hover:border-primary/50 hover:bg-surface transition-colors">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Download Template
+          </button>
+          <button
+            onClick={async () => {
+              await navigator.clipboard.writeText(
+                "I have attached two files: a financial PDF and an Excel template.\n\nExtract every value from the PDF and fill in the Excel template exactly — place each figure in the correct row. All amounts in ₹ Lakhs. Rename the column headers to match the actual fiscal years shown in the PDF (e.g. FY2024, FY2025). Do not change any row labels in column A. If the data covers a partial period (Q1, H1, 9M), enter the actual figures as-is — do not annualize. Return only the completed Excel file."
+              );
+              setPromptCopied(true);
+              setTimeout(() => setPromptCopied(false), 2000);
+            }}
+            className="flex items-center gap-1.5 text-sm text-primary/70 border border-primary/30 rounded-lg px-4 py-2 hover:text-primary hover:border-primary/60 hover:bg-primary/5 transition-colors"
+            title="Copy a ready-to-use Claude prompt — open Claude, attach the template + PDF, then paste this"
+          >
+            {promptCopied ? "✓ Copied" : "⧉ Copy AI Prompt"}
+          </button>
+          <div className="flex flex-col leading-tight">
+            <span className="text-xs font-medium text-foreground/70">Fastest way to add financials</span>
+            <span className="text-[11px] text-muted-foreground">Fill the template · upload · done. P&amp;L, Balance Sheet, Cash Flow.</span>
+          </div>
+          <div className="ml-auto flex items-center gap-1">
+            <button disabled={!canUndo} onClick={handleUndo} title="Undo (Ctrl+Z)"
+              className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+              ↩ Undo
+            </button>
+            <button disabled={!canRedo} onClick={handleRedo} title="Redo (Ctrl+Y)"
+              className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+              ↪ Redo
+            </button>
+          </div>
+        </div>
 
-        {/* ── Year tabs ──────────────────────────────────────────────────────── */}
-        {fyList.length > 0 && (
-          <div className="flex items-center gap-1 ml-2 border-l border-border pl-2">
-            <span className="text-[9px] text-muted-foreground/60 tracking-widest mr-1">FY</span>
-            {fyList.map(fy => (
-              <button key={fy} onClick={() => setSelectedFY(fy)}
-                className={`text-[10px] tracking-widest px-2.5 py-1 border transition-colors ${
-                  activeFY === fy
-                    ? "border-primary text-primary bg-primary/10"
-                    : "border-border text-muted-foreground hover:border-primary/40 hover:text-foreground"
-                }`}>
-                {fy}
+        {/* Secondary row */}
+        <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-border/20">
+          <button onClick={() => setAdding(a => !a)} disabled={adding}
+            className="text-[10px] tracking-widest border border-accent/50 text-accent px-3 py-1.5 hover:bg-accent/10 disabled:opacity-40">
+            + ADD PERIOD
+          </button>
+          {sorted.length > 0 && (
+            <button onClick={handleExport}
+              className="text-[10px] tracking-widest border border-border text-muted-foreground px-3 py-1.5 hover:text-foreground hover:border-primary/50">
+              ⬇ EXPORT EXCEL
+            </button>
+          )}
+          {sorted.length > 0 && (() => {
+            const seen = new Map<string, string>();
+            const dupeIds: string[] = [];
+            for (const p of sorted) {
+              const key = `${p.fiscal_year}-${p.months_covered}`;
+              const existing = seen.get(key);
+              if (existing) {
+                const existP = sorted.find(x => x.id === existing)!;
+                const existScore = [...existP.pl, ...existP.bs].filter(i => i.value != null).length;
+                const curScore   = [...p.pl,     ...p.bs     ].filter(i => i.value != null).length;
+                dupeIds.push(curScore >= existScore ? existing : p.id);
+                seen.set(key, curScore >= existScore ? p.id : existing);
+              } else {
+                seen.set(key, p.id);
+              }
+            }
+            if (dupeIds.length === 0) return null;
+            return (
+              <button onClick={() => {
+                if (!window.confirm(`Remove ${dupeIds.length} duplicate period(s)?`)) return;
+                const next = periods.filter(p => !dupeIds.includes(p.id));
+                setPeriods(next);
+                pushHistory(next);
+              }} className="text-[10px] tracking-widest border border-warning/50 text-warning/80 px-3 py-1.5 hover:text-warning hover:border-warning/70 transition-colors"
+                title="Merge duplicate periods that have the same fiscal year">
+                ⚠ REMOVE {dupeIds.length} DUPES
+              </button>
+            );
+          })()}
+          <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground cursor-pointer ml-1">
+            <input type="checkbox" checked={showAnn} onChange={e => setShowAnn(e.target.checked)} className="accent-primary" />
+            SHOW ANNUALIZED
+          </label>
+          <div className="ml-auto flex gap-2 flex-wrap items-center">
+            {viewPeriods.map(p => (
+              <button key={p.id} onClick={() => handleRemove(p.id)}
+                className="text-[8px] border border-destructive/30 text-destructive/50 hover:text-destructive hover:border-destructive px-1.5 py-0.5 tracking-widest">
+                ✕ {p.label}
               </button>
             ))}
+            <span className={`text-[9px] tracking-widest transition-opacity ${saving || saved ? "opacity-100" : "opacity-0"} ${saved ? "text-success" : "text-muted-foreground"}`}>
+              {saving ? "SAVING…" : "✓ SAVED"}
+            </span>
           </div>
-        )}
-
-        <div className="ml-auto flex gap-2 flex-wrap">
-          {viewPeriods.map(p => (
-            <button key={p.id} onClick={() => handleRemove(p.id)}
-              className="text-[8px] border border-destructive/30 text-destructive/50 hover:text-destructive hover:border-destructive px-1.5 py-0.5 tracking-widest">
-              ✕ {p.label}
-            </button>
-          ))}
         </div>
-        <span className={`text-[9px] tracking-widest transition-opacity ${saving || saved ? "opacity-100" : "opacity-0"} ${saved ? "text-success" : "text-muted-foreground"}`}>
-          {saving ? "SAVING…" : "✓ SAVED"}
-        </span>
       </div>
 
       <div className="text-[9px] text-muted-foreground/60 tracking-wider">
@@ -1389,11 +1589,12 @@ export function ProvisionalTab({
 
       {/* ── P&L Table ────────────────────────────────────────────────────────── */}
       {viewPeriods.length > 0 ? (
-        <Panel title={`PROVISIONAL P&L${activeFY ? ` · FY${activeFY}` : ""}`} ticker="₹ Lakhs · CLICK CELL TO EDIT">
+        <Panel title="PROVISIONAL P&L" ticker="₹ Lakhs · CLICK CELL TO EDIT">
           <FinTable
             section="pl" periods={viewPeriods} labels={PL_LABELS}
             showAnnualized={showAnn} auditedItems={auditedPL} auditedUnit={auditedPLUnit}
             onEdit={handleEdit}
+            onEditAudited={onEditAudited ? (label, val) => onEditAudited("pl", label, val) : undefined}
           />
           {showAnn && viewPeriods.some(p => p.months_covered < 12) && (
             <div className="text-[9px] text-muted-foreground mt-2 tracking-wider border-t border-border/20 pt-1.5">
@@ -1424,7 +1625,7 @@ export function ProvisionalTab({
       {/* ── Balance Sheet Table ───────────────────────────────────────────────── */}
       {viewPeriods.length > 0 && (
         <Panel
-          title={`PROVISIONAL BALANCE SHEET${activeFY ? ` · FY${activeFY}` : ""}`}
+          title="PROVISIONAL BALANCE SHEET"
           ticker="₹ Lakhs · CLICK CELL TO EDIT"
           actions={
             <button onClick={() => setShowBS(s => !s)} className="text-[9px] border border-border px-2 py-0.5 text-muted-foreground hover:text-foreground tracking-widest">
@@ -1437,6 +1638,7 @@ export function ProvisionalTab({
               section="bs" periods={viewPeriods} labels={BS_LABELS}
               showAnnualized={false} auditedItems={auditedBS} auditedUnit={auditedBSUnit}
               onEdit={handleEdit}
+              onEditAudited={onEditAudited ? (label, val) => onEditAudited("bs", label, val) : undefined}
             />
           )}
         </Panel>
@@ -1445,7 +1647,7 @@ export function ProvisionalTab({
       {/* ── Cash Flow Table ───────────────────────────────────────────────────── */}
       {viewPeriods.length > 0 && viewPeriods.some(p => (p.cf ?? []).some(i => i.value != null)) && (
         <Panel
-          title={`PROVISIONAL CASH FLOW${activeFY ? ` · FY${activeFY}` : ""}`}
+          title="PROVISIONAL CASH FLOW"
           ticker="CLICK CELL TO EDIT"
         >
           <FinTable
@@ -1462,7 +1664,7 @@ export function ProvisionalTab({
         const growthPeriods = viewPeriods.filter(p => p.months_covered < 12);
         if (growthPeriods.length < 2) return null;
         return (
-          <Panel title={`MONTH-OVER-MONTH GROWTH${activeFY ? ` · FY${activeFY}` : ""}`} ticker="MoM TREND">
+          <Panel title="PERIOD-OVER-PERIOD GROWTH" ticker="MoM TREND">
             <div className="overflow-x-auto">
               <table className="w-full text-xs min-w-max">
                 <thead className="text-muted-foreground border-b border-border">

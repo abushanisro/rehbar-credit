@@ -351,9 +351,9 @@ export function VisitReportTab({
         </button>
       </div>
 
-      {/* ── Facility photos & documents ───────────────────────────────────── */}
+      {/* ── Annexures ─────────────────────────────────────────────────────── */}
       <Panel
-        title="Facility Photos & Documents"
+        title="Annexures"
         ticker={attachments.length > 0 ? `${attachments.length} file${attachments.length !== 1 ? "s" : ""}` : "Attach files"}
         status={attachments.length > 0 ? "live" : "idle"}
         actions={

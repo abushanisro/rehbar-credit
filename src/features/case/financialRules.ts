@@ -19,7 +19,7 @@ export const RULES: Record<string, Rule[]> = {
     // Liabilities side (dependencies first)
     ["Networth",                   ["Share Capital","Reserves & Surplus","Money Received against Warrants","Share Application Money Pending Allotment","Deffered Government Grants","Minority Interest"]],
     ["Total Non Current Liabilities", ["Long-term Borrowings","Deferred Tax Liabilities","Other Non Current Liabilities","Long-term Provisions"]],
-    ["Total Current Liabilities",  ["Total Short-term Borrowings","Trade Payables","Other Current Liabilities","Short-term Provisions"]],
+    ["Total Current Liabilities",  ["Total Short-term Borrowings","Short-term Borrowings","Trade Payables","Other Current Liabilities","Short-term Provisions"]],
     ["Total Equity & Liabilities", ["Networth","Total Non Current Liabilities","Total Current Liabilities","Other Equity & Liabilities"]],
 
     // Asset side
@@ -36,7 +36,7 @@ export const RULES: Record<string, Rule[]> = {
     ["Fixed Assets (Net)",  ["Total Fixed Asset"]],
     ["Total Assets",        ["TOTAL ASSETS"]],
     ["Long Term Borrowings",["Long-term Borrowings"]],
-    ["Short Term Borrowings",["Total Short-term Borrowings"]],
+    ["Short Term Borrowings",["Total Short-term Borrowings","Short-term Borrowings"]],
     ["Inventory",           ["Inventories"]],
     ["Cash & Bank",         ["Cash & Cash Equivalents"]],
     ["Total Debt",          ["Long Term Borrowings","Short Term Borrowings"]],

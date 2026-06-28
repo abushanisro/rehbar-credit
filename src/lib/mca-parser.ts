@@ -163,6 +163,7 @@ export async function parseAccumnExcel(file: File): Promise<{
         else if (lA.includes("corpository") && lA.includes("sector")) profile.sector = vB;
         else if (lA.startsWith("product")) profile.products_services = vB;
         else if (lA === "fulladdress") profile.raw_address = vB;
+        else if (lA === "about" || lA === "aboutthecompany") profile.about = vB;
         else if (lA === "emailid" || lA === "email") profile.email = vB;
         else if (lA === "website") websiteUrl = vB.startsWith("http") ? vB : `https://${vB}`;
         else if (lA.includes("telephone") || lA === "phonenumber") profile.telephone = vB;

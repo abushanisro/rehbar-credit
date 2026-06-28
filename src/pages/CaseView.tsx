@@ -33,6 +33,8 @@ import { PartnerAnalysisTab } from "@/tabs/case/PartnerAnalysisTab";
 import type { PartnerEntry } from "@/tabs/case/PartnerAnalysisTab";
 import { ProvisionalTab } from "@/tabs/case/ProvisionalTab";
 import type { ProvPeriod } from "@/tabs/case/ProvisionalTab";
+import { RehbarHistoryTab } from "@/tabs/case/RehbarHistoryTab";
+import type { RehbarHistory } from "@/tabs/case/RehbarHistoryTab";
 import { AccumnBsaPanel } from "@/components/case/AccumnBsaPanel";
 import { AccumnApiPanel } from "@/components/case/AccumnApiPanel";
 import { CibilTab, type CibilReportRow } from "@/tabs/case/CibilTab";
@@ -44,12 +46,17 @@ import { parseAccumnGstExcel } from "@/lib/gst-accumn-excel-parser";
 import { parseBsaExcel, isBsaExcel, type BsaParseResult } from "@/lib/bsa-excel-parser";
 import { UploadGrid as CompactUploadGrid } from "@/components/case/UploadGrid";
 import { ICNoteDocument } from "@/tabs/case/ic/ICNoteDocument";
-import type { IcNoteShape } from "@/tabs/case/ic/ICNoteDocument";
+import { ICDeckTab } from "@/tabs/case/ic/ICDeckTab";
+import type { IcNoteShape, AiReviewAnalysis } from "@/tabs/case/ic/ICNoteDocument";
+import { generateIcPpt } from "@/lib/ic-ppt-export";
 import { annotationsToSvgString } from "@/tabs/case/ic/ICAnnotationLayer";
 import { buildIcNoteHtml as buildIcNoteHtmlFull, buildIcNotePrintCss } from "@/tabs/case/ic/buildIcNoteHtml";
 import { TriangulationTab } from "@/tabs/case/TriangulationTab";
 import { VisitReportTab } from "@/tabs/case/VisitReportTab";
 import type { TriangulationData } from "@/lib/triangulation-excel-parser";
+import { buildAuditedTemplate, buildProjectionsTemplate, buildBsaTemplate, buildGstTemplate, downloadBuffer } from "@/lib/excel-templates";
+import { AnnotationOverlay } from "@/components/case/AnnotationOverlay";
+import type { UserAnnotation } from "@/components/case/AnnotationOverlay";
 
 type CaseRow = Tables<"credit_cases">;
 type DocRow = Tables<"financial_documents">;
@@ -185,7 +192,7 @@ const RULES: Record<string, Rule[]> = {
     // Liabilities side (dependencies first)
     ["Networth",                   ["Share Capital","Reserves & Surplus","Money Received against Warrants","Share Application Money Pending Allotment","Deffered Government Grants","Minority Interest"]],
     ["Total Non Current Liabilities", ["Long-term Borrowings","Deferred Tax Liabilities","Other Non Current Liabilities","Long-term Provisions"]],
-    ["Total Current Liabilities",  ["Total Short-term Borrowings","Trade Payables","Other Current Liabilities","Short-term Provisions"]],
+    ["Total Current Liabilities",  ["Total Short-term Borrowings","Short-term Borrowings","Trade Payables","Other Current Liabilities","Short-term Provisions"]],
     ["Total Equity & Liabilities", ["Networth","Total Non Current Liabilities","Total Current Liabilities","Other Equity & Liabilities"]],
 
     // Asset side
@@ -202,7 +209,7 @@ const RULES: Record<string, Rule[]> = {
     ["Fixed Assets (Net)",  ["Total Fixed Asset"]],
     ["Total Assets",        ["TOTAL ASSETS"]],
     ["Long Term Borrowings",["Long-term Borrowings"]],
-    ["Short Term Borrowings",["Total Short-term Borrowings"]],
+    ["Short Term Borrowings",["Total Short-term Borrowings","Short-term Borrowings"]],
     ["Inventory",           ["Inventories"]],
     ["Cash & Bank",         ["Cash & Cash Equivalents"]],
     ["Total Debt",          ["Long Term Borrowings","Short Term Borrowings"]],
@@ -308,7 +315,7 @@ const SECTION_TOTAL_MAP: Record<string, string> = {
 // Aggregate label → bold row highlight (kept for backward compat)
 const BS_TOTAL_LABELS = new Set(COMPUTED_LABELS);
 
-function applyStatementRules(items: LineItem[], stmtType: string): LineItem[] {
+function applyStatementRules(items: LineItem[], stmtType: string, trustSource = false): LineItem[] {
   const rules = RULES[stmtType];
   if (!rules) return items;
 
@@ -336,6 +343,10 @@ function applyStatementRules(items: LineItem[], stmtType: string): LineItem[] {
     if (idx === -1) {
       result.push({ label: target, value: parseFloat(sum.toFixed(2)), override_value: null, confidence: 100, reviewed: true, note: "auto-derived" });
     } else {
+      // When importing from source Excel, trust any pre-computed totals already present
+      // (e.g. Corpository's EBITDA, PBT, PAT, Total CL) — don't override with
+      // potentially-incomplete rule computations that miss unlisted cost components.
+      if (trustSource && result[idx].note === "excel-import" && result[idx].value != null) continue;
       result[idx] = { ...result[idx], override_value: parseFloat(sum.toFixed(2)) };
     }
   }
@@ -458,7 +469,7 @@ function CaseViewInner() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [tab, setTabRaw] = useState<"review" | "provisional" | "ratios" | "projections" | "ic_note" | "bank" | "gst" | "cibil" | "triangulation" | "visit_report" | "partner">("review");
+  const [tab, setTabRaw] = useState<"review" | "provisional" | "ratios" | "projections" | "rehbar_history" | "ic_note" | "ic_deck" | "bank" | "gst" | "cibil" | "triangulation" | "visit_report" | "partner">("review");
   const [entity, setEntity] = useState<"main" | "partner">("main");
   const [partnerSubTab, setPartnerSubTab] = useState<"review" | "ratios" | "bank" | "gst">("review");
   const { setEditing } = useMyPresence(user?.user_metadata?.full_name ?? user?.email ?? "Analyst", user?.email ?? "", tab);
@@ -494,6 +505,7 @@ function CaseViewInner() {
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
   const [extractError, setExtractError] = useState<{ title: string; detail?: string; action?: string } | null>(null);
+  const [canvasAnnotations, setCanvasAnnotations] = useState<UserAnnotation[]>([]);
   const [editingCell, setEditingCell] = useState<{ stmtType: string; fy: number; label: string; field: "label" | "value" } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -506,6 +518,9 @@ function CaseViewInner() {
   const [ratiosOutdated, setRatiosOutdated] = useState(false);
   const [importingFinExcel, setImportingFinExcel] = useState(false);
   const [aiAlert, setAiAlert] = useState<string | null>(null);
+  const [aiAnalysis, setAiAnalysis] = useState<AiReviewAnalysis | null>(null);
+  const [aiAnalysisLoading, setAiAnalysisLoading] = useState(false);
+  const [aiAnalysisError, setAiAnalysisError] = useState<string | null>(null);
   const autoCheckDoneRef = useRef(false);
   const finExcelInputRef = useRef<HTMLInputElement>(null);
   const reviewHeaderScrollRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -514,6 +529,7 @@ function CaseViewInner() {
   const [icImportProgress, setIcImportProgress] = useState(0);
   const [icImportLabel, setIcImportLabel]     = useState("");
   const icImportFileRef = useRef<HTMLInputElement>(null);
+  const [generatingSection, setGeneratingSection] = useState<string | null>(null);
 
   // Sync sticky-header column widths to match the actual rendered body-table column widths
   useLayoutEffect(() => {
@@ -574,6 +590,9 @@ function CaseViewInner() {
     ]);
     if (!c.data) { navigate("/", { replace: true }); return; }
     setCc(c.data);
+    // Hydrate canvas annotations stored inside ic_note
+    const savedCanvas = ((c.data.ic_note as Record<string, unknown> | null)?.canvas_annotations ?? []) as UserAnnotation[];
+    setCanvasAnnotations(savedCanvas);
     setDocs(d.data ?? []);
     setExtracted(e.data ?? []);
     setRatios(r.data ?? []);
@@ -595,14 +614,26 @@ function CaseViewInner() {
 
     // Load linked company MCA profile + directors
     const companyId = (c.data as unknown as { company_id?: string }).company_id;
+    const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
     if (companyId) {
-      const db = supabase as unknown as { from: (t: string) => ReturnType<typeof supabase.from> };
       const [{ data: co }, { data: dirs }] = await Promise.all([
         db.from("companies").select("*").eq("id", companyId).single(),
         db.from("company_directors").select("*").eq("company_id", companyId).order("name"),
       ]);
       setLinkedCompany(co as Record<string, string | null> ?? null);
       setLinkedDirs((dirs ?? []) as Record<string, string | null>[]);
+    } else if (c.data?.client_name) {
+      // Fallback: find company by client name when case is not explicitly linked
+      const { data: coRows } = await db.from("companies").select("*").ilike("name", `%${c.data.client_name}%`).limit(1);
+      const co = (coRows as Record<string, string | null>[] | null)?.[0] ?? null;
+      if (co) {
+        const { data: dirs } = await db.from("company_directors").select("*").eq("company_id", co["id"]).order("name");
+        setLinkedCompany(co);
+        setLinkedDirs((dirs ?? []) as Record<string, string | null>[]);
+      } else {
+        setLinkedCompany(null);
+        setLinkedDirs([]);
+      }
     } else {
       setLinkedCompany(null);
       setLinkedDirs([]);
@@ -766,6 +797,10 @@ function CaseViewInner() {
       supabase.removeChannel(ch);
     };
   }, [id, scheduleReload]);
+
+  useEffect(() => {
+    setAiAnalysis((cc?.ic_note as any)?.ai_review_analysis ?? null);
+  }, [cc?.id]);
 
   useEffect(() => {
     if (extractError) {
@@ -1657,7 +1692,7 @@ function CaseViewInner() {
       for (const stmt of statements) {
         for (const fy of stmt.fiscal_years) {
           const existing = extracted.find(r => r.statement_type === stmt.stmt_type && r.fiscal_year === fy);
-          const items = applyStatementRules(stmt.line_items_by_fy[fy] as unknown as LineItem[], stmt.stmt_type) as never;
+          const items = applyStatementRules(stmt.line_items_by_fy[fy] as unknown as LineItem[], stmt.stmt_type, true) as never;
           if (existing) {
             await supabase.from("extracted_financials").update({ line_items: items, unit: stmt.unit } as never).eq("id", existing.id);
           } else {
@@ -2117,11 +2152,40 @@ function CaseViewInner() {
     } finally { setBusy(false); }
   };
 
+  const runNarrativeSection = async (sectionId: string) => {
+    setGeneratingSection(sectionId);
+    try {
+      const { data, error } = await supabase.functions.invoke("generate-narrative", {
+        body: { case_id: cc.id, section_ids: [sectionId] },
+      });
+      if (error) throw error;
+      if (!data?.section_templates) throw new Error("No content returned from generation");
+      const merged = {
+        ...(cc.ic_note as Record<string, unknown> ?? {}),
+        section_templates: {
+          ...((cc.ic_note as Record<string, unknown> | null)?.section_templates as Record<string, unknown> ?? {}),
+          ...data.section_templates,
+        },
+      };
+      // Optimistic update immediately so the UI reflects content without waiting for DB round-trip.
+      setCc(prev => prev ? { ...prev, ic_note: merged as Json } : prev);
+      // Persist to DB — if this fails, the realtime subscription will revert on next reload.
+      const { error: writeErr } = await supabase.from("credit_cases").update({ ic_note: merged }).eq("id", cc.id);
+      if (writeErr) throw writeErr;
+      toast.success(`Section generated`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Generation failed");
+    } finally {
+      setGeneratingSection(null);
+    }
+  };
+
   const runNarrative = async (analystNotes?: string) => {
     // Capture user-entered data before edge function overwrites ic_note
     const preservedPartners       = (cc.ic_note as Record<string, unknown> | null)?.["partners"] as PartnerEntry[] | undefined;
     const preservedProjComment    = (cc.ic_note as Record<string, unknown> | null)?.["projections_comment"] as string | undefined;
     const preservedProvisional    = (cc.ic_note as Record<string, unknown> | null)?.["provisional"] as ProvPeriod[] | undefined;
+    const preservedRehbarHistory  = (cc.ic_note as Record<string, unknown> | null)?.["rehbar_history"] as RehbarHistory | undefined;
 
     setBusy(true);
     setProgress(0);
@@ -2197,12 +2261,13 @@ function CaseViewInner() {
       }
       toast.success("IC Note draft generated");
       // Re-merge user-entered data that the edge function may have overwritten
-      if (preservedPartners?.length || preservedProjComment || preservedProvisional?.length) {
+      if (preservedPartners?.length || preservedProjComment || preservedProvisional?.length || preservedRehbarHistory) {
         const mergedNote = {
           ...(narData?.ic_note as Record<string, unknown> ?? {}),
-          ...(preservedPartners?.length     ? { partners:            preservedPartners   } : {}),
-          ...(preservedProjComment          ? { projections_comment: preservedProjComment } : {}),
-          ...(preservedProvisional?.length  ? { provisional:         preservedProvisional } : {}),
+          ...(preservedPartners?.length     ? { partners:            preservedPartners        } : {}),
+          ...(preservedProjComment          ? { projections_comment: preservedProjComment      } : {}),
+          ...(preservedProvisional?.length  ? { provisional:         preservedProvisional      } : {}),
+          ...(preservedRehbarHistory        ? { rehbar_history:      preservedRehbarHistory    } : {}),
         };
         await supabase.from("credit_cases").update({ ic_note: mergedNote as Json }).eq("id", cc.id);
       }
@@ -2231,6 +2296,84 @@ function CaseViewInner() {
     };
     await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
     setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const generateAIReviewAnalysis = async () => {
+    if (!cc || activeExtracted.length === 0) return;
+    setAiAnalysisLoading(true);
+    setAiAnalysisError(null);
+
+    type LI = { label: string; value: number | null; override_value?: number | null; is_section?: boolean };
+    const byYear: Record<string, Record<string, number | null>> = {};
+    const allLabels = new Set<string>();
+    for (const row of activeExtracted) {
+      const yr = String(row.fiscal_year ?? "Unknown");
+      if (!byYear[yr]) byYear[yr] = {};
+      for (const item of ((row.line_items as unknown as LI[]) ?? [])) {
+        if (item.is_section) continue;
+        byYear[yr][item.label] = item.override_value ?? item.value;
+        allLabels.add(item.label);
+      }
+    }
+    const years = Object.keys(byYear).sort();
+    const labels = [...allLabels];
+
+    let tableText = `Fiscal Year | ${years.join(" | ")}\n`;
+    tableText += `---|${years.map(() => "---").join("|")}\n`;
+    for (const label of labels) {
+      const vals = years.map(y => byYear[y]?.[label] != null ? `₹${(byYear[y][label] as number).toFixed(2)}L` : "–");
+      tableText += `${label} | ${vals.join(" | ")}\n`;
+    }
+
+    const systemPrompt = `You are an expert financial analyst reviewing a company's audited financials for credit assessment. Analyze the data and respond ONLY with valid JSON — no markdown, no code fences, no extra text.`;
+    const userPrompt = `Company: ${cc.client_name ?? "Borrower"}
+Financials (amounts in source units):
+
+
+${tableText}
+
+Respond ONLY with a JSON object matching this schema exactly:
+{
+  "analyst_summary": "<2-3 paragraph prose covering revenue trend, profitability, debt coverage, working capital, key positives and concerns>",
+  "cfo_flags": [
+    { "flag": "<short flag title>", "severity": "HIGH", "detail": "<1-2 sentences>" }
+  ],
+  "fiscal_report": "<structured overview: top-line revenue, EBITDA margin, PAT, key ratios, year-on-year changes — 2-3 paragraphs>"
+}`;
+
+    try {
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+            generationConfig: { temperature: 0.3, maxOutputTokens: 2048 },
+          }),
+        }
+      );
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        throw new Error(`Gemini API error ${res.status}: ${errBody.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      const raw: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      const cleaned = raw.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
+      const parsed: AiReviewAnalysis = { ...JSON.parse(cleaned), generated_at: new Date().toISOString() };
+
+      const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+      const next = { ...current, ai_review_analysis: parsed };
+      await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+      setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+      setAiAnalysis(parsed);
+    } catch (e: unknown) {
+      setAiAnalysisError((e as Error).message ?? "AI analysis failed");
+    } finally {
+      setAiAnalysisLoading(false);
+    }
   };
 
   const patchIcParaSig = async (key: string, sig: { email: string; name: string; at: string }) => {
@@ -2267,6 +2410,15 @@ function CaseViewInner() {
       ...current,
       comments: existing.map(c => c.id === commentId ? { ...c, resolved: true } : c),
     };
+    await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
+  };
+
+  const saveCanvasAnnotations = async (annotations: UserAnnotation[]) => {
+    if (!cc) return;
+    setCanvasAnnotations(annotations);
+    const current = (cc.ic_note as Record<string, unknown> | null) ?? {};
+    const next = { ...current, canvas_annotations: annotations };
     await supabase.from("credit_cases").update({ ic_note: next as never }).eq("id", cc.id);
     setCc(prev => prev ? { ...prev, ic_note: next as never } : prev);
   };
@@ -2390,6 +2542,7 @@ function CaseViewInner() {
     provisional?: ProvPeriod[];
     has_partner?: boolean;
     partner_company_name?: string;
+    rehbar_history?: RehbarHistory;
   };
 
   const hasPartner = !!(ic?.has_partner);
@@ -2444,6 +2597,25 @@ function CaseViewInner() {
     await reload();
   };
 
+  const saveRehbarHistory = async (rehbar_history: RehbarHistory) => {
+    const next = { ...((cc.ic_note as Record<string, unknown> | null) ?? {}), rehbar_history };
+    await supabase.from("credit_cases").update({ ic_note: next as unknown as Json }).eq("id", cc.id);
+    setCc(prev => prev ? { ...prev, ic_note: next as unknown as Json } : prev);
+  };
+
+  const editAuditedLine = async (section: "pl" | "bs", label: string, value: number | null) => {
+    const stmtType = section === "pl" ? "profit_loss" : "balance_sheet";
+    const confirmedRows = extracted.filter(r => r.statement_type === stmtType && r.confirmed);
+    const lastFY = Math.max(0, ...confirmedRows.map(r => r.fiscal_year as number));
+    const targetRow = confirmedRows.find(r => r.fiscal_year === lastFY);
+    if (!targetRow) return;
+    const items = (targetRow.line_items as unknown as LineItem[]).map(i =>
+      i.label === label ? { ...i, value, override_value: null } : i
+    );
+    await supabase.from("extracted_financials").update({ line_items: items as never }).eq("id", targetRow.id);
+    await reload();
+  };
+
   const saveProjectionsComment = async (text: string) => {
     const base = icBase();
     if (base["sections"]) {
@@ -2460,164 +2632,42 @@ function CaseViewInner() {
 
   const handleDirectProjImport = async (data: { fiscal_year: number; line_items: LineItem[]; unit: string }[]) => {
     if (!user || !cc) return;
+    // Delete all previous direct-import projection records (document_id IS NULL) so stale
+    // fiscal years from a prior import don't linger alongside the new ones.
+    await supabase.from("extracted_financials")
+      .delete()
+      .eq("case_id", cc.id)
+      .eq("statement_type", "projections" as never)
+      .is("document_id", null);
     for (const { fiscal_year, line_items, unit } of data) {
-      const { error } = await supabase.from("extracted_financials").upsert({
+      const { error } = await supabase.from("extracted_financials").insert({
         case_id: cc.id, user_id: user.id, document_id: null,
         fiscal_year, statement_type: "projections" as never,
         line_items: line_items as never, confirmed: false, unit,
-      }, { onConflict: "case_id,fiscal_year,statement_type" } as never);
+      } as never);
       if (error) throw new Error(error.message);
     }
     await reload();
   };
 
-  // ── Excel template helpers ────────────────────────────────────────────────
-  const tplCols = (fys: string[]) => ["Particulars", ...fys];
-  const tplRows = (labels: string[], fys: string[]) =>
-    labels.map(l => [l, ...fys.map(() => "")] as (string | number | null)[]);
-
   const downloadFinancialTemplate = async () => {
-    const fys = ["FY2022", "FY2023", "FY2024", "FY2025"];
-    const hdr = tplCols(fys);
-    const blank = (label: string) => [label, ...fys.map(() => "")] as (string | number | null)[];
-
-    const plRows: (string | number | null)[][] = [
-      blank("── INCOME ──"),
-      blank("Revenue from Operations"),
-      blank("Other Income"),
-      blank("Total Income"),
-      blank("── EXPENSES ──"),
-      blank("Raw Material / Cost of Goods Sold"),
-      blank("Change in Stock / WIP"),
-      blank("Employee Benefit Expenses"),
-      blank("Manufacturing Expenses"),
-      blank("Selling & Distribution Expenses"),
-      blank("Administrative & General Expenses"),
-      blank("Other Expenses"),
-      blank("Total Operating Expenses"),
-      blank("── KEY METRICS ──"),
-      blank("Gross Profit"),
-      blank("EBITDA"),
-      blank("Depreciation & Amortization"),
-      blank("EBIT"),
-      blank("Interest & Finance Charges"),
-      blank("Other Non-Operating Income / Expense"),
-      blank("Profit Before Tax"),
-      blank("Tax (Current + Deferred)"),
-      blank("PAT (Net Profit After Tax)"),
-      blank("Dividend Paid"),
-      blank("Retained Profit"),
-    ];
-
-    const bsRows: (string | number | null)[][] = [
-      blank("── EQUITY & LIABILITIES ──"),
-      blank("Share Capital"),
-      blank("Reserves & Surplus"),
-      blank("Net Worth (Shareholders Equity)"),
-      blank("── LONG-TERM LIABILITIES ──"),
-      blank("Long Term Borrowings (Secured)"),
-      blank("Long Term Borrowings (Unsecured)"),
-      blank("Deferred Tax Liability"),
-      blank("Long Term Provisions"),
-      blank("Other Long Term Liabilities"),
-      blank("── CURRENT LIABILITIES ──"),
-      blank("Short Term Borrowings (CC / OD / WCDL)"),
-      blank("Current Maturities of LT Debt"),
-      blank("Trade Payables"),
-      blank("Advance from Customers"),
-      blank("Other Current Liabilities"),
-      blank("Short Term Provisions"),
-      blank("Current Liabilities"),
-      blank("Total Liabilities (Equity + Liab)"),
-      blank("── NON-CURRENT ASSETS ──"),
-      blank("Gross Block (Tangible Fixed Assets)"),
-      blank("Accumulated Depreciation"),
-      blank("Fixed Assets (Net Block)"),
-      blank("Capital Work in Progress (CWIP)"),
-      blank("Intangible Assets (Net)"),
-      blank("Non-Current Investments"),
-      blank("Long Term Loans & Advances"),
-      blank("Other Non-Current Assets"),
-      blank("── CURRENT ASSETS ──"),
-      blank("Inventory (Stock-in-Trade + WIP)"),
-      blank("Trade Receivables"),
-      blank("Cash & Bank Balances"),
-      blank("Short Term Loans & Advances"),
-      blank("Other Current Assets"),
-      blank("Current Assets"),
-      blank("Total Assets"),
-      blank("── DERIVED ──"),
-      blank("Capital Employed"),
-      blank("Working Capital"),
-      blank("Tangible Net Worth"),
-    ];
-
-    const cfRows: (string | number | null)[][] = [
-      blank("── OPERATING ACTIVITIES ──"),
-      blank("Net Profit (PAT)"),
-      blank("Add: Depreciation & Amortization"),
-      blank("Add: Interest Expenses"),
-      blank("Changes in Inventories"),
-      blank("Changes in Trade Receivables"),
-      blank("Changes in Trade Payables"),
-      blank("Changes in Other Working Capital"),
-      blank("Income Tax Paid"),
-      blank("Cash from Operations"),
-      blank("── INVESTING ACTIVITIES ──"),
-      blank("Capital Expenditure (Gross)"),
-      blank("Proceeds from Sale of Fixed Assets"),
-      blank("Investments Made"),
-      blank("Investments Realised"),
-      blank("Other Investing Cash Flows"),
-      blank("Cash from Investing"),
-      blank("── FINANCING ACTIVITIES ──"),
-      blank("Proceeds from Long Term Borrowings"),
-      blank("Repayment of Long Term Borrowings"),
-      blank("Net Change in Short Term Borrowings"),
-      blank("Interest Paid"),
-      blank("Dividend Paid"),
-      blank("Share Capital Raised"),
-      blank("Cash from Financing"),
-      blank("── NET CASH POSITION ──"),
-      blank("Net Change in Cash"),
-      blank("Opening Cash"),
-      blank("Closing Cash"),
-    ];
-
-    await dlExcel([
-      { name: "Profit & Loss",   rows: [["Profit & Loss Statement (Amount in Lakhs)"], hdr, ...plRows] },
-      { name: "Balance Sheet",   rows: [["Balance Sheet (Amount in Lakhs)"], hdr, ...bsRows] },
-      { name: "Cash Flow",       rows: [["Cash Flow Statement (Amount in Lakhs)"], hdr, ...cfRows] },
-    ], `${cc.case_code}_financial_template.xlsx`);
+    const buf = await buildAuditedTemplate();
+    downloadBuffer(`${cc.case_code}_Audited_Financials_Template.xlsx`, buf);
   };
 
   const downloadProjectionsTemplate = async () => {
-    const fys = ["FY2025", "FY2026", "FY2027"];
-    const labels = [
-      "Projected Turnover", "Projected EBITDA", "Projected PAT",
-      "Projected Net Worth", "Projected Total Debt",
-      "Projected Gross Profit", "Projected EBIT", "Projected Depreciation",
-      "Projected Interest Expense", "Projected Operating Expenses", "Projected Total Assets",
-    ];
-    await dlExcel([
-      { name: "Projections", rows: [tplCols(fys), ["// Same unit as historical data — import via DIRECT EXCEL IMPORT in Projections tab"], ...tplRows(labels, fys)] },
-    ], `${cc.case_code}_projections_template.xlsx`);
+    const buf = await buildProjectionsTemplate();
+    downloadBuffer(`${cc.case_code}_Projections_Template.xlsx`, buf);
   };
 
   const downloadBankTemplate = async () => {
-    const months = ["Apr 2024","May 2024","Jun 2024","Jul 2024","Aug 2024","Sep 2024","Oct 2024","Nov 2024","Dec 2024","Jan 2025","Feb 2025","Mar 2025"];
-    const hdr = ["Month","Bank Name","Account Number","Opening Balance","Closing Balance","Total Credits","Total Debits","Credit Count","Debit Count","Avg Balance","Min Balance","Max Balance","Inward Bounces","Outward Bounces","EMI Outflows","Remarks"];
-    const note = ["// Month format: 'Apr 2024'. Balances in INR. Leave blank if unknown."];
-    const rows = months.map(m => [m, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
-    await dlExcel([{ name: "Bank Statement", rows: [hdr as (string|number|null)[], note as (string|number|null)[], ...rows] }], `${cc.case_code}_bank_template.xlsx`);
+    const buf = await buildBsaTemplate();
+    downloadBuffer(`${cc.case_code}_BSA_Template.xlsx`, buf);
   };
 
   const downloadGstTemplate = async () => {
-    const periods = ["Apr 2024","May 2024","Jun 2024","Jul 2024","Aug 2024","Sep 2024","Oct 2024","Nov 2024","Dec 2024","Jan 2025","Feb 2025","Mar 2025"];
-    const hdr = ["Period","Return Type","GSTIN","Taxable Turnover","Exempt Turnover","Total Turnover","Output Tax","ITC Claimed","Net Tax Paid","Filing Date","Filing Status"];
-    const note = ["// Period: 'Apr 2024'. Return Type: GSTR-3B / GSTR-1 / GSTR-9. Turnover in INR."];
-    const rows = periods.map(p => [p, "GSTR-3B", "", "", "", "", "", "", "", "", "Filed"]);
-    await dlExcel([{ name: "GST Returns", rows: [hdr as (string|number|null)[], note as (string|number|null)[], ...rows] }], `${cc.case_code}_gst_template.xlsx`);
+    const buf = await buildGstTemplate();
+    downloadBuffer(`${cc.case_code}_GST_Template.xlsx`, buf);
   };
 
   const handleProjectionUpload = async (file: File, fiscalYear: number | null) => {
@@ -3595,14 +3645,16 @@ function CaseViewInner() {
           {([
             ["review",      "Review"],
             ["provisional", "Provisional"],
-            ["ratios",      "Ratios"],
             ["projections", "Projections"],
+            ["ratios",      "Ratios"],
             ["bank",           "Bank"],
             ["gst",            "GST"],
             ["cibil",          "CIBIL"],
             ["triangulation",  "Triangulation"],
-            ["visit_report",   "Visit Report"],
-            ["ic_note",        "IC Note"],
+            ["visit_report",      "Visit Report"],
+            ["rehbar_history",    "Rehbar History"],
+            ["ic_note",           "IC Note"],
+            ["ic_deck",           "IC Deck"],
           ] as const).map(([k, l]) => (
             <button
               key={k}
@@ -3663,33 +3715,157 @@ function CaseViewInner() {
             );
           })()}
 
-          <div className="flex items-center gap-2 sticky top-[168px] z-20 bg-background -mx-3 px-3 pt-1 pb-2 border-b border-border/30">
+          {/* ── Import Excel primary action bar ────────────────────────────────── */}
+          <div className="bg-white -mx-3 px-4 py-2 border-b border-border shadow-sm">
             <input ref={finExcelInputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importFinancialExcel(f); e.target.value = ""; }} />
-            <button
-              onClick={() => finExcelInputRef.current?.click()}
-              disabled={importingFinExcel}
-              className="text-xs border border-primary/40 rounded text-primary hover:bg-primary/10 px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
-            >{importingFinExcel ? "Importing…" : "⬆ Import Financial Excel"}</button>
-            <button
-              onClick={downloadFinancialTemplate}
-              className="text-xs border border-border rounded text-muted-foreground px-3 py-1.5 hover:text-foreground hover:border-primary/50 flex items-center gap-1 transition-colors"
-            >⬇ Template</button>
-            <span className="text-xs text-muted-foreground">Supports Balance Sheet · P&L · Cash Flow sheets</span>
-            <div className="ml-auto flex items-center gap-1">
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* Primary CTA */}
               <button
-                onClick={performUndo}
-                disabled={undoStack.length === 0}
-                title="Undo (Ctrl+Z)"
-                className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >↩ Undo {undoStack.length > 0 && <span className="text-[10px] opacity-60">({undoStack.length})</span>}</button>
+                onClick={() => finExcelInputRef.current?.click()}
+                disabled={importingFinExcel}
+                className="flex items-center gap-2 bg-primary text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-sm hover:bg-primary/90 active:scale-[0.98] disabled:opacity-50 transition-all"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                {importingFinExcel ? "Importing…" : "Import Financial Excel"}
+              </button>
+
+              {/* Divider */}
+              <div className="h-8 w-px bg-border hidden sm:block" />
+
+              {/* Template download */}
               <button
-                onClick={performRedo}
-                disabled={redoStack.length === 0}
-                title="Redo (Ctrl+Y)"
-                className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >↪ Redo {redoStack.length > 0 && <span className="text-[10px] opacity-60">({redoStack.length})</span>}</button>
+                onClick={downloadFinancialTemplate}
+                className="flex items-center gap-1.5 text-sm text-muted-foreground border border-border rounded-lg px-4 py-2 hover:text-foreground hover:border-primary/50 hover:bg-surface transition-colors"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                Download Template
+              </button>
+              <CopyPromptButton prompt="I'm sharing two attachments: (1) an audited financial statement PDF and (2) a Rehbar Excel template.\n\nPlease convert the PDF into the Excel template format — extract every value from the PDF accurately and place it in the correct row. All amounts in ₹ Lakhs. Column B = oldest year, C = middle year, D = latest year (rename the column headers to match the fiscal years in the PDF). Do not change any column A labels. Return only the completed Excel file." />
+
+              {/* Hint */}
+              <div className="flex flex-col leading-tight">
+                <span className="text-xs font-medium text-foreground/70">Fastest way to add financials</span>
+                <span className="text-[11px] text-muted-foreground">Fill the template · upload · done. Balance Sheet, P&L, Cash Flow.</span>
+              </div>
+
+              {/* Undo / Redo pushed right */}
+              <div className="ml-auto flex items-center gap-1">
+                <button
+                  onClick={performUndo}
+                  disabled={undoStack.length === 0}
+                  title="Undo (Ctrl+Z)"
+                  className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >↩ Undo {undoStack.length > 0 && <span className="text-[10px] opacity-60">({undoStack.length})</span>}</button>
+                <button
+                  onClick={performRedo}
+                  disabled={redoStack.length === 0}
+                  title="Redo (Ctrl+Y)"
+                  className="text-xs border border-border rounded px-2 py-1 text-muted-foreground hover:text-foreground hover:border-primary/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >↪ Redo {redoStack.length > 0 && <span className="text-[10px] opacity-60">({redoStack.length})</span>}</button>
+              </div>
             </div>
           </div>
+
+          {/* ── AI Financial Summary ─────────────────────────────────── */}
+          <Panel title="AI Financial Summary" ticker="Gemini · Auto-Generated">
+            <div className="flex items-center gap-3 mb-4 flex-wrap">
+              <button
+                onClick={generateAIReviewAnalysis}
+                disabled={aiAnalysisLoading || activeExtracted.length === 0}
+                className="flex items-center gap-2 bg-primary text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-sm hover:bg-primary/90 active:scale-[0.98] disabled:opacity-50 transition-all"
+              >
+                {aiAnalysisLoading ? (
+                  <>
+                    <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+                    </svg>
+                    Analyzing…
+                  </>
+                ) : (
+                  <>✦ Generate AI Summary</>
+                )}
+              </button>
+              {aiAnalysis && (
+                <span className="text-xs text-muted-foreground">
+                  Last generated {new Date(aiAnalysis.generated_at).toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
+              {aiAnalysis && (
+                <button
+                  onClick={generateAIReviewAnalysis}
+                  disabled={aiAnalysisLoading}
+                  className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground disabled:opacity-50 transition-colors"
+                >
+                  Regenerate
+                </button>
+              )}
+            </div>
+
+            {aiAnalysisError && (
+              <div className="flex items-start gap-2 text-red-700 text-sm border border-red-200 bg-red-50 rounded-lg px-4 py-3 mb-4">
+                <span className="shrink-0 mt-0.5">⚠</span>
+                <span>{aiAnalysisError}</span>
+              </div>
+            )}
+
+            {!aiAnalysis && !aiAnalysisLoading && !aiAnalysisError && (
+              <div className="text-sm text-muted-foreground text-center py-10">
+                Import financial data above, then click <strong className="text-foreground">✦ Generate AI Summary</strong> to get analyst notes, CFO flags, and a fiscal report.
+              </div>
+            )}
+
+            {aiAnalysis && (
+              <div className="space-y-5">
+                {/* CFO Flags */}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">CFO Flags</div>
+                  <div className="flex flex-wrap gap-2">
+                    {aiAnalysis.cfo_flags.map((f, i) => (
+                      <div key={i} className={`rounded-lg px-3 py-2 text-xs border ${
+                        f.severity === "HIGH"
+                          ? "bg-red-50 border-red-200 text-red-800"
+                          : f.severity === "MEDIUM"
+                          ? "bg-amber-50 border-amber-200 text-amber-800"
+                          : "bg-blue-50 border-blue-200 text-blue-800"
+                      }`} style={{ maxWidth: "280px" }}>
+                        <div className="font-semibold flex items-center gap-1.5">
+                          <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${
+                            f.severity === "HIGH" ? "bg-red-500"
+                            : f.severity === "MEDIUM" ? "bg-amber-500"
+                            : "bg-blue-500"
+                          }`} />
+                          <span className="flex-1 min-w-0">{f.flag}</span>
+                          <span className="ml-1 opacity-60 text-[10px] font-mono shrink-0">{f.severity}</span>
+                        </div>
+                        <div className="mt-1 opacity-80 leading-snug">{f.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Analyst Summary */}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Financial Analyst Summary</div>
+                  <div className="text-sm text-foreground/80 leading-relaxed whitespace-pre-wrap bg-muted/30 rounded-lg px-4 py-3 border border-border">
+                    {aiAnalysis.analyst_summary}
+                  </div>
+                </div>
+
+                {/* Fiscal Report */}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Fiscal Report</div>
+                  <div className="text-sm text-foreground/80 leading-relaxed whitespace-pre-wrap bg-muted/30 rounded-lg px-4 py-3 border border-border">
+                    {aiAnalysis.fiscal_report}
+                  </div>
+                </div>
+              </div>
+            )}
+          </Panel>
 
           {hasPartner && tab !== "partner" && entityBar}
 
@@ -3822,7 +3998,7 @@ function CaseViewInner() {
                   <div
                     ref={el => { reviewHeaderScrollRefs.current[type] = el; }}
                     onScroll={e => { const b = reviewBodyScrollRefs.current[type]; if (b) b.scrollLeft = e.currentTarget.scrollLeft; }}
-                    className="overflow-x-auto sticky top-[208px] z-20 bg-card border border-border/60 -mx-3 px-3"
+                    className="overflow-x-auto sticky top-[168px] z-20 bg-card border border-border/60 -mx-3 px-3"
                     style={{ scrollbarWidth: "none", overflowY: "hidden" }}
                   >
                     <div className="flex items-center text-xs text-muted-foreground">
@@ -4312,76 +4488,162 @@ function CaseViewInner() {
                     );
                   })()}
 
-                  {/* ── Balance sheet imbalance detail ──────────────────── */}
+                  {/* ── Accounting Equation — always visible ─────────────── */}
                   {type === "balance_sheet" && (() => {
-                    const imbalances = years.flatMap(fy => {
+                    const fmtN = (v: number | null) => v == null ? "—" : `${v.toLocaleString("en-IN")}${abbr ? ` ${abbr}` : ""}`;
+                    const fyData = years.map(fy => {
                       const fyRow = typeRows.find(r => r.fiscal_year === fy);
-                      if (!fyRow) return [];
+                      if (!fyRow) return { fy, assets: null, equity: null, liabilities: null, liabSide: null as number | null, diff: null, totalEquityLiab: null, totalNCL: null, netWorth: null, totalDebt: null, currLiab: null };
                       const items = fyRow.line_items as unknown as LineItem[];
                       const gv = (lbl: string) => { const lo = lbl.toLowerCase(); const it = items.find(i => i.label.toLowerCase() === lo); return it ? (it.override_value ?? it.value) : null; };
-                      const assets    = gv("Total Assets") ?? gv("Assets Total") ?? gv("Grand Total Assets");
-                      const netWorth  = gv("Net Worth");
-                      const totalDebt = gv("Total Debt");
-                      const currLiab  = gv("Current Liabilities");
-                      const liabSide  = (netWorth ?? 0) + (totalDebt ?? 0) + (currLiab ?? 0);
-                      if (assets == null) return [];
-                      const diff = assets - liabSide;
-                      if (Math.abs(diff) < 0.01) return [];
-                      return [{ fy, diff, assets, netWorth, totalDebt, currLiab, liabSide }];
+                      const assets          = gv("Total Assets") ?? gv("Assets Total") ?? gv("Grand Total Assets");
+                      const totalEquityLiab = gv("Total Equity & Liabilities");
+                      const netWorth        = gv("Net Worth");
+                      const totalDebt       = gv("Total Debt");
+                      const currLiab        = gv("Current Liabilities");
+                      const totalNCL        = gv("Total Non Current Liabilities");
+                      const liabilities     = totalEquityLiab != null
+                        ? (totalNCL ?? 0) + (currLiab ?? 0)
+                        : (totalDebt ?? 0) + (currLiab ?? 0);
+                      const equity          = netWorth;
+                      const liabSide: number = totalEquityLiab ?? ((netWorth ?? 0) + (totalDebt ?? 0) + (currLiab ?? 0));
+                      const diff            = assets != null ? assets - liabSide : null;
+                      return { fy, assets, equity, liabilities, liabSide, diff, totalEquityLiab, totalNCL, netWorth, totalDebt, currLiab };
                     });
-                    if (imbalances.length === 0) return null;
-                    const fmtN = (v: number | null) => v == null ? "—" : `${v.toLocaleString("en-IN")}${abbr ? ` ${abbr}` : ""}`;
+                    if (!fyData.some(d => d.assets != null)) return null;
+                    const anyImbalance = fyData.some(d => d.diff != null && Math.abs(d.diff) >= 0.01);
                     return (
-                      <div className="mt-3 border border-destructive/40 divide-y divide-destructive/10">
-                        <div className="px-3 py-1.5 flex items-center gap-2 border-b border-destructive/20">
-                          <span className="text-[9px] tracking-widest text-destructive font-bold">✗ BALANCE SHEET NOT BALANCING</span>
+                      <div className={`mt-3 border ${anyImbalance ? "border-destructive/40" : "border-emerald-500/30"}`}>
+                        {/* Header */}
+                        <div className={`px-3 py-1.5 flex items-center gap-2 border-b ${anyImbalance ? "border-destructive/20" : "border-emerald-500/20"}`}>
+                          <span className={`text-[9px] tracking-widest font-bold ${anyImbalance ? "text-destructive" : "text-emerald-600"}`}>
+                            {anyImbalance ? "✗" : "✓"} ACCOUNTING EQUATION
+                          </span>
+                          <span className="text-[9px] text-muted-foreground font-mono">
+                            ASSETS (A) = LIABILITIES (L) + SHAREHOLDERS' EQUITY (E)
+                          </span>
                         </div>
-                        {imbalances.map(({ fy, diff, assets, netWorth, totalDebt, currLiab, liabSide }) => (
-                          <div key={fy} className="px-3 py-2.5">
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[9px] border border-destructive/40 text-destructive px-1.5 py-0.5 font-bold">FY{fy}</span>
-                                <span className={`text-[9px] font-bold ${diff > 0 ? "text-warning" : "text-destructive"}`}>
-                                  GAP: {diff > 0 ? "+" : ""}{fmtN(diff)}
-                                </span>
-                              </div>
-                              <button
-                                onClick={() => updateCellValue("balance_sheet", fy, "Total Assets", String(liabSide))}
-                                className="text-[9px] tracking-widest border border-primary/50 text-primary hover:bg-primary/10 px-2 py-0.5 font-bold transition-colors"
-                                title={`Set Total Assets = Net Worth + Total Debt + Current Liabilities = ${fmtN(liabSide)}`}
-                              >AUTO-FIX</button>
-                            </div>
-                            <div className="text-[10px] font-mono space-y-0.5">
-                              <div className="flex justify-between py-0.5 border-b border-border/30">
-                                <span className={`font-semibold ${diff !== 0 ? "text-destructive" : "text-foreground"}`}>Total Assets</span>
-                                <span className={`font-semibold tabular-nums ${diff !== 0 ? "text-destructive" : "text-foreground"}`}>{fmtN(assets)}</span>
-                              </div>
-                              <div className="text-[8px] tracking-widest text-muted-foreground/50 pt-1 pb-0.5">EQUITY + LIABILITIES</div>
-                              {netWorth != null && (
-                                <div className="flex justify-between pl-2 text-muted-foreground">
-                                  <span>Net Worth</span><span className="tabular-nums text-foreground">{fmtN(netWorth)}</span>
+                        {/* Multi-year equation table */}
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-[10px] font-mono border-collapse">
+                            <thead>
+                              <tr className="border-b border-border/30">
+                                <th className="text-left px-3 py-1 text-muted-foreground font-normal w-44">Component</th>
+                                {fyData.map(({ fy }) => (
+                                  <th key={fy} className="text-right px-3 py-1 text-muted-foreground font-normal min-w-[10rem]">FY {fy}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr className="border-b border-border/20">
+                                <td className="px-3 py-1.5 text-foreground font-semibold">A — Total Assets</td>
+                                {fyData.map(({ fy, assets }) => (
+                                  <td key={fy} className="px-3 py-1.5 text-right tabular-nums font-semibold text-foreground">{fmtN(assets)}</td>
+                                ))}
+                              </tr>
+                              <tr className="border-b border-border/20">
+                                <td className="px-3 py-1.5 pl-5 text-muted-foreground">L — Total Liabilities</td>
+                                {fyData.map(({ fy, liabilities }) => (
+                                  <td key={fy} className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">{fmtN(liabilities)}</td>
+                                ))}
+                              </tr>
+                              <tr className="border-b border-border/30">
+                                <td className="px-3 py-1.5 pl-5 text-muted-foreground">E — Shareholders' Equity</td>
+                                {fyData.map(({ fy, equity }) => (
+                                  <td key={fy} className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">{fmtN(equity)}</td>
+                                ))}
+                              </tr>
+                              <tr className="border-b border-border/30 bg-muted/20">
+                                <td className="px-3 py-1.5 text-foreground font-semibold">L + E</td>
+                                {fyData.map(({ fy, liabSide }) => (
+                                  <td key={fy} className="px-3 py-1.5 text-right tabular-nums font-semibold text-foreground">{fmtN(liabSide)}</td>
+                                ))}
+                              </tr>
+                              <tr>
+                                <td className="px-3 py-1.5 text-muted-foreground">A − (L+E)</td>
+                                {fyData.map(({ fy, diff }) => {
+                                  if (diff == null) return <td key={fy} className="px-3 py-1.5 text-right text-muted-foreground">—</td>;
+                                  const ok = Math.abs(diff) < 0.01;
+                                  return (
+                                    <td key={fy} className="px-3 py-1.5 text-right font-bold">
+                                      {ok
+                                        ? <span className="text-emerald-600">✓ BALANCED</span>
+                                        : <span className="text-destructive">{diff > 0 ? "+" : ""}{fmtN(diff)}</span>}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                        {/* Detail breakdown only for imbalanced years */}
+                        {anyImbalance && (
+                          <div className="border-t border-destructive/20 divide-y divide-destructive/10">
+                            {fyData.filter(d => d.diff != null && Math.abs(d.diff) >= 0.01).map(({ fy, diff, assets, netWorth, totalDebt, currLiab, totalNCL, totalEquityLiab, liabSide }) => (
+                              <div key={fy} className="px-3 py-2.5">
+                                <div className="flex items-center justify-between mb-2">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[9px] border border-destructive/40 text-destructive px-1.5 py-0.5 font-bold">FY{fy}</span>
+                                    <span className={`text-[9px] font-bold ${diff! > 0 ? "text-warning" : "text-destructive"}`}>
+                                      GAP: {diff! > 0 ? "+" : ""}{fmtN(diff!)}
+                                    </span>
+                                  </div>
+                                  <button
+                                    onClick={() => updateCellValue("balance_sheet", fy, "Total Assets", String(liabSide))}
+                                    className="text-[9px] tracking-widest border border-primary/50 text-primary hover:bg-primary/10 px-2 py-0.5 font-bold transition-colors"
+                                    title={totalEquityLiab != null ? `Set Total Assets = Total Equity & Liabilities = ${fmtN(liabSide)}` : `Set Total Assets = Net Worth + Total Debt + Current Liabilities = ${fmtN(liabSide)}`}
+                                  >AUTO-FIX</button>
                                 </div>
-                              )}
-                              {totalDebt != null && (
-                                <div className="flex justify-between pl-2 text-muted-foreground">
-                                  <span>+ Total Debt</span><span className="tabular-nums text-foreground">{fmtN(totalDebt)}</span>
+                                <div className="text-[10px] font-mono space-y-0.5">
+                                  <div className="flex justify-between py-0.5 border-b border-border/30">
+                                    <span className="font-semibold text-destructive">Total Assets</span>
+                                    <span className="font-semibold tabular-nums text-destructive">{fmtN(assets)}</span>
+                                  </div>
+                                  <div className="text-[8px] tracking-widest text-muted-foreground/50 pt-1 pb-0.5">EQUITY + LIABILITIES</div>
+                                  {netWorth != null && (
+                                    <div className="flex justify-between pl-2 text-muted-foreground">
+                                      <span>Shareholders' Equity (E)</span><span className="tabular-nums text-foreground">{fmtN(netWorth)}</span>
+                                    </div>
+                                  )}
+                                  {totalEquityLiab != null ? (
+                                    <>
+                                      {totalNCL != null && (
+                                        <div className="flex justify-between pl-2 text-muted-foreground">
+                                          <span>+ Non-Current Liabilities</span><span className="tabular-nums text-foreground">{fmtN(totalNCL)}</span>
+                                        </div>
+                                      )}
+                                      {currLiab != null && (
+                                        <div className="flex justify-between pl-2 text-muted-foreground">
+                                          <span>+ Current Liabilities</span><span className="tabular-nums text-foreground">{fmtN(currLiab)}</span>
+                                        </div>
+                                      )}
+                                    </>
+                                  ) : (
+                                    <>
+                                      {totalDebt != null && (
+                                        <div className="flex justify-between pl-2 text-muted-foreground">
+                                          <span>+ Total Debt (L)</span><span className="tabular-nums text-foreground">{fmtN(totalDebt)}</span>
+                                        </div>
+                                      )}
+                                      {currLiab != null && (
+                                        <div className="flex justify-between pl-2 text-muted-foreground">
+                                          <span>+ Current Liabilities (L)</span><span className="tabular-nums text-foreground">{fmtN(currLiab)}</span>
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                  <div className="flex justify-between pt-0.5 border-t border-border/40 font-semibold">
+                                    <span className="text-muted-foreground">{totalEquityLiab != null ? "Total Equity & Liabilities" : "L + E"}</span>
+                                    <span className="tabular-nums text-foreground">{fmtN(liabSide)}</span>
+                                  </div>
                                 </div>
-                              )}
-                              {currLiab != null && (
-                                <div className="flex justify-between pl-2 text-muted-foreground">
-                                  <span>+ Current Liabilities</span><span className="tabular-nums text-foreground">{fmtN(currLiab)}</span>
+                                <div className="mt-1.5 text-[9px] text-muted-foreground/60 italic">
+                                  AUTO-FIX sets Total Assets = {fmtN(liabSide)} to close the gap.
                                 </div>
-                              )}
-                              <div className="flex justify-between pt-0.5 border-t border-border/40 font-semibold">
-                                <span className="text-muted-foreground">Sum (E+L)</span>
-                                <span className="tabular-nums text-foreground">{fmtN(liabSide)}</span>
                               </div>
-                            </div>
-                            <div className="mt-1.5 text-[9px] text-muted-foreground/60 italic">
-                              AUTO-FIX sets Total Assets = {fmtN(liabSide)} to close the gap.
-                            </div>
+                            ))}
                           </div>
-                        ))}
+                        )}
                       </div>
                     );
                   })()}
@@ -4454,23 +4716,6 @@ function CaseViewInner() {
             <DerivedCashFlowPanel series={derivedCFSeries} unit={extracted.find(r => r.unit)?.unit ?? null} />
           )}
 
-          {extracted.some((r) => r.confirmed) && (
-            <div className="flex flex-col gap-1.5">
-              {ratiosOutdated && (
-                <div className="border-l-2 border-warning bg-warning/10 px-3 py-2 flex items-center gap-3 text-[10px] text-warning tracking-widest font-bold">
-                  ↻ FIGURES CHANGED — RATIOS ARE STALE
-                  <span className="font-normal text-warning/70 text-[9px] tracking-wide">Ratios do not update automatically — click below to refresh.</span>
-                </div>
-              )}
-              <button
-                onClick={runRatios}
-                disabled={busy}
-                className={`px-5 py-2.5 rounded-md text-sm font-semibold disabled:opacity-50 transition-colors ${ratiosOutdated ? "bg-amber-500 text-white hover:bg-amber-600" : "bg-primary text-primary-foreground hover:bg-primary/90"}`}
-              >
-                {busy ? "Computing…" : ratiosOutdated ? "↻ Data Changed — Re-run Ratios" : "Generate Ratio Analysis"}
-              </button>
-            </div>
-          )}
           {/* Auto-derived fields panel */}
           {extracted.length > 0 && (() => {
             const histYears = Array.from(new Set(extracted.filter(r => r.statement_type !== "projections").map(r => r.fiscal_year))).sort();
@@ -4539,7 +4784,7 @@ function CaseViewInner() {
           )}
 
           {extracted.length > 0 ? (
-            <DownloadBar onTemplate={downloadFinancialTemplate} onExcel={async () => {
+            <DownloadBar onTemplate={downloadFinancialTemplate} copyPrompt={"I have attached two files: a financial PDF and an Excel template.\n\nExtract every value from the PDF and fill in the Excel template — place each figure in the correct row. All amounts in ₹ Lakhs. Rename the column headers to match the actual fiscal years in the PDF (oldest year first). Do not change any row labels in column A. Return only the completed Excel file."} onExcel={async () => {
               const stmtTypes = Array.from(new Set(extracted.map(r => r.statement_type))).filter(t => t !== "projections");
               const sheets = stmtTypes.map(type => {
                 const rows: (string | number | null)[][] = [["FY", "Unit", "Line Item", "Extracted Value", "Override Value", "Confidence", "Reviewed"]];
@@ -4555,6 +4800,20 @@ function CaseViewInner() {
           ) : (
             <DownloadBar onTemplate={downloadFinancialTemplate} />
           )}
+
+          {/* ── Next step CTA ───────────────────────────────────────────────── */}
+          <div className="flex items-center justify-between gap-4 border border-primary/20 bg-primary/5 rounded-lg px-4 py-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-foreground">Upload management projections</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Add projected financials for AI model comparison and sanity checks.</div>
+            </div>
+            <button
+              onClick={() => setTab("projections")}
+              className="shrink-0 px-5 py-2.5 rounded-md text-sm font-semibold transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              Projections →
+            </button>
+          </div>
         </div>
       )}
 
@@ -4620,6 +4879,318 @@ function CaseViewInner() {
                   </div>
                 </Panel>
               ))}
+              {/* ── Forward-Looking Ratio Analysis ────────────────────────────── */}
+              {(() => {
+                const projRows   = activeExtracted.filter(r => r.statement_type === "projections").sort((a, b) => a.fiscal_year - b.fiscal_year);
+                const histPLRows = activeExtracted.filter(r => r.statement_type === "profit_loss").sort((a, b) => a.fiscal_year - b.fiscal_year);
+                const histBSRows = activeExtracted.filter(r => r.statement_type === "balance_sheet").sort((a, b) => a.fiscal_year - b.fiscal_year);
+                const histCFRows = activeExtracted.filter(r => r.statement_type === "cash_flow").sort((a, b) => a.fiscal_year - b.fiscal_year);
+                const provPeriods = (ic?.provisional ?? []) as ProvPeriod[];
+
+                const hasProj = projRows.length > 0;
+                const hasProv = provPeriods.length > 0;
+                const hasHist = histPLRows.length > 0;
+
+                if (!hasProj && !hasProv && !hasHist) return (
+                  <Panel title="FORWARD-LOOKING RATIO ANALYSIS" ticker="RATIOS">
+                    <div className="text-[10px] text-muted-foreground/60 italic">
+                      Upload projections or provisional statements to see forward-looking ratio analysis here.
+                    </div>
+                  </Panel>
+                );
+
+                const lv = (items: LineItem[], ...lbls: string[]): number | null => {
+                  for (const lbl of lbls) {
+                    const it = items.find(i => i.label === lbl);
+                    if (it != null) return it.override_value ?? it.value;
+                  }
+                  return null;
+                };
+                const pct = (a: number | null, b: number | null) =>
+                  a != null && b != null && b !== 0 ? (a / b) * 100 : null;
+                const rat = (a: number | null, b: number | null) =>
+                  a != null && b != null && b !== 0 ? a / b : null;
+                const grw = (c: number | null, p: number | null) =>
+                  c != null && p != null && p !== 0 ? ((c - p) / Math.abs(p)) * 100 : null;
+
+                interface RatioPt {
+                  fy: number; label?: string; source: "proj" | "prov" | "hist";
+                  rev: number | null; ebitda: number | null; pat: number | null;
+                  nw: number | null; debt: number | null; cfo: number | null;
+                  rev_growth: number | null; ebitda_margin: number | null; pat_margin: number | null;
+                  roe: number | null; debt_equity: number | null; debt_ebitda: number | null;
+                  icr: number | null; cfo_debt: number | null; cfo_interest: number | null;
+                }
+
+                // --- projection points ---
+                const lastHistPL = histPLRows.length ? (histPLRows[histPLRows.length - 1].line_items as unknown as LineItem[]) : [];
+
+                const projPoints: RatioPt[] = projRows.map((row, idx) => {
+                  const items      = row.line_items as unknown as LineItem[];
+                  const prevPLItems = idx === 0 ? lastHistPL : (projRows[idx - 1].line_items as unknown as LineItem[]);
+                  const rev      = lv(items, "Projected Turnover", "Turnover", "Revenue", "Total Revenue");
+                  const prevRev  = lv(prevPLItems, "Projected Turnover", "Turnover", "Revenue", "Total Revenue");
+                  const interest = lv(items, "Projected Interest Expense", "Interest Expense", "Finance Cost");
+                  const depr     = lv(items, "Projected Depreciation", "Depreciation");
+                  const pbt      = lv(items, "Projected Profit Before Tax", "Profit Before Tax");
+                  const ebitda   = lv(items, "Projected EBITDA", "EBITDA") ??
+                    (pbt != null && interest != null && depr != null ? pbt + interest + depr : null);
+                  const pat      = lv(items, "Projected PAT", "PAT", "Net Profit", "Profit After Tax");
+                  const sc       = lv(items, "Projected Share Capital", "Share Capital");
+                  const res      = lv(items, "Projected Reserves", "Reserves & Surplus");
+                  const nw       = lv(items, "Projected Net Worth", "Net Worth") ??
+                    (sc != null && res != null ? sc + res : null);
+                  const lt       = lv(items, "Projected LT Borrowings", "Long Term Borrowings");
+                  const st       = lv(items, "Projected ST Borrowings", "Short Term Borrowings");
+                  const debt     = lv(items, "Projected Total Debt", "Total Debt") ??
+                    (lt != null || st != null ? (lt ?? 0) + (st ?? 0) : null);
+                  const cfo      = lv(items, "Projected Cash from Operations", "Cash from Operations");
+                  return {
+                    fy: row.fiscal_year, source: "proj" as const,
+                    rev, ebitda, pat, nw, debt, cfo,
+                    rev_growth:    grw(rev, prevRev),
+                    ebitda_margin: pct(ebitda, rev),
+                    pat_margin:    pct(pat, rev),
+                    roe:           pct(pat, nw),
+                    debt_equity:   rat(debt, nw),
+                    debt_ebitda:   rat(debt, ebitda),
+                    icr:           rat(ebitda, interest),
+                    cfo_debt:      rat(cfo, debt),
+                    cfo_interest:  rat(cfo, interest),
+                  };
+                });
+
+                // --- provisional points ---
+                const sortedProv = [...provPeriods].sort((a, b) =>
+                  a.fiscal_year - b.fiscal_year || a.months_covered - b.months_covered
+                );
+                const provPoints: RatioPt[] = sortedProv.slice(-3).map((period, pidx, arr) => {
+                  const ann = (v: number | null) =>
+                    v != null && period.months_covered > 0 && period.months_covered < 12
+                      ? v * (12 / period.months_covered) : v;
+                  const pl = (period.pl ?? []) as LineItem[];
+                  const bs = (period.bs ?? []) as LineItem[];
+                  const cf = (period.cf ?? []) as LineItem[];
+                  const rev      = ann(lv(pl, "Turnover", "Revenue", "Net Sales"));
+                  const ebitda   = ann(lv(pl, "EBITDA"));
+                  const pat      = ann(lv(pl, "PAT", "Net Profit", "Profit After Tax"));
+                  const interest = ann(lv(pl, "Interest Expense", "Finance Cost"));
+                  const nw       = lv(bs, "Net Worth", "Shareholders Equity");
+                  const debt     = lv(bs, "Total Debt", "Total Borrowings");
+                  const cfo      = ann(lv(cf, "Cash from Operations", "Net Cash from Operations"));
+                  const prevProvRev = pidx > 0 ? (() => {
+                    const pp = arr[pidx - 1];
+                    const ppAnn = (v: number | null) =>
+                      v != null && pp.months_covered > 0 && pp.months_covered < 12
+                        ? v * (12 / pp.months_covered) : v;
+                    return ppAnn(lv((pp.pl ?? []) as LineItem[], "Turnover", "Revenue"));
+                  })() : null;
+                  const prevHistRev = histPLRows.length
+                    ? lv(histPLRows[histPLRows.length - 1].line_items as unknown as LineItem[], "Turnover", "Revenue from Operations", "Net Revenue")
+                    : null;
+                  const prevRev = prevProvRev ?? prevHistRev;
+                  const annSuffix = period.months_covered > 0 && period.months_covered < 12
+                    ? ` (${period.months_covered}M ann.)` : "";
+                  return {
+                    fy: period.fiscal_year,
+                    label: period.label + annSuffix,
+                    source: "prov" as const,
+                    rev, ebitda, pat, nw, debt, cfo,
+                    rev_growth:    grw(rev, prevRev),
+                    ebitda_margin: pct(ebitda, rev),
+                    pat_margin:    pct(pat, rev),
+                    roe:           pct(pat, nw),
+                    debt_equity:   rat(debt, nw),
+                    debt_ebitda:   rat(debt, ebitda),
+                    icr:           rat(ebitda, interest),
+                    cfo_debt:      rat(cfo, debt),
+                    cfo_interest:  rat(cfo, interest),
+                  };
+                });
+
+                // --- historical points ---
+                const histPoints: RatioPt[] = histPLRows.map((row, idx) => {
+                  const plItems  = row.line_items as unknown as LineItem[];
+                  const bsRow    = histBSRows.find(r => r.fiscal_year === row.fiscal_year);
+                  const cfRow    = histCFRows.find(r => r.fiscal_year === row.fiscal_year);
+                  const bsItems  = (bsRow?.line_items ?? []) as unknown as LineItem[];
+                  const cfItems  = (cfRow?.line_items ?? []) as unknown as LineItem[];
+                  const prevRow  = idx > 0 ? (histPLRows[idx - 1].line_items as unknown as LineItem[]) : null;
+                  const rev      = lv(plItems, "Turnover", "Revenue from Operations", "Net Revenue", "Total Revenue");
+                  const prevRev  = prevRow ? lv(prevRow, "Turnover", "Revenue from Operations", "Net Revenue") : null;
+                  const ebitda   = lv(plItems, "EBITDA");
+                  const pat      = lv(plItems, "PAT", "Net Profit", "Profit After Tax");
+                  const interest = lv(plItems, "Interest Expense", "Finance Cost");
+                  const nw       = lv(bsItems, "Net Worth");
+                  const debt     = lv(bsItems, "Total Debt");
+                  const cfo      = lv(cfItems, "Cash from Operations", "Net Cash from Operations");
+                  return {
+                    fy: row.fiscal_year, source: "hist" as const,
+                    rev, ebitda, pat, nw, debt, cfo,
+                    rev_growth:    grw(rev, prevRev),
+                    ebitda_margin: pct(ebitda, rev),
+                    pat_margin:    pct(pat, rev),
+                    roe:           pct(pat, nw),
+                    debt_equity:   rat(debt, nw),
+                    debt_ebitda:   rat(debt, ebitda),
+                    icr:           rat(ebitda, interest),
+                    cfo_debt:      rat(cfo, debt),
+                    cfo_interest:  rat(cfo, interest),
+                  };
+                });
+
+                // --- display column selection ---
+                // Projections present → show latest prov (if any) + all proj years
+                // Provisional only → show last 2 hist as context + prov periods
+                // Neither → show last 3 hist years
+                let displayPoints: RatioPt[];
+                if (hasProj) {
+                  const provRef = provPoints.length > 0 ? [provPoints[provPoints.length - 1]] : [];
+                  displayPoints = [...provRef, ...projPoints];
+                } else if (hasProv) {
+                  displayPoints = [...histPoints.slice(-2), ...provPoints];
+                } else {
+                  displayPoints = histPoints.slice(-3);
+                }
+
+                if (displayPoints.length === 0) return (
+                  <Panel title="FORWARD-LOOKING RATIO ANALYSIS" ticker="RATIOS">
+                    <div className="text-[10px] text-muted-foreground/60 italic">No financial data for ratio analysis.</div>
+                  </Panel>
+                );
+
+                // --- benchmarks ---
+                const BENCH: Record<string, { lo: number; hi: number; inv?: boolean }> = {
+                  rev_growth:    { hi: 15,  lo: 5   },
+                  ebitda_margin: { hi: 20,  lo: 10  },
+                  pat_margin:    { hi: 10,  lo: 5   },
+                  roe:           { hi: 15,  lo: 10  },
+                  debt_equity:   { hi: 1.5, lo: 3,  inv: true },
+                  debt_ebitda:   { hi: 3,   lo: 5,  inv: true },
+                  icr:           { hi: 2,   lo: 1   },
+                  cfo_debt:      { hi: 0.2, lo: 0.1 },
+                  cfo_interest:  { hi: 2,   lo: 1   },
+                };
+                const BENCH_LBL: Record<string, string> = {
+                  rev_growth: ">15%", ebitda_margin: ">20%", pat_margin: ">10%", roe: ">15%",
+                  debt_equity: "<1.5x", debt_ebitda: "<3x", icr: ">2x", cfo_debt: ">0.2x", cfo_interest: ">2x",
+                };
+                const ratioSt = (key: string, val: number | null): "green" | "amber" | "red" | "na" => {
+                  if (val == null) return "na";
+                  const b = BENCH[key]; if (!b) return "na";
+                  return b.inv
+                    ? (val <= b.hi ? "green" : val <= b.lo ? "amber" : "red")
+                    : (val >= b.hi ? "green" : val >= b.lo ? "amber" : "red");
+                };
+                const fmtR = (key: string, val: number | null): string => {
+                  if (val == null) return "—";
+                  if (key.endsWith("_margin") || key.endsWith("_growth") || key === "roe") return val.toFixed(1) + "%";
+                  return val.toFixed(2) + "x";
+                };
+
+                const RATIO_ROWS = [
+                  { key: "rev_growth",    label: "Revenue Growth"     },
+                  { key: "ebitda_margin", label: "EBITDA Margin"      },
+                  { key: "pat_margin",    label: "PAT Margin"         },
+                  { key: "roe",           label: "Return on Equity"   },
+                  { key: "debt_equity",   label: "Debt / Equity"      },
+                  { key: "debt_ebitda",   label: "Debt / EBITDA"      },
+                  { key: "icr",           label: "Interest Coverage"  },
+                  { key: "cfo_debt",      label: "CFO / Total Debt"   },
+                  { key: "cfo_interest",  label: "CFO / Interest"     },
+                ];
+                const ABS_ROWS = [
+                  { key: "rev",    label: "Revenue"    },
+                  { key: "ebitda", label: "EBITDA"     },
+                  { key: "pat",    label: "PAT"        },
+                  { key: "nw",     label: "Net Worth"  },
+                  { key: "debt",   label: "Total Debt" },
+                  { key: "cfo",    label: "CFO"        },
+                ];
+
+                const unit = projRows[0]?.unit ?? histPLRows[0]?.unit ?? "Lakhs";
+                const SRC_BADGE: Record<string, string> = {
+                  proj: "bg-primary/10 text-primary border border-primary/20",
+                  prov: "bg-warning/10 text-warning border border-warning/20",
+                  hist: "bg-muted/50 text-muted-foreground border border-border",
+                };
+                const SRC_LBL: Record<string, string> = { proj: "PROJ", prov: "PROV", hist: "HIST" };
+                const tickerParts = [
+                  hasProj && `${projPoints.length} proj yr${projPoints.length > 1 ? "s" : ""}`,
+                  hasProv && `${provPoints.length} prov`,
+                  !hasProj && hasHist && `${Math.min(histPoints.length, 3)} hist`,
+                ].filter(Boolean).join(" · ");
+
+                return (
+                  <Panel title="FORWARD-LOOKING RATIO ANALYSIS" ticker={`${tickerParts} · ${unit}`}>
+                    <div className="overflow-x-auto">
+                    <table className="w-full text-xs min-w-[450px]">
+                      <thead className="border-b border-border text-muted-foreground">
+                        <tr>
+                          <th className="text-left py-1.5 pr-2">RATIO</th>
+                          <th className="text-right pr-2 text-[10px] text-primary/60 font-normal italic">BENCHMARK</th>
+                          {displayPoints.map((p, i) => (
+                            <th key={i} className="text-right pr-1 align-bottom pb-1">
+                              <div className="text-[11px]">FY{p.fy}</div>
+                              {p.label && <div className="text-[8px] text-muted-foreground/60 font-normal leading-tight">{p.label}</div>}
+                              <span className={`inline-block px-1 py-0 text-[8px] tracking-widest font-bold rounded-sm ${SRC_BADGE[p.source]}`}>
+                                {SRC_LBL[p.source]}
+                              </span>
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {RATIO_ROWS.map(({ key, label }) => (
+                          <tr key={key} className="border-b border-border/30">
+                            <td className="py-1.5 pr-2 text-foreground/90">{label}</td>
+                            <td className="text-right pr-2 text-[10px] text-primary/60 italic tabular-nums">
+                              {BENCH_LBL[key] ?? "—"}
+                            </td>
+                            {displayPoints.map((p, i) => {
+                              const val = (p as unknown as Record<string, number | null>)[key];
+                              const st  = ratioSt(key, val);
+                              return (
+                                <td key={i} className="text-right pr-1">
+                                  <div className="inline-flex items-center gap-1 justify-end">
+                                    <span className="tabular-nums text-foreground/80 italic">{fmtR(key, val)}</span>
+                                    {val != null && (
+                                      <span className={`px-1 py-0 text-[8px] tracking-widest font-bold leading-5 ${statusColorClass[st]}`}>
+                                        {statusLabel[st]}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                        <tr className="bg-muted/20">
+                          <td colSpan={displayPoints.length + 2} className="py-0.5 text-[9px] text-muted-foreground/50 tracking-widest uppercase font-medium pl-0.5">
+                            Absolute Values ({unit})
+                          </td>
+                        </tr>
+                        {ABS_ROWS.map(({ key, label }) => (
+                          <tr key={key} className="border-b border-border/20">
+                            <td className="py-1 pr-2 text-muted-foreground/70 text-[10px]">{label}</td>
+                            <td className="pr-2" />
+                            {displayPoints.map((p, i) => {
+                              const val = (p as unknown as Record<string, number | null>)[key];
+                              return (
+                                <td key={i} className="text-right pr-1 tabular-nums text-foreground/70 text-[10px] italic">
+                                  {val != null ? val.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : "—"}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    </div>
+                  </Panel>
+                );
+              })()}
+
               {/* ── AI Credit Analysis ─────────────────────────────────────── */}
               <Panel title="AI Credit Analysis" ticker="Insights" status={ratioAnalysisLoading ? "warn" : ratioAnalysis ? "live" : "idle"}>
                 {!ratioAnalysis && !ratioAnalysisLoading && (
@@ -4816,8 +5387,31 @@ function CaseViewInner() {
             onDelete={handleDeleteDoc}
             onRetry={handleRetry}
           />
+          {/* ── Compute Ratios CTA ──────────────────────────────────────────── */}
+          {extracted.some(r => r.confirmed) && (
+            <div className={`flex items-center justify-between gap-4 rounded-lg px-4 py-3 border ${ratiosOutdated ? "border-warning/40 bg-warning/5" : "border-primary/20 bg-primary/5"}`}>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-foreground">
+                  {ratiosOutdated ? "↻ Figures changed — ratios are stale" : "Compute ratio analysis"}
+                </div>
+                <div className="text-xs text-muted-foreground mt-0.5">
+                  {ratiosOutdated
+                    ? "Re-run to refresh ratios with the latest uploaded figures."
+                    : "Run AI ratio analysis on uploaded financials and projections, then review in the Ratios tab."}
+                </div>
+              </div>
+              <button
+                onClick={async () => { await runRatios(); setTab("ratios"); }}
+                disabled={busy}
+                className={`shrink-0 px-5 py-2.5 rounded-md text-sm font-semibold disabled:opacity-50 transition-colors ${ratiosOutdated ? "bg-amber-500 text-white hover:bg-amber-600" : "bg-primary text-primary-foreground hover:bg-primary/90"}`}
+              >
+                {busy ? "Computing…" : ratiosOutdated ? "↻ Re-run Ratios →" : "Compute Ratios →"}
+              </button>
+            </div>
+          )}
+
           {extracted.some(r => r.statement_type === "projections") ? (
-            <DownloadBar onTemplate={downloadProjectionsTemplate} onExcel={async () => {
+            <DownloadBar onTemplate={downloadProjectionsTemplate} copyPrompt={"I have attached two files: a financial PDF and an Excel template.\n\nExtract every figure from the PDF and fill in the Excel template — base year actuals in the first data column, projection years in the remaining columns. Rename column headers to match the actual fiscal years in the PDF. All amounts in ₹ Lakhs. Also fill the Assumptions sheet with key drivers (revenue growth %, EBITDA margin %, capex, debt repayment). Do not change any row labels in column A. Return only the completed Excel file."} onExcel={async () => {
               const projRows = extracted.filter(r => r.statement_type === "projections");
               const histRows = extracted.filter(r => r.statement_type !== "projections");
               const projYears = Array.from(new Set(projRows.map(r => r.fiscal_year))).sort();
@@ -4873,8 +5467,70 @@ function CaseViewInner() {
             periods={ic?.provisional ?? []}
             extracted={activeExtracted}
             onSave={saveProvisional}
+            onEditAudited={editAuditedLine}
           />
+          {/* ── Continue to Projections CTA ─────────────────────────────────── */}
+          <div className="flex items-center justify-between gap-4 border border-primary/20 bg-primary/5 rounded-lg px-4 py-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-foreground">Continue to Projections</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Review projected financials and run AI sanity checks against historical data.</div>
+            </div>
+            <button
+              onClick={() => setTab("projections")}
+              className="shrink-0 px-5 py-2.5 rounded-md text-sm font-semibold transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              Projections →
+            </button>
+          </div>
         </>
+      )}
+
+      {tab === "rehbar_history" && (
+        <div className="space-y-3">
+          <RehbarHistoryTab
+            cc={cc}
+            history={ic?.rehbar_history}
+            onSave={saveRehbarHistory}
+          />
+
+          {/* ── Generate IC Note CTA ───────────────────────────────────────── */}
+          <div className="flex items-center justify-between gap-4 border border-primary/20 bg-primary/5 rounded-lg px-4 py-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-foreground">Generate IC Note</div>
+              <div className="text-xs text-muted-foreground mt-0.5">AI will draft all sections — financial analysis, ratios, projections, Rehbar funding history, risks, and conditions precedent.</div>
+            </div>
+            {busy ? (
+              <div className="shrink-0 space-y-1 min-w-[180px]">
+                <div className="h-1.5 bg-border rounded-full overflow-hidden">
+                  <div className="h-full bg-primary transition-all duration-500" style={{ width: `${progress}%` }} />
+                </div>
+                <div className="text-[10px] text-muted-foreground tracking-widest">{progressLabel} {progress}%</div>
+              </div>
+            ) : (
+              <button
+                onClick={async () => { await runNarrative(); setTab("ic_note"); }}
+                disabled={busy}
+                className="shrink-0 px-5 py-2.5 rounded-md text-sm font-semibold disabled:opacity-50 transition-colors bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                {ic?.sections ? "Re-generate IC Note →" : "Generate IC Note →"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "ic_deck" && cc && (
+        <ICDeckTab
+          cc={cc}
+          extracted={activeExtracted}
+          ratios={ratios}
+          ic={(ic ?? {}) as IcNoteShape}
+          company={linkedCompany}
+          directors={linkedDirs}
+          cibilData={cibilData}
+          onGenerateSection={runNarrativeSection}
+          generatingSection={generatingSection}
+        />
       )}
 
       {tab === "ic_note" && (
@@ -4959,49 +5615,70 @@ function CaseViewInner() {
             company={linkedCompany}
             directors={linkedDirs}
             triangulationData={triangulationData?.report_data ?? null}
+            onPdf={ic?.sections ? () => {
+              const docEl = document.getElementById("ic-note-doc");
+              if (!docEl) return;
+              const clone = docEl.cloneNode(true) as HTMLElement;
+              clone.style.display = "block"; clone.style.minHeight = "0"; clone.style.height = "auto"; clone.style.border = "none"; clone.style.width = "100%";
+              const bodyRow = clone.querySelector("#ic-note-body-row") as HTMLElement | null;
+              if (bodyRow) { bodyRow.style.display = "block"; bodyRow.style.overflow = "visible"; bodyRow.style.height = "auto"; bodyRow.style.minHeight = "0"; bodyRow.style.width = "100%"; bodyRow.style.flex = "none"; }
+              const scroll = clone.querySelector("#ic-note-scroll") as HTMLElement | null;
+              if (scroll) { scroll.style.display = "block"; scroll.style.overflow = "visible"; scroll.style.overflowY = "visible"; scroll.style.height = "auto"; scroll.style.maxHeight = "none"; scroll.style.flex = "none"; scroll.style.width = "100%"; }
+              clone.querySelectorAll("[data-no-print]").forEach(el => el.remove());
+
+              // Collect app CSS (same-origin sheets only; cross-origin are blocked by CORS)
+              const inlineStyles = Array.from(document.styleSheets)
+                .map(ss => { try { return Array.from(ss.cssRules).map(r => r.cssText).join("\n"); } catch { return ""; } })
+                .join("\n");
+              const linkTags = Array.from(document.styleSheets)
+                .filter(ss => ss.href && !ss.href.startsWith(window.location.origin))
+                .map(ss => `<link rel="stylesheet" href="${ss.href}">`)
+                .join("\n");
+
+              // Snapshot all CSS custom properties from :root so card/text colors resolve in the print window
+              const rootStyle = getComputedStyle(document.documentElement);
+              const cssVarNames = Array.from(document.styleSheets)
+                .flatMap(ss => { try { return Array.from(ss.cssRules); } catch { return []; } })
+                .flatMap(r => { try { return Array.from((r as CSSStyleRule).style ?? []); } catch { return []; } })
+                .filter(p => p.startsWith("--"));
+              const uniqueVars = Array.from(new Set(cssVarNames));
+              const rootVarsCss = `:root{${uniqueVars.map(v => `${v}:${rootStyle.getPropertyValue(v)}`).join(";")}}`;
+
+              const win = window.open("", "_blank", "width=900,height=1200");
+              if (!win) return;
+              win.document.write(`<!DOCTYPE html><html><head>
+                <base href="${window.location.origin}/">
+                <title>${cc.case_code ?? "IC Note"}</title>
+                ${linkTags}
+                <style>
+                  ${inlineStyles}
+                  ${rootVarsCss}
+                  *{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+                  html,body{overflow:visible!important;height:auto!important;width:100%!important;margin:0;padding:0;background:#FAFAF6}
+                  @page{size:A4 portrait;margin:10mm 8mm}
+                  button,input[type="range"],textarea{display:none!important}
+                  /* Tables — fit A4 width */
+                  table{width:100%!important;max-width:100%!important;table-layout:fixed!important;border-collapse:collapse!important;font-size:8.5px!important;word-break:break-word!important;overflow-wrap:anywhere!important}
+                  th,td{padding:4px 5px!important;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;vertical-align:top!important;font-size:8.5px!important}
+                  table td:first-child,table th:first-child{width:22%!important;font-size:8px!important}
+                  tr{page-break-inside:avoid}
+                  div[style*="overflow-x"]{overflow-x:visible!important;overflow:visible!important}
+                  /* Let recharts SVGs render; fix zero-size responsive containers */
+                  .recharts-responsive-container{width:100%!important;min-height:200px!important}
+                  .recharts-wrapper{width:100%!important}
+                  .ic-yr-badge{display:none!important}
+                </style>
+              </head><body>${clone.outerHTML}</body></html>`);
+              win.document.close();
+              setTimeout(() => win.print(), 2200);
+            } : undefined}
+            onPpt={ic?.sections ? () => {
+              generateIcPpt({ cc, ic: ic!, extracted: activeExtracted, ratios, company: linkedCompany, directors: linkedDirs }).catch(console.error);
+            } : undefined}
           />
 
-          {/* PDF download (only when note exists) */}
           {ic?.sections && (
-            <>
-              <ICFinalRecommendation cc={cc} ratios={ratios} extracted={extracted} ic={ic!} />
-              <DownloadBar onPdf={() => {
-                const docEl = document.getElementById("ic-note-doc");
-                if (!docEl) return;
-
-                // Capture all page styles so Tailwind + CSS vars work in the print window
-                const inlineStyles = Array.from(document.styleSheets)
-                  .map(ss => { try { return Array.from(ss.cssRules).map(r => r.cssText).join("\n"); } catch { return ""; } })
-                  .join("\n");
-                const linkTags = Array.from(document.styleSheets)
-                  .filter(ss => ss.href && !ss.href.startsWith(window.location.origin))
-                  .map(ss => `<link rel="stylesheet" href="${ss.href}">`)
-                  .join("\n");
-
-                const win = window.open("", "_blank", "width=1100,height=900");
-                if (!win) return;
-                win.document.write(`<!DOCTYPE html><html><head>
-                  <title>${cc.case_code ?? "IC Note"}</title>
-                  ${linkTags}
-                  <style>
-                    ${inlineStyles}
-                    *{box-sizing:border-box}
-                    body{background:#FAFAF6;-webkit-print-color-adjust:exact;print-color-adjust:exact;margin:0;padding:0}
-                    @page{size:A4;margin:8mm}
-                    [data-no-print]{display:none!important}
-                    button,input[type="range"],textarea{display:none!important}
-                    /* Unlock all flex/overflow constraints so content fully expands */
-                    #ic-note-doc{height:auto!important;min-height:0!important;border:none!important;display:flex!important;flex-direction:column!important}
-                    #ic-note-body-row{overflow:visible!important;flex:none!important;height:auto!important;min-height:0!important}
-                    #ic-note-scroll{overflow:visible!important;max-height:none!important;flex:1!important;height:auto!important;min-height:0!important}
-                    /* Remove page-level overflow clipping */
-                    html,body{overflow:visible!important;height:auto!important}
-                  </style>
-                </head><body>${docEl.outerHTML}</body></html>`);
-                win.document.close();
-                setTimeout(() => win.print(), 1500);
-              }} />
-            </>
+            <ICFinalRecommendation cc={cc} ratios={ratios} extracted={extracted} ic={ic!} />
           )}
         </div>
       )}
@@ -5112,7 +5789,7 @@ function CaseViewInner() {
             bsaData={bsaData}
             onReload={reload}
           />
-          {tab === "bank" && <DownloadBar onTemplate={downloadBankTemplate} />}
+          {tab === "bank" && <DownloadBar onTemplate={downloadBankTemplate} copyPrompt={"I have attached two files: bank statement documents (PDFs, images, or raw statements from one or more banks) and an Excel template.\n\nExtract the bank statement analysis data and fill in the template:\n\nEXEC SUMMARY: Row 1 = company name. Row 4 = account header 'Account Number: XXXX, BANK NAME' for each bank. Rows 5–17: Type of Account, Period of Analysis, months, Total Net Credits, Total Net Debits, ABB (Average Bank Balance), Total Bounces, Penal Charges, Irregularity count. Consolidated total in col B, per-bank values in cols C, D… if multiple accounts.\n\nMOM SUMMARY: Fill Average EOD Balance, Min EOD Balance, Max EOD Balance for each month column.\n\nCAM ANALYSIS: One row per month — Credit Count, Credit Amount, Debit Count, Debit Amount, Inward Bounce Count, Inward Bounce Amount.\n\nTRADE CREDITS: Top counterparties sending money in — rank, name, total amount, % of total, monthly avg, months active, count. Sort descending by amount.\n\nTRADE DEBITS: Same structure but for outgoing payments.\n\nFLAGS: Any risk flags present — category, flag name, description.\n\nIRREGULARITY INDICATORS: Each indicator with Identified (Y/N) and trigger count.\n\nAll amounts in absolute INR (do NOT convert to Lakhs). Month format: 'Apr-24'. Return only the completed Excel file."} />}
         </>
       )}
       {(tab === "gst" || (tab === "partner" && partnerSubTab === "gst")) && (
@@ -5135,7 +5812,7 @@ function CaseViewInner() {
             docs={tab === "partner" ? partnerDocs : docs}
             accumnData={tab === "partner" ? null : accumnData}
           />
-          {tab === "gst" && <DownloadBar onTemplate={downloadGstTemplate} />}
+          {tab === "gst" && <DownloadBar onTemplate={downloadGstTemplate} copyPrompt={"I have attached two files: GST return documents (GSTR-3B / GSTR-1 PDFs, GST portal screenshots, or a GST summary report) and an Excel template.\n\nExtract the GST data and fill in the template:\n\nPROFILE sheet: GSTIN, Legal Name, Trade Name, PAN, Constitution, State, Date of GST Registration (DD-MM-YYYY), Nature of Core Business Activity.\n\nGSTR-3B sheet: One row per month. Columns: Month-Year (e.g. Apr-24) | Taxable Turnover | Exempt/Nil-rated Turnover | Total Turnover | Output Tax | ITC Claimed | Net Tax Paid | Filing Date (DD-MM-YYYY) | Filing Status (Filed / Late / Not Filed). Leave blank for months not yet filed.\n\nGSTR-1 sheet: Turnover declared in GSTR-1 per month, filing date, and filing status.\n\nAll amounts in absolute INR — do NOT convert to Lakhs or Crores. Month format: 'Apr-24'. Turnover = Taxable + Exempt. Net Tax Paid = Output Tax minus ITC Claimed. Return only the completed Excel file."} />}
         </>
       )}
 
@@ -5275,6 +5952,14 @@ function CaseViewInner() {
           </div>
         </div>
       )}
+
+      {/* ── Canvas annotation overlay (draw / text / highlight on any page) ── */}
+      <AnnotationOverlay
+        userId={user?.id ?? "unknown"}
+        userName={user?.user_metadata?.full_name ?? user?.email?.split("@")[0] ?? "User"}
+        annotations={canvasAnnotations}
+        onChange={saveCanvasAnnotations}
+      />
 
     </TerminalLayout>
   );
@@ -7002,10 +7687,46 @@ function dlPdf(html: string, title: string) {
   setTimeout(() => win.print(), 400);
 }
 
-function DownloadBar({ onExcel, onPdf }: { onExcel?: () => void; onPdf?: () => void }) {
+function CopyPromptButton({ prompt }: { prompt: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        await navigator.clipboard.writeText(prompt);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+      className="flex items-center gap-1.5 text-sm text-primary/70 border border-primary/30 rounded-lg px-4 py-2 hover:text-primary hover:border-primary/60 hover:bg-primary/5 transition-colors"
+      title="Copy a ready-to-use Claude prompt — open Claude, attach the template + PDF, then paste this"
+    >
+      {copied ? "✓ Copied!" : "⧉ Copy AI Prompt"}
+    </button>
+  );
+}
+
+function DownloadBar({ onExcel, onPdf, onTemplate, copyPrompt }: { onExcel?: () => void; onPdf?: () => void; onTemplate?: () => void; copyPrompt?: string }) {
+  const [copied, setCopied] = useState(false);
   return (
     <div className="flex items-center gap-2 pt-3 mt-1 border-t border-border/40">
       <span className="text-[10px] text-muted-foreground tracking-widest">↓ DOWNLOAD</span>
+      {onTemplate && (
+        <button onClick={onTemplate} className="text-[10px] border border-accent/40 text-accent/80 px-3 py-1 hover:bg-accent/10 hover:text-accent hover:border-accent/60 tracking-widest">
+          [TEMPLATE]
+        </button>
+      )}
+      {copyPrompt && (
+        <button
+          onClick={async () => {
+            await navigator.clipboard.writeText(copyPrompt);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          }}
+          className="text-[10px] border border-primary/40 text-primary/70 px-3 py-1 hover:bg-primary/10 hover:text-primary hover:border-primary/60 tracking-widest transition-colors"
+          title="Copy Claude prompt"
+        >
+          {copied ? "✓ COPIED" : "⧉ AI PROMPT"}
+        </button>
+      )}
       {onExcel && (
         <button onClick={onExcel} className="text-[10px] border border-border text-primary px-3 py-1 hover:bg-primary/10 tracking-widest font-bold">
           [EXCEL]

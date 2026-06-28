@@ -25,6 +25,13 @@ export interface IcComment {
   resolved: boolean;
 }
 
+export interface AiReviewAnalysis {
+  analyst_summary: string;
+  cfo_flags: { flag: string; severity: "HIGH" | "MEDIUM" | "LOW"; detail: string }[];
+  fiscal_report: string;
+  generated_at: string;
+}
+
 export interface IcNoteShape {
   sections?: Record<string, { markdown: string }>;
   risks?: { category: string; risk: string; mitigant: string; severity: string }[];
@@ -37,6 +44,54 @@ export interface IcNoteShape {
   cell_edits?: Record<string, Record<string, Record<number, number | null>>>;
   custom_rows?: Record<string, string[]>;
   para_sigs?: Record<string, { email: string; name: string; at: string }>;
+  section_templates?: Record<string, Record<string, unknown>>;
+  ai_review_analysis?: AiReviewAnalysis;
+  provisional?: {
+    id: string;
+    label: string;
+    period_type: string;
+    fiscal_year: number;
+    months_covered: number;
+    unit: string;
+    pl: { label: string; value: number | null; override_value?: number | null }[];
+    bs: { label: string; value: number | null; override_value?: number | null }[];
+    cf: { label: string; value: number | null; override_value?: number | null }[];
+  }[];
+  projections_comment?: string;
+  visit_report?: {
+    checklist?: {
+      banker_reference?:   { status?: string; source?: string; notes?: string };
+      vendor_check?:       { status?: string; source?: string; notes?: string };
+      customer_reference?: { status?: string; source?: string; notes?: string };
+      site_visit?:         { status?: string; source?: string; notes?: string };
+    };
+    overall_notes?: string;
+    exec_recommendation?: string;
+  };
+  rehbar_history?: {
+    has_prior_exposure: boolean;
+    facilities: {
+      id: string;
+      product: string;
+      sanctioned_amount: number | null;
+      disbursed_amount: number | null;
+      outstanding: number | null;
+      sanction_date: string;
+      closure_date: string;
+      status: string;
+      max_dpd: number | null;
+      notes: string;
+    }[];
+    analyst_notes: string;
+    credit_references: {
+      id: string;
+      ref_type: string;
+      entity_name: string;
+      contact: string;
+      relationship: string;
+      notes: string;
+    }[];
+  };
 }
 
 // ── IC colour constants ───────────────────────────────────────────────────────
@@ -229,7 +284,7 @@ function SectionPanel({
         embedded={true}
       />
     );
-    case "key_ratios":             return <ICRatioTable ratios={ratios} />;
+    case "key_ratios":             return <ICRatioTable ratios={ratios} extracted={extracted} />;
     case "client_promoter":        return <ICClientProfile cc={cc} company={company} directors={directors as Parameters<typeof ICClientProfile>[0]["directors"]} />;
     case "investment_structure":   return <ICInvestmentStructure cc={cc} />;
     case "rehbar_funding_history": return <ICRehbarHistory cc={cc} />;
@@ -366,6 +421,8 @@ export function ICNoteDocument({
   company,
   directors,
   triangulationData,
+  onPdf,
+  onPpt,
 }: {
   cc: CaseRow;
   extracted: ExtractedRow[];
@@ -395,6 +452,8 @@ export function ICNoteDocument({
   company?: Record<string, string | null> | null;
   directors?: Record<string, string | null>[] | null;
   triangulationData?: TriangulationData | null;
+  onPdf?: () => void;
+  onPpt?: () => void;
 }) {
   const [editBlock, setEditBlock]                       = useState<{ sectionId: string; blockIdx: number; val: string } | null>(null);
   const [showComments, setShowComments]                 = useState(false);
@@ -632,16 +691,19 @@ export function ICNoteDocument({
       {/* ── Letterhead ──────────────────────────────────────────────────────── */}
       <div style={{ background: IC.navy, padding: "0 0 0 0", borderBottom: `3px solid ${IC.gold}` }}>
         {/* Top bar */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", padding: "16px 28px 12px" }}>
-          <div>
-            <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 13, fontWeight: 700, color: IC.goldLt, letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: 3 }}>
-              Rehbar Financial Services
-            </div>
-            <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontStyle: "italic", fontSize: 11, color: "rgba(250,250,246,0.55)", letterSpacing: "0.06em" }}>
-              Investment Committee Credit Appraisal Note
-            </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 28px 10px" }}>
+          {/* Logo */}
+          <div style={{ background: "#fff", borderRadius: 6, padding: "5px 12px", display: "inline-flex", alignItems: "center" }}>
+            <img
+              src="/Rehbar_logo.png"
+              alt="Rehbar Financial Services"
+              style={{ height: 42, width: "auto", display: "block" }}
+            />
           </div>
           <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontStyle: "italic", fontSize: 11, color: "rgba(250,250,246,0.65)", letterSpacing: "0.06em", marginBottom: 4 }}>
+              Investment Committee Credit Appraisal Note
+            </div>
             <div style={{ fontSize: 7.5, color: IC.goldLt, letterSpacing: "0.16em", textTransform: "uppercase", marginBottom: 3, opacity: 0.8 }}>
               CONFIDENTIAL · {ic.draft !== false ? "DRAFT" : "FINAL"}
             </div>
@@ -671,7 +733,8 @@ export function ICNoteDocument({
         </div>
 
         {/* Toolbar */}
-        <div data-no-print="true" style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 28px", borderTop: `1px solid rgba(212,201,176,0.1)` }}>
+        <div data-no-print="true" style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 20px 8px 28px", borderTop: `1px solid rgba(212,201,176,0.1)` }}>
+          {/* Left: secondary actions */}
           <button
             onClick={() => setShowComments(v => !v)}
             style={{
@@ -693,30 +756,93 @@ export function ICNoteDocument({
           >
             ↻ Re-analyse
           </button>
-          {/* Draw toolbar */}
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
-            <button
-              onClick={() => setDrawMode(v => !v)}
-              style={{
-                fontSize: 8, letterSpacing: "0.12em", border: `1px solid ${drawMode ? IC.goldLt : "rgba(212,201,176,0.25)"}`,
-                padding: "4px 10px", background: drawMode ? "rgba(196,160,74,0.15)" : "transparent",
-                color: drawMode ? IC.goldLt : "rgba(250,250,246,0.45)", cursor: "pointer",
-                textTransform: "uppercase", fontFamily: "inherit", borderRadius: 3,
-              }}
-            >
-              ✏ {drawMode ? "Drawing" : "Annotate"}
-            </button>
-            {drawMode && (<>
-              {(["pen","highlight","text","eraser"] as DrawTool[]).map(t => (
-                <button key={t} onClick={() => setDrawTool(t)} style={{ fontSize: 8, padding: "4px 8px", border: `1px solid ${drawTool === t ? IC.goldLt : "rgba(212,201,176,0.2)"}`, background: drawTool === t ? "rgba(196,160,74,0.2)" : "transparent", color: drawTool === t ? IC.goldLt : "rgba(250,250,246,0.4)", cursor: "pointer", fontFamily: "inherit", textTransform: "capitalize", borderRadius: 3 }}>{t}</button>
-              ))}
-              {["#e74c3c","#2563eb","#16a34a","#f59e0b","#1a1a1a","#fef08a"].map(c => (
-                <button key={c} onClick={() => setDrawColor(c)} style={{ width: 16, height: 16, background: c, border: drawColor === c ? "2px solid white" : "2px solid transparent", borderRadius: "50%", cursor: "pointer", flexShrink: 0 }} />
-              ))}
-              <input type="range" min={1} max={8} value={drawWidth} onChange={e => setDrawWidth(Number(e.target.value))} style={{ width: 60, accentColor: IC.goldLt }} />
-              <button onClick={() => { const anns = ic.annotations ?? []; if (anns.length) onAnnotationsChange?.(anns.slice(0, -1)); }} style={{ fontSize: 9, color: "rgba(250,250,246,0.4)", border: "1px solid rgba(212,201,176,0.2)", padding: "3px 8px", background: "transparent", cursor: "pointer", fontFamily: "inherit", borderRadius: 3 }}>↩ Undo</button>
-              <button onClick={() => { if (window.confirm("Clear all annotations?")) onAnnotationsChange?.([]); }} style={{ fontSize: 9, color: "rgba(250,250,246,0.3)", border: "1px solid rgba(212,201,176,0.15)", padding: "3px 8px", background: "transparent", cursor: "pointer", fontFamily: "inherit", borderRadius: 3 }}>✕ Clear</button>
-            </>)}
+
+          {/* Right: draw toolbar + PDF download */}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+            {/* Draw toolbar */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <button
+                onClick={() => setDrawMode(v => !v)}
+                style={{
+                  fontSize: 8, letterSpacing: "0.12em", border: `1px solid ${drawMode ? IC.goldLt : "rgba(212,201,176,0.25)"}`,
+                  padding: "4px 10px", background: drawMode ? "rgba(196,160,74,0.15)" : "transparent",
+                  color: drawMode ? IC.goldLt : "rgba(250,250,246,0.45)", cursor: "pointer",
+                  textTransform: "uppercase", fontFamily: "inherit", borderRadius: 3,
+                }}
+              >
+                ✏ {drawMode ? "Drawing" : "Annotate"}
+              </button>
+              {drawMode && (<>
+                {(["pen","highlight","text","eraser"] as DrawTool[]).map(t => (
+                  <button key={t} onClick={() => setDrawTool(t)} style={{ fontSize: 8, padding: "4px 8px", border: `1px solid ${drawTool === t ? IC.goldLt : "rgba(212,201,176,0.2)"}`, background: drawTool === t ? "rgba(196,160,74,0.2)" : "transparent", color: drawTool === t ? IC.goldLt : "rgba(250,250,246,0.4)", cursor: "pointer", fontFamily: "inherit", textTransform: "capitalize", borderRadius: 3 }}>{t}</button>
+                ))}
+                {["#e74c3c","#2563eb","#16a34a","#f59e0b","#1a1a1a","#fef08a"].map(c => (
+                  <button key={c} onClick={() => setDrawColor(c)} style={{ width: 16, height: 16, background: c, border: drawColor === c ? "2px solid white" : "2px solid transparent", borderRadius: "50%", cursor: "pointer", flexShrink: 0 }} />
+                ))}
+                <input type="range" min={1} max={8} value={drawWidth} onChange={e => setDrawWidth(Number(e.target.value))} style={{ width: 60, accentColor: IC.goldLt }} />
+                <button onClick={() => { const anns = ic.annotations ?? []; if (anns.length) onAnnotationsChange?.(anns.slice(0, -1)); }} style={{ fontSize: 9, color: "rgba(250,250,246,0.4)", border: "1px solid rgba(212,201,176,0.2)", padding: "3px 8px", background: "transparent", cursor: "pointer", fontFamily: "inherit", borderRadius: 3 }}>↩ Undo</button>
+                <button onClick={() => { if (window.confirm("Clear all annotations?")) onAnnotationsChange?.([]); }} style={{ fontSize: 9, color: "rgba(250,250,246,0.3)", border: "1px solid rgba(212,201,176,0.15)", padding: "3px 8px", background: "transparent", cursor: "pointer", fontFamily: "inherit", borderRadius: 3 }}>✕ Clear</button>
+              </>)}
+            </div>
+
+            {/* Divider */}
+            {(onPdf || onPpt) && <div style={{ width: 1, height: 20, background: "rgba(212,201,176,0.2)" }} />}
+
+            {/* PDF Download */}
+            {onPdf && (
+              <button
+                onClick={onPdf}
+                style={{
+                  display: "flex", alignItems: "center", gap: 7,
+                  background: "linear-gradient(135deg, #8B6914 0%, #C4A04A 100%)",
+                  border: "none", borderRadius: 5, padding: "6px 14px",
+                  cursor: "pointer", fontFamily: "'Source Serif 4', Georgia, serif",
+                  boxShadow: "0 1px 4px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.15)",
+                  transition: "opacity 0.15s",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.opacity = "0.88")}
+                onMouseLeave={e => (e.currentTarget.style.opacity = "1")}
+                title="Export as PDF"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#FAFAF6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                  <line x1="12" y1="18" x2="12" y2="12"/>
+                  <polyline points="9 15 12 18 15 15"/>
+                </svg>
+                <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.08em", color: "#FAFAF6", textTransform: "uppercase" }}>
+                  Export PDF
+                </span>
+              </button>
+            )}
+
+            {/* PPT Download */}
+            {onPpt && (
+              <button
+                onClick={onPpt}
+                style={{
+                  display: "flex", alignItems: "center", gap: 7,
+                  background: "linear-gradient(135deg, #1a3a5c 0%, #2a5a8c 100%)",
+                  border: "none", borderRadius: 5, padding: "6px 14px",
+                  cursor: "pointer", fontFamily: "'Source Serif 4', Georgia, serif",
+                  boxShadow: "0 1px 4px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.12)",
+                  transition: "opacity 0.15s",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.opacity = "0.85")}
+                onMouseLeave={e => (e.currentTarget.style.opacity = "1")}
+                title="Export as PowerPoint"
+              >
+                {/* Presentation icon */}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#FAFAF6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                  <line x1="8" y1="21" x2="16" y2="21"/>
+                  <line x1="12" y1="17" x2="12" y2="21"/>
+                </svg>
+                <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.08em", color: "#FAFAF6", textTransform: "uppercase" }}>
+                  Export PPT
+                </span>
+              </button>
+            )}
           </div>
         </div>
 

@@ -65,16 +65,20 @@ function evaluate(
 
 // Maps check-id prefix → the result row that should be highlighted in the financial table.
 export const CHECK_RESULT_ROW: Record<string, { stmtType: string; label: string }> = {
-  bs_balance:    { stmtType: "balance_sheet", label: "Total Assets" },
-  bs_assets_sum: { stmtType: "balance_sheet", label: "Total Assets" },
-  pl_gross:      { stmtType: "profit_loss",   label: "Gross Profit" },
-  pl_ebitda:     { stmtType: "profit_loss",   label: "EBITDA" },
-  pl_ebit:       { stmtType: "profit_loss",   label: "EBIT" },
-  pl_pbt:        { stmtType: "profit_loss",   label: "Profit Before Tax" },
-  pl_pat:        { stmtType: "profit_loss",   label: "PAT" },
-  cf_net:        { stmtType: "cash_flow",     label: "Net Change in Cash" },
-  cf_close:      { stmtType: "cash_flow",     label: "Closing Cash" },
-  cross_cash:    { stmtType: "balance_sheet", label: "Cash & Bank" },
+  bs_balance:          { stmtType: "balance_sheet", label: "Total Assets" },
+  bs_assets_sum:       { stmtType: "balance_sheet", label: "Total Assets" },
+  bs_ncl_subtotal:     { stmtType: "balance_sheet", label: "Total Non Current Liabilities" },
+  bs_deferred_tax:     { stmtType: "balance_sheet", label: "Deferred Tax Liabilities" },
+  bs_networth_subtotal:{ stmtType: "balance_sheet", label: "Net Worth" },
+  bs_cap_employed:     { stmtType: "balance_sheet", label: "Capital Employed" },
+  pl_gross:            { stmtType: "profit_loss",   label: "Gross Profit" },
+  pl_ebitda:           { stmtType: "profit_loss",   label: "EBITDA" },
+  pl_ebit:             { stmtType: "profit_loss",   label: "EBIT" },
+  pl_pbt:              { stmtType: "profit_loss",   label: "Profit Before Tax" },
+  pl_pat:              { stmtType: "profit_loss",   label: "PAT" },
+  cf_net:              { stmtType: "cash_flow",     label: "Net Change in Cash" },
+  cf_close:            { stmtType: "cash_flow",     label: "Closing Cash" },
+  cross_cash:          { stmtType: "balance_sheet", label: "Cash & Bank" },
 };
 
 export function runArticulationChecks(extracted: ExtractedRow[]): ArticulationCheck[] {
@@ -108,13 +112,24 @@ export function runArticulationChecks(extracted: ExtractedRow[]): ArticulationCh
 
     // ── Within BS ──────────────────────────────────────────────────────────
     if (bs) {
-      const totalAssets  = get(bs, "Total Assets");
-      const netWorth     = get(bs, "Net Worth");
-      const totalDebt    = get(bs, "Total Debt");
-      const currLiab     = get(bs, "Current Liabilities");
+      const totalAssets     = get(bs, "Total Assets");
+      const totalEquityLiab = get(bs, "Total Equity & Liabilities");
+      const netWorth        = get(bs, "Net Worth");
+      const totalDebt       = get(bs, "Total Debt");
+      const currLiab        = get(bs, "Current Liabilities");
 
-      // BS: Total Assets = Net Worth + Total Debt + Current Liabilities
-      if (totalAssets !== null && (netWorth !== null || totalDebt !== null || currLiab !== null)) {
+      if (totalAssets !== null && totalEquityLiab !== null) {
+        // Corpository format: full liabilities total already computed by rules (includes DTL, Other NCL)
+        checks.push(evaluate(
+          `bs_balance_${fy}`,
+          "BS: Assets = Equity + Liabilities",
+          "within_bs", "hard", fy,
+          totalEquityLiab, totalAssets, 1,
+          `FY ${fy}: Total Assets should equal Total Equity & Liabilities`,
+          "Extraction error: a line item may be mis-mapped, double-counted, or extracted in wrong units.",
+        ));
+      } else if (totalAssets !== null && (netWorth !== null || totalDebt !== null || currLiab !== null)) {
+        // Simple AI-extracted format: Net Worth + Total Debt + Current Liabilities
         const liabSide = (netWorth ?? 0) + (totalDebt ?? 0) + (currLiab ?? 0);
         checks.push(evaluate(
           `bs_balance_${fy}`,
@@ -126,17 +141,92 @@ export function runArticulationChecks(extracted: ExtractedRow[]): ArticulationCh
         ));
       }
 
-      // BS: Current Assets + Fixed Assets (Net) = Total Assets
-      const currAssets  = get(bs, "Current Assets");
-      const fixedAssets = get(bs, "Fixed Assets (Net)");
-      if (totalAssets !== null && currAssets !== null && fixedAssets !== null) {
+      const currAssets         = get(bs, "Current Assets");
+      const fixedAssets        = get(bs, "Fixed Assets (Net)");
+      const totalNonCurrAssets = get(bs, "Total Non Current Assets");
+
+      if (totalAssets !== null && currAssets !== null) {
+        if (totalNonCurrAssets !== null) {
+          // Corpository format: full non-current group (includes CWIP, investments, other NCA)
+          checks.push(evaluate(
+            `bs_assets_sum_${fy}`,
+            "BS: Non-Current + Current Assets = Total Assets",
+            "within_bs", "soft", fy,
+            totalAssets, totalNonCurrAssets + currAssets, 1,
+            `FY ${fy}: Total Non-Current Assets + Current Assets should equal Total Assets`,
+            "Gap usually means 'Other Total Assets' or a residual category is not captured under non-current or current.",
+          ));
+        } else if (fixedAssets !== null) {
+          // Simple format: fixed + current only
+          checks.push(evaluate(
+            `bs_assets_sum_${fy}`,
+            "BS: Fixed + Current Assets = Total Assets",
+            "within_bs", "soft", fy,
+            totalAssets, currAssets + fixedAssets, 1,
+            `FY ${fy}: Current Assets + Fixed Assets (Net) should equal Total Assets`,
+            "Gap usually means intangibles, CWIP, long-term investments, or other non-current assets exist but are not captured in these two sub-categories. Add them as separate extraction labels to close the gap.",
+          ));
+        }
+      }
+
+      // ── Corpository sub-total consistency ──────────────────────────────────
+      if (totalEquityLiab !== null) {
+        const totalNCL = get(bs, "Total Non Current Liabilities");
+        const ltbRaw   = get(bs, "Long-term Borrowings");
+        const dtl      = get(bs, "Deferred Tax Liabilities");
+        const otherNCL = get(bs, "Other Non Current Liabilities");
+        const ltProv   = get(bs, "Long-term Provisions");
+
+        if (totalNCL !== null) {
+          const computedNCL = (ltbRaw ?? 0) + (dtl ?? 0) + (otherNCL ?? 0) + (ltProv ?? 0);
+          checks.push(evaluate(
+            `bs_ncl_subtotal_${fy}`,
+            "BS: Non-Current Liabilities = LTB + DTL + Other NCL + Provisions",
+            "within_bs", "hard", fy,
+            computedNCL, totalNCL, 1,
+            `FY ${fy}: Total NCL (${totalNCL?.toLocaleString("en-IN")}) should equal LTB + Deferred Tax Liabilities + Other NCL + LT Provisions (${computedNCL.toLocaleString("en-IN")})`,
+            "A Corpository sub-row (Secured / Unsecured borrowings breakdown) may be double-imported, overstating Long-term Borrowings.",
+          ));
+        }
+
+        // Ind AS 12: DTA and DTL must be netted — both non-zero simultaneously is a mapping error
+        const dta = get(bs, "Deferred Tax Assets (Net)");
+        if (dta !== null && dtl !== null && dta > 0 && dtl > 0) {
+          checks.push(evaluate(
+            `bs_deferred_tax_${fy}`,
+            "BS: DTA / DTL — only one should be non-zero (Ind AS 12)",
+            "within_bs", "hard", fy,
+            0, Math.min(dta, dtl), 1,
+            `FY ${fy}: Deferred Tax Assets (${dta?.toLocaleString("en-IN")}) and Liabilities (${dtl?.toLocaleString("en-IN")}) are both non-zero`,
+            "Per Ind AS 12, DTA and DTL must be offset. Show only the net: if net DTA map it to Non-Current Assets; if net DTL map it to Non-Current Liabilities.",
+          ));
+        }
+      }
+
+      // ── Net Worth decomposition (all formats) ──────────────────────────────
+      const shareCapital    = get(bs, "Share Capital");
+      const reservesSurplus = get(bs, "Reserves & Surplus");
+      if (netWorth !== null && shareCapital !== null && reservesSurplus !== null) {
         checks.push(evaluate(
-          `bs_assets_sum_${fy}`,
-          "BS: Fixed + Current Assets = Total Assets",
+          `bs_networth_subtotal_${fy}`,
+          "BS: Net Worth = Share Capital + Reserves & Surplus",
           "within_bs", "soft", fy,
-          totalAssets, currAssets + fixedAssets, 1,
-          `FY ${fy}: Current Assets + Fixed Assets (Net) should equal Total Assets`,
-          "Gap usually means intangibles, CWIP, long-term investments, or other non-current assets exist but are not captured in these two sub-categories. Add them as separate extraction labels to close the gap.",
+          shareCapital + reservesSurplus, netWorth, 1,
+          `FY ${fy}: Net Worth (${netWorth?.toLocaleString("en-IN")}) should equal Share Capital + Reserves & Surplus (${(shareCapital + reservesSurplus).toLocaleString("en-IN")})`,
+          "A gap here means other equity components (Share Warrants, Application Money, Minority Interest) are present but not separately extracted.",
+        ));
+      }
+
+      // ── Capital Employed consistency (all formats) ──────────────────────────
+      const capitalEmployed = get(bs, "Capital Employed");
+      if (capitalEmployed !== null && netWorth !== null && totalDebt !== null) {
+        checks.push(evaluate(
+          `bs_cap_employed_${fy}`,
+          "BS: Capital Employed = Net Worth + Total Debt",
+          "within_bs", "soft", fy,
+          netWorth + totalDebt, capitalEmployed, 1,
+          `FY ${fy}: Capital Employed (${capitalEmployed?.toLocaleString("en-IN")}) should equal Net Worth + Total Debt (${(netWorth + totalDebt).toLocaleString("en-IN")})`,
+          "Confirm Total Debt captures both Long-Term and Short-Term Borrowings. A gap may indicate CPLTD (current portion of LT debt) is classified under CL instead of STB.",
         ));
       }
     }
@@ -179,15 +269,19 @@ export function runArticulationChecks(extracted: ExtractedRow[]): ArticulationCh
         ));
       }
 
-      // P&L: EBITDA – Depreciation = EBIT
+      // P&L: EBITDA + Other Income – Depreciation = EBIT
+      // Indian standard: Other Income (non-operating) sits between EBITDA and EBIT.
+      const otherIncome = get(pl, "Other Income");
       if (ebitda !== null && depreciation !== null && ebit !== null) {
+        const oi = otherIncome ?? 0;
+        const hasOI = oi !== 0;
         checks.push(evaluate(
           `pl_ebit_${fy}`,
-          "P&L: EBITDA – Depreciation = EBIT",
+          hasOI ? "P&L: EBITDA + Other Income – Depreciation = EBIT" : "P&L: EBITDA – Depreciation = EBIT",
           "within_pl", "soft", fy,
-          ebitda - depreciation, ebit, 1,
-          `FY ${fy}: EBIT should equal EBITDA minus Depreciation`,
-          "Indian P&Ls often include 'Other Income' between EBITDA and EBIT, making EBIT > EBITDA − D&A. If Other Income is extracted as a separate label it should be added to expected. A large gap may also indicate amortisation mapped differently.",
+          ebitda + oi - depreciation, ebit, 1,
+          `FY ${fy}: EBIT should equal EBITDA${hasOI ? ` + Other Income (${oi.toLocaleString("en-IN")})` : ""} minus Depreciation`,
+          "A remaining gap after this fix usually indicates amortisation is mapped differently, or a component of Other Income is captured under a different label.",
         ));
       }
 

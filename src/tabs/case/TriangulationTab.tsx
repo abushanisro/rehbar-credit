@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { parseTriangulationExcel, isTriangulationExcel } from "@/lib/triangulation-excel-parser";
 import type { TriangulationData } from "@/lib/triangulation-excel-parser";
 import type { Tables } from "@/integrations/supabase/types";
+import { buildTriangulationTemplate, downloadBuffer } from "@/lib/excel-templates";
 
 type CaseRow = Tables<"credit_cases">;
 
@@ -374,6 +375,7 @@ export function TriangulationTab({
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy]     = useState(false);
   const [progress, setProgress] = useState("");
+  const [promptCopied, setPromptCopied] = useState(false);
 
   const handleFile = async (file: File) => {
     if (!isTriangulationExcel(file) && !file.name.toLowerCase().endsWith(".xlsx") && !file.name.toLowerCase().endsWith(".xls")) {
@@ -408,14 +410,7 @@ export function TriangulationTab({
   return (
     <div className="space-y-4">
       {/* Upload panel */}
-      <div className="border border-border p-4 space-y-3">
-        <div className="text-[9px] tracking-widest text-muted-foreground uppercase">
-          Triangulation Import — Accumn Excel
-        </div>
-        <div className="text-[10px] text-muted-foreground">
-          Upload the Accumn multi-source triangulation Excel (GST × BSA × ITR cross-reference).
-          Extracts profile details, financial summary, customer/supplier concentration, and circular transactions.
-        </div>
+      <div className="bg-white -mx-4 px-4 py-2 border-b border-border shadow-sm mb-4">
         <input
           ref={fileRef}
           type="file"
@@ -427,22 +422,56 @@ export function TriangulationTab({
             e.target.value = "";
           }}
         />
-        {busy ? (
-          <div className="text-[10px] text-muted-foreground tracking-widest">{progress}</div>
-        ) : (
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             onClick={() => fileRef.current?.click()}
-            className="text-xs border border-border px-3 py-1.5 hover:border-primary hover:text-primary transition-colors"
+            disabled={busy}
+            className="flex items-center gap-2 bg-primary text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-sm hover:bg-primary/90 active:scale-[0.98] disabled:opacity-50 transition-all"
           >
-            ⬆ Import Triangulation Excel
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            {busy ? progress : "Import Triangulation Excel"}
           </button>
-        )}
-        {data && (
-          <div className="text-[9px] text-muted-foreground">
-            Last imported: {new Date(data.created_at).toLocaleDateString("en-IN")}
-            {data.period_covered && ` · ${data.period_covered}`}
+          <div className="h-8 w-px bg-border hidden sm:block" />
+          <button
+            onClick={async () => {
+              const buf = await buildTriangulationTemplate();
+              downloadBuffer("Rehbar_Triangulation_Template.xlsx", buf);
+            }}
+            disabled={busy}
+            className="flex items-center gap-1.5 text-sm text-muted-foreground border border-border rounded-lg px-4 py-2 hover:text-foreground hover:border-primary/50 hover:bg-surface transition-colors disabled:opacity-50"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Download Template
+          </button>
+          <button
+            onClick={async () => {
+              await navigator.clipboard.writeText(
+                "I have attached two files: financial source documents and an Excel template.\n\nExtract every figure from the source documents and fill in the Excel template — enter each number in the correct column and row. Compare GST turnover, banking credits, and ITR revenue across the periods shown. Flag any material differences between the sources. Return only the completed Excel file."
+              );
+              setPromptCopied(true);
+              setTimeout(() => setPromptCopied(false), 2000);
+            }}
+            className="flex items-center gap-1.5 text-sm text-primary/70 border border-primary/30 rounded-lg px-4 py-2 hover:text-primary hover:border-primary/60 hover:bg-primary/5 transition-colors"
+            title="Copy a ready-to-use Claude prompt — attach the template + documents in Claude chat and paste this"
+          >
+            {promptCopied ? "✓ Copied" : "⧉ Copy AI Prompt"}
+          </button>
+          <div className="flex flex-col leading-tight">
+            <span className="text-xs font-medium text-foreground/70">Triangulation Import</span>
+            <span className="text-[11px] text-muted-foreground">
+              GST × BSA × ITR cross-reference
+              {data && ` · Last: ${new Date(data.created_at).toLocaleDateString("en-IN")}${data.period_covered ? ` (${data.period_covered})` : ""}`}
+            </span>
           </div>
-        )}
+        </div>
       </div>
 
       {/* Data display */}

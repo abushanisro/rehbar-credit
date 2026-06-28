@@ -7,6 +7,7 @@ import { Panel } from "@/components/terminal/Panel";
 import { PRODUCTS, type ProductType } from "@/features/credit/domain";
 import { toast } from "sonner";
 import { parseAccumnExcel, mapToIndustry as _mapIndustry, mapToConstitution as _mapConstitution, type McaProfile, type Director } from "@/lib/mca-parser";
+import { buildMcaTemplate, downloadBuffer } from "@/lib/excel-templates";
 
 const INDUSTRIES = [
   "Agriculture & Food Processing",
@@ -164,6 +165,7 @@ export default function NewCase() {
   const mcaFileInputRef = useRef<HTMLInputElement>(null);
   const [mcaProfile, setMcaProfile] = useState<McaProfile | null>(null);
   const [mcaImporting, setMcaImporting] = useState(false);
+  const [mcaPromptCopied, setMcaPromptCopied] = useState(false);
 
   // ── PAN / CIN live lookup ─────────────────────────────────────────────────
   const [panCinType, setPanCinType] = useState<"PAN" | "CIN">("PAN");
@@ -848,7 +850,7 @@ export default function NewCase() {
               </div>
 
               {/* MCA / Corpository Excel import */}
-              <div className="col-span-2">
+              <div className="col-span-2 space-y-1.5">
                 <input
                   ref={mcaFileInputRef}
                   type="file"
@@ -859,14 +861,49 @@ export default function NewCase() {
                     if (f) handleMcaExcelImport(f);
                   }}
                 />
-                <button
-                  type="button"
-                  onClick={() => mcaFileInputRef.current?.click()}
-                  disabled={mcaImporting}
-                  className="w-full border border-border bg-surface-2 text-muted-foreground px-4 py-2 text-xs tracking-widest font-bold hover:border-primary hover:text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
-                >
-                  {mcaImporting ? "IMPORTING MCA EXCEL…" : "↑ IMPORT CORPOSITORY / MCA EXCEL  (auto-fills company + directors)"}
-                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const buf = await buildMcaTemplate();
+                      downloadBuffer("MCA_Template_Rehbar.xlsx", buf);
+                    }}
+                    className="border border-border bg-surface-2 text-muted-foreground px-4 py-2 text-xs tracking-widest font-bold hover:border-primary hover:text-primary transition-colors flex items-center justify-center gap-2"
+                  >
+                    ↓ DOWNLOAD MCA TEMPLATE
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => mcaFileInputRef.current?.click()}
+                    disabled={mcaImporting}
+                    className="border border-border bg-surface-2 text-muted-foreground px-4 py-2 text-xs tracking-widest font-bold hover:border-primary hover:text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                  >
+                    {mcaImporting ? "IMPORTING MCA EXCEL…" : "↑ IMPORT CORPOSITORY / MCA EXCEL"}
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await navigator.clipboard.writeText(
+                        "I have attached two files: a business document (PDF, screenshot, or text — could be MCA/ROC, Corpository, ITR, financial statement, or any company document) and an Excel template.\n\n" +
+                        "Fill in every field in the template that has matching data in the document. For any field not found in the document, leave the cell blank — do not mention it, do not explain, do not ask.\n\n" +
+                        "PROFILE SHEET: Fill Column B with the value for each field in Column A. For the three date fields in Column D, fill Column E. Dates in DD/MM/YYYY format.\n\n" +
+                        "DIRECTORS SHEET: Fill one row per director/partner/proprietor found. Name format: \"FULL NAME (DOB: DD/MM/YYYY)\". DIN/PAN format: \"00012345(AAHPS2338C)\" — if no DIN (e.g. proprietorship), write the PAN alone in that column.\n\n" +
+                        "Return only the completed Excel file. No commentary, no explanations, no questions."
+                      );
+                      setMcaPromptCopied(true);
+                      setTimeout(() => setMcaPromptCopied(false), 2000);
+                    }}
+                    className="flex items-center gap-1.5 text-xs text-primary/70 border border-primary/30 px-3 py-1.5 hover:text-primary hover:border-primary/60 hover:bg-primary/5 transition-colors"
+                    title="Copy this prompt → open Claude → attach the template + your MCA PDF/screenshot → paste"
+                  >
+                    {mcaPromptCopied ? "✓ Copied" : "⧉ Copy AI Prompt"}
+                  </button>
+                  <span className="text-[10px] text-muted-foreground">
+                    Download template → open Claude → attach template + MCA PDF → paste prompt → upload filled file
+                  </span>
+                </div>
                 {mcaProfile && (
                   <p className="text-[10px] text-success mt-1 tracking-wider">
                     ● MCA profile imported — {mcaProfile.directors.length} director{mcaProfile.directors.length !== 1 ? "s" : ""} · see Directors tab below

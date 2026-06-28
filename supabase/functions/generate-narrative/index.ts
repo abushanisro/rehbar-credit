@@ -8,13 +8,14 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
 type SupabaseClientT = ReturnType<typeof createClient>;
-import { callAI }       from "../_shared/ai-caller.ts";
+import { callAI, callAIText } from "../_shared/ai-caller.ts";
 import { getCorsHeaders, handleOptions } from "../_shared/cors.ts";
 
 const SECTION_IDS = [
   "executive_summary","client_promoter","investment_structure","rehbar_funding_history",
-  "historical_financial","projections","key_ratios","cash_flow","due_diligence",
-  "risk_assessment","visit_reference","product_specifics",
+  "historical_financial","historical_pl_obs","historical_bs_obs",
+  "projections","key_ratios","cash_flow","cash_flow_obs","due_diligence",
+  "risk_assessment","visit_reference","exec_recommendation","product_specifics",
 ];
 
 const SECTION_QUERIES: Record<string, string> = {
@@ -23,12 +24,16 @@ const SECTION_QUERIES: Record<string, string> = {
   investment_structure: "end use product lease EMI rental IRR collateral security deposit tenure finance structure",
   rehbar_funding_history: "prior funding history Rehbar facilities IRR repayment conduct existing loans credit history",
   historical_financial: "revenue turnover EBITDA PAT net worth total debt balance sheet P&L trends margin growth",
+  historical_pl_obs:    "revenue net sales gross profit EBITDA margin operating expenses PAT EAT cash profit net yield turnover growth",
+  historical_bs_obs:    "share capital reserves surplus directors loan inside funding bank loans borrowings trade payables creditors provisions GST TDS",
   projections:          "projected revenue EBITDA PAT growth assumptions DSCR coverage credibility order book",
   key_ratios:           "DSCR current ratio debt equity EBITDA margin ROE RONW working capital leverage R score",
   cash_flow:            "bank credits debits average balance bounce EMI outflows operating cash flow banking",
+  cash_flow_obs:        "operating activities investing activities financing activities CFO CFI CFF net cash position opening closing balance working capital cycle",
   due_diligence:        "GST compliance customer concentration circular transactions triangulation cross-check Accumn",
   risk_assessment:      "business risk financial risk transaction risk customer concentration leverage overdue",
   visit_reference:      "site visit reference check promoter banker vendor customer referral physical operations",
+  exec_recommendation:  "executive team recommendation credit approval rationale deal strengths weaknesses final assessment IC committee",
   product_specifics:    "operating lease finance lease PLS projection waiver SOP product rules NACH GST e-invoice",
 };
 
@@ -121,6 +126,10 @@ type AccumnReport = {
 type AccumnReportRow = { report_data: AccumnReport };
 type CibilReportRow  = { cibil_rank?: string|null; total_outstanding?: number|null; borrower_name?: string|null; report_date?: string|null; report_data?: Record<string,unknown>|null };
 type CompanyRow = {
+  id?: string|null;
+  name?: string|null;
+  year_established?: number|string|null;
+  legal_constitution?: string|null;
   mca_cin?: string|null; mca_pan?: string|null; mca_category?: string|null; mca_sub_category?: string|null;
   mca_type?: string|null; mca_authorized_capital?: string|null; mca_paid_up_capital?: string|null;
   mca_status?: string|null; mca_sector?: string|null; mca_products_services?: string|null;
@@ -176,6 +185,38 @@ function mdTable(headers: string[], rows: string[][]): string {
     `|${headers.map(() => "---|").join("")}`,
     ...rows.map(r => `| ${r.join(" | ")} |`),
   ].join("\n");
+}
+
+// Re-evaluates a ratio's pass/fail status from its value using canonical thresholds.
+// This bypasses stale `threshold_status` values in the DB that may have been written
+// before threshold migrations were applied or before higher_is_better was corrected.
+const INLINE_THRESHOLDS: Record<string, { g: number; a: number; hi: boolean }> = {
+  dscr:               { g: 1.5,  a: 1.25, hi: true  },
+  current_ratio:      { g: 1.5,  a: 1.0,  hi: true  },
+  quick_ratio:        { g: 1.0,  a: 0.7,  hi: true  },
+  cash_ratio:         { g: 0.5,  a: 0.2,  hi: true  },
+  interest_coverage:  { g: 3.0,  a: 1.5,  hi: true  },
+  debt_to_equity:     { g: 2.0,  a: 3.0,  hi: false },
+  lt_debt_to_equity:  { g: 2.0,  a: 3.0,  hi: false },
+  debt_to_assets:     { g: 0.60, a: 0.75, hi: false },
+  debt_to_ebitda:     { g: 4.0,  a: 6.0,  hi: false },
+  total_liab_to_networth: { g: 1.5, a: 3.0, hi: false },
+  gross_margin:       { g: 0.30, a: 0.15, hi: true  },
+  ebitda_margin:      { g: 0.15, a: 0.08, hi: true  },
+  net_profit_margin:  { g: 0.10, a: 0.05, hi: true  },
+  roa:                { g: 0.05, a: 0.02, hi: true  },
+  roe:                { g: 0.15, a: 0.08, hi: true  },
+  roce:               { g: 0.15, a: 0.08, hi: true  },
+  roic:               { g: 0.12, a: 0.06, hi: true  },
+  ronw:               { g: 0.12, a: 0.06, hi: true  },
+  r_score_composite:  { g: 2.0,  a: 1.0,  hi: true  },
+};
+function freshStatus(name: string, value: number | null): "green" | "amber" | "red" | "na" {
+  if (value === null || !Number.isFinite(value)) return "na";
+  const t = INLINE_THRESHOLDS[name];
+  if (!t) return "na";
+  if (t.hi) return value >= t.g ? "green" : value >= t.a ? "amber" : "red";
+  return value <= t.g ? "green" : value <= t.a ? "amber" : "red";
 }
 
 function buildTables(financials: FinRow[], ratios: RatioRow[], provisional?: ProvPeriod[]) {
@@ -283,8 +324,11 @@ function buildTables(financials: FinRow[], ratios: RatioRow[], provisional?: Pro
       });
       const first = ratios.find(x => x.ratio_name === name);
       const bm = first?.benchmark != null ? fmt(name, first.benchmark) : "—";
-      const status = ratios.filter(x => x.ratio_name === name)
-        .sort((a,b) => b.fiscal_year - a.fiscal_year)[0]?.threshold_status ?? "na";
+      const latestRatio = ratios.filter(x => x.ratio_name === name)
+        .sort((a,b) => b.fiscal_year - a.fiscal_year)[0];
+      const latestVal = latestRatio?.ratio_value != null ? Number(latestRatio.ratio_value) : null;
+      const computed = freshStatus(name, latestVal);
+      const status = computed !== "na" ? computed : (latestRatio?.threshold_status ?? "na");
       return [DISP[name]||name, ...yCols, bm, SL[status]||"—"];
     });
     sectionVII = `**Key Financial Ratios**\n${mdTable(["Ratio",...ratYears.map(y=>`FY${y}`),"Benchmark","Status"], rows)}`;
@@ -625,30 +669,427 @@ function buildProvisionalSection(periods: ProvPeriod[] | null | undefined): stri
 function buildCompanyContext(company: CompanyRow | null, directors: DirectorRow[] | null, cc: Record<string, unknown>): string {
   if (!company && !directors?.length) return "";
   const lines: string[] = ["**MCA / Corpository Company Profile**"];
+  if (company?.name)                  lines.push(`- Company Name: ${company.name}`);
+  if (company?.legal_constitution || cc["legal_constitution"])
+    lines.push(`- Legal Constitution: ${company?.legal_constitution ?? cc["legal_constitution"]}`);
+  // Year of establishment — company table first, then cc field
+  const yearEst = company?.year_established ?? cc["year_established"];
+  if (yearEst)                        lines.push(`- Year of Establishment: ${yearEst}`);
   if (company?.mca_cin)               lines.push(`- CIN: ${company.mca_cin}`);
-  if (company?.mca_pan)               lines.push(`- PAN: ${company.mca_pan}`);
+  if (company?.mca_pan || cc["pan"])  lines.push(`- PAN: ${company.mca_pan ?? cc["pan"]}`);
   if (company?.mca_status)            lines.push(`- Status: ${company.mca_status}`);
   if (company?.mca_category)          lines.push(`- Category: ${company.mca_category}`);
   if (company?.mca_authorized_capital) lines.push(`- Authorised Capital: ₹${Number(company.mca_authorized_capital).toLocaleString("en-IN")}`);
   if (company?.mca_paid_up_capital)   lines.push(`- Paid-Up Capital: ₹${Number(company.mca_paid_up_capital).toLocaleString("en-IN")}`);
-  if (company?.mca_sector)            lines.push(`- Sector: ${company.mca_sector}`);
+  const sector = company?.mca_sector ?? company?.industry ?? cc["industry"];
+  if (sector)                         lines.push(`- Sector / Industry: ${sector}`);
   if (company?.mca_products_services) lines.push(`- Products / Services: ${company.mca_products_services}`);
   if (company?.mca_date_of_incorp)    lines.push(`- Date of Incorporation: ${company.mca_date_of_incorp}`);
   if (company?.mca_date_last_bs)      lines.push(`- Last Balance Sheet Filed: ${company.mca_date_last_bs}`);
   if (company?.mca_date_last_agm)     lines.push(`- Last AGM: ${company.mca_date_last_agm}`);
-  if (company?.registered_address || company?.mca_email)
-    lines.push(`- Contact: ${[company?.mca_email, company?.registered_address].filter(Boolean).join(" | ")}`);
-  if (company?.mca_about) lines.push(`\n**Company Overview:**\n${company.mca_about.slice(0, 1500)}`);
-  if (cc["group_summary"]) lines.push(`\n**Group Summary:**\n${String(cc["group_summary"]).slice(0, 600)}`);
-  if (cc["promoter_details"]) lines.push(`\n**Promoter Details:**\n${String(cc["promoter_details"]).slice(0, 500)}`);
+  if (company?.registered_address)    lines.push(`- Registered Address: ${company.registered_address}`);
+  if (company?.gstin || cc["gstin"])  lines.push(`- GSTIN: ${company?.gstin ?? cc["gstin"]}`);
+  if (company?.mca_email)             lines.push(`- Email: ${company.mca_email}`);
+  if (company?.website || cc["website"]) lines.push(`- Website: ${company?.website ?? cc["website"]}`);
+  if (company?.mca_about)             lines.push(`\n**Company Overview:**\n${company.mca_about.slice(0, 1500)}`);
+  const promoterDetails = company?.promoter_details ?? cc["promoter_details"];
+  if (promoterDetails)                lines.push(`\n**Promoter Details:**\n${String(promoterDetails).slice(0, 600)}`);
+  if (cc["group_summary"])            lines.push(`\n**Group Summary:**\n${String(cc["group_summary"]).slice(0, 600)}`);
   if (directors?.length) {
     lines.push("\n**Board of Directors / Partners:**");
     lines.push("| Name | Designation | DIN | Shareholding % | Appointed |");
     lines.push("|---|---|---|---|---|");
-    for (const d of directors.slice(0, 8))
+    for (const d of directors.slice(0, 10))
       lines.push(`| ${d.name} | ${d.designation ?? "—"} | ${d.din ?? "—"} | ${d.shareholding ?? "—"} | ${d.appointed_current ?? "—"} |`);
   }
   return lines.join("\n");
+}
+
+// ── Section-specific row schemas (defines what labeled rows each section generates) ───
+const SECTION_SCHEMAS: Record<string, { rowLabels: string[] }> = {
+  historical_financial: {
+    rowLabels: [
+      "Revenue Trend",
+      "Gross Profit & Margins",
+      "EBITDA & Operating Performance",
+      "PAT & Net Profitability",
+      "Balance Sheet Snapshot",
+      "Leverage & Debt Position",
+      "Cash & Liquidity",
+      "Analyst Observation",
+    ],
+  },
+  executive_summary: {
+    rowLabels: [
+      "Company Overview",
+      "History & Background",
+      "Core Business Activity",
+      "Operational Scale & Presence",
+      "Revenue & Financial Snapshot",
+      "Strategic Rationale for Funding",
+    ],
+  },
+  client_promoter: {
+    rowLabels: [
+      "Company",
+      "Registered Office",
+      "Nature of Business",
+      "Year of Establishment",
+      "Group Companies / History",
+      "Promoters & Directors",
+      "Ownership",
+    ],
+  },
+  investment_structure: {
+    rowLabels: [
+      "Product & Facility Amount",
+      "Purpose / End Use",
+      "Tenure",
+      "IRR / Rate",
+      "Collateral & Security",
+      "Repayment Structure",
+    ],
+  },
+  rehbar_funding_history: {
+    rowLabels: [
+      "Prior Exposure",
+      "Facility Details (if any)",
+      "Repayment Track Record",
+      "Conduct of Account",
+      "Analyst Observation",
+    ],
+  },
+  historical_pl_obs: {
+    rowLabels: [
+      "Revenue & Sales Growth",
+      "Gross Profit & Margin",
+      "EBITDA & Operating Yield",
+      "Administrative Cost Efficiency",
+      "Finance & Interest Costs",
+      "Net Profit (PAT / EAT) & Cash Profit",
+      "Analyst Observation",
+    ],
+  },
+  historical_bs_obs: {
+    rowLabels: [
+      "Share Capital & Promoter Equity",
+      "Reserves & Surplus",
+      "Director / Promoter Funding (Inside)",
+      "Long-Term Bank Borrowings",
+      "Short-Term Borrowings & Working Capital",
+      "Trade Payables & Creditor Terms",
+      "Provisions & Other Current Liabilities",
+      "Balance Sheet Strength Assessment",
+    ],
+  },
+  projections: {
+    rowLabels: [
+      "Revenue Projection",
+      "EBITDA Projection",
+      "PAT Projection",
+      "DSCR Estimate",
+      "Key Assumptions",
+      "Credibility Assessment",
+    ],
+  },
+  cash_flow: {
+    rowLabels: [
+      "Banking Overview",
+      "Average Monthly Balance",
+      "Monthly Credits (Avg)",
+      "Monthly Debits (Avg)",
+      "Bounce / Stress Events",
+      "Cash Flow Adequacy for Repayment",
+    ],
+  },
+  cash_flow_obs: {
+    rowLabels: [
+      "Operating Activities (CFO)",
+      "Investing Activities (CFI)",
+      "Financing Activities (CFF)",
+      "Net Cash Position & Liquidity",
+      "Opening & Closing Cash Balances",
+      "Working Capital Cycle",
+      "Cash Flow Adequacy",
+      "Analyst Observation",
+    ],
+  },
+  due_diligence: {
+    rowLabels: [
+      "GST Compliance",
+      "Customer Concentration",
+      "Supplier Concentration",
+      "Circular / Related Party Transactions",
+      "Triangulation Findings",
+      "Overall Due Diligence Rating",
+    ],
+  },
+  visit_reference: {
+    rowLabels: [
+      "Site Visit Status",
+      "Premises Observation",
+      "Banker Reference",
+      "Customer / Vendor Reference",
+      "Promoter Background Check",
+      "Reference Summary",
+    ],
+  },
+  exec_recommendation: {
+    rowLabels: [
+      "Recommendation",
+      "Deal Strengths",
+      "Key Concerns",
+      "Mitigating Factors",
+      "Suggested Conditions",
+    ],
+  },
+  product_specifics: {
+    rowLabels: [
+      "Product Type & SOP Applicability",
+      "Policy Exceptions Required",
+      "GST / E-Invoice Requirements",
+      "NACH / Repayment Mode",
+      "Special Terms or Waivers",
+    ],
+  },
+  triangulation_analysis: {
+    rowLabels: [
+      "Profile Verification",
+      "Revenue Cross-Check (GST vs BSA vs ITR)",
+      "Customer Concentration",
+      "Supplier Concentration",
+      "Circular / Related Party Flags",
+      "Data Quality Assessment",
+    ],
+  },
+  key_ratios: {
+    rowLabels: [
+      "Coverage – DSCR & ICR",
+      "Liquidity – Current & Quick Ratio",
+      "Solvency – Leverage & D/E",
+      "Profitability – Margins & PAT",
+      "Efficiency – Working Capital & Turnover",
+      "Return Ratios – ROE / RONW",
+      "R' Score Assessment",
+      "Analyst Observation",
+    ],
+  },
+  default: {
+    rowLabels: [
+      "Overview",
+      "Key Details",
+      "Financial Aspects",
+      "Risks & Mitigants",
+      "Analyst Observation",
+    ],
+  },
+};
+
+interface SectionContextOpts {
+  company?: CompanyRow | null;
+  directors?: DirectorRow[] | null;
+  bankRows?: BankRow[];
+  accumnReport?: AccumnReport | null;
+  triRow?: TriangulationReportRow | null;
+}
+
+function buildSectionContext(
+  cc: Record<string, unknown> | null,
+  financials: FinRow[],
+  ratios: RatioRow[],
+  sectionId: string,
+  ragContext: string,
+  opts?: SectionContextOpts,
+): string {
+  const parts: string[] = [];
+  const { company, directors, bankRows = [], accumnReport, triRow } = opts ?? {};
+
+  // RAG context
+  if (ragContext) parts.push(`DOCUMENT CONTEXT:\n${ragContext}`);
+
+  // Case metadata — full set of fields
+  if (cc) {
+    const caseLines = [
+      `Client: ${cc.client_name ?? "?"}`,
+      `Case Code: ${cc.case_code ?? "?"}`,
+      `Industry: ${cc.industry ?? "?"}`,
+      `Legal Constitution: ${cc.legal_constitution ?? "?"}`,
+    ];
+    if (cc.year_established) caseLines.push(`Year Established: ${cc.year_established}`);
+    if (cc.registered_address) caseLines.push(`Registered Address: ${cc.registered_address}`);
+    if (cc.gstin) caseLines.push(`GSTIN: ${cc.gstin}`);
+    if (cc.pan) caseLines.push(`PAN: ${cc.pan}`);
+    caseLines.push(
+      `Product: ${cc.product_type ?? "?"}`,
+      `Amount: INR ${cc.deal_amount ?? "?"} Lakhs`,
+      `Tenure: ${cc.tenure_months ?? "?"} months`,
+      `IRR: ${cc.expected_irr ?? "?"}%`,
+      `End Use: ${cc.end_use ?? "?"}`,
+      `Collateral: ${cc.collateral_summary ?? "?"}`,
+    );
+    if (cc.promoter_details) caseLines.push(`Promoters: ${cc.promoter_details}`);
+    if (cc.group_summary) caseLines.push(`Group Summary: ${cc.group_summary}`);
+    if (cc.analyst_notes) caseLines.push(`Analyst Notes: ${cc.analyst_notes}`);
+    parts.push(`CASE DATA:\n${caseLines.join("\n")}`);
+  }
+
+  // Company / directors data for client-facing sections
+  if (["client_promoter", "executive_summary"].includes(sectionId) && (company || directors?.length)) {
+    parts.push(buildCompanyContext(company ?? null, directors ?? null, cc ?? {}));
+  }
+
+  // Financial data for relevant sections
+  if (["historical_financial", "historical_pl_obs", "historical_bs_obs", "executive_summary", "projections", "key_ratios", "cash_flow", "cash_flow_obs"].includes(sectionId)) {
+    const fyMap = new Map<number, LineItem[]>();
+    for (const row of financials.filter(r => r.statement_type !== "projections")) {
+      const items = (row.line_items as LineItem[]) ?? [];
+      const existing = fyMap.get(row.fiscal_year) ?? [];
+      const seen = new Set(existing.map((i: LineItem) => i.label));
+      fyMap.set(row.fiscal_year, [...existing, ...items.filter((i: LineItem) => !seen.has(i.label))]);
+    }
+    const histYears = [...fyMap.keys()].sort();
+    const recentYears = histYears.slice(-3);
+
+    if (recentYears.length > 0) {
+      if (sectionId === "historical_pl_obs") {
+        // Full P&L table for P&L observations
+        const plLabels = ["Turnover","Cost of Goods Sold","Gross Profit","Operating Expenses","EBITDA","Depreciation","EBIT","Interest Expense","Profit Before Tax","Tax","PAT"];
+        const plRows = plLabels.map(lb => `${lb}: ${recentYears.map(y => lv(fyMap.get(y)!, lb)).join(" / ")}`);
+        parts.push(`FULL P&L (${recentYears.map(y=>`FY${y}`).join(" / ")}, ₹ Lakhs):\n${plRows.join("\n")}`);
+      } else if (sectionId === "historical_bs_obs") {
+        // Full Balance Sheet for BS observations
+        const bsLabels = ["Share Capital","Reserves & Surplus","Net Worth","Long Term Borrowings","Short Term Borrowings","Total Debt","Trade Payables","Current Liabilities","Other Current Liabilities","Fixed Assets (Net)","Inventory","Trade Receivables","Cash & Bank","Current Assets","Total Assets"];
+        const bsRows = bsLabels.map(lb => `${lb}: ${recentYears.map(y => lv(fyMap.get(y)!, lb)).join(" / ")}`);
+        parts.push(`FULL BALANCE SHEET (${recentYears.map(y=>`FY${y}`).join(" / ")}, ₹ Lakhs):\n${bsRows.join("\n")}`);
+      } else if (sectionId === "cash_flow_obs") {
+        // Cash Flow Statement data — use actual CF rows if uploaded, else derive from BS+P&L
+        const cfRows = financials.filter(r => r.statement_type === "cash_flow");
+        if (cfRows.length > 0) {
+          // Actual CF statement uploaded — pass all labels
+          const cfYears = [...new Set(cfRows.map(r => r.fiscal_year))].sort().slice(-3);
+          const cfFyMap = new Map<number, LineItem[]>();
+          for (const row of cfRows) {
+            const items = (row.line_items as LineItem[]) ?? [];
+            cfFyMap.set(row.fiscal_year, items);
+          }
+          const cfSeen = new Set<string>();
+          const cfLabels: string[] = [];
+          for (const row of cfRows) {
+            for (const item of (row.line_items as LineItem[]) ?? []) {
+              if (item.label && !cfSeen.has(item.label)) { cfSeen.add(item.label); cfLabels.push(item.label); }
+            }
+          }
+          const cfTableRows = cfLabels
+            .filter(lb => cfYears.some(y => lv(cfFyMap.get(y) ?? [], lb) !== "—"))
+            .map(lb => `${lb}: ${cfYears.map(y => lv(cfFyMap.get(y) ?? [], lb)).join(" / ")}`);
+          parts.push(`CASH FLOW STATEMENT (${cfYears.map(y=>`FY${y}`).join(" / ")}, ₹ Lakhs):\n${cfTableRows.join("\n")}`);
+        } else {
+          // Derive CFO/CFI/CFF from BS + P&L
+          const driveYears = recentYears.slice(1); // delta needs prior year
+          if (driveYears.length > 0) {
+            const dvRows: string[] = [`DERIVED CASH FLOW (${driveYears.map(y=>`FY${y}`).join(" / ")}, ₹ Lakhs — Indirect Method):`];
+            const getLv = (fy: number, lb: string) => { const v = lv(fyMap.get(fy) ?? [], lb); return v !== "—" ? Number(v.replace(/,/g, "")) : null; };
+            const delta = (lb: string, fy: number) => {
+              const curr = getLv(fy, lb);
+              const prev = getLv(recentYears[recentYears.indexOf(fy) - 1], lb);
+              return curr !== null && prev !== null ? curr - prev : null;
+            };
+            const fmt2 = (v: number | null) => v !== null ? v.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : "—";
+            for (const fy of driveYears) {
+              const pat   = getLv(fy, "PAT");
+              const depn  = getLv(fy, "Depreciation");
+              const dAR   = delta("Trade Receivables", fy);
+              const dInv  = delta("Inventory", fy);
+              const dAP   = delta("Trade Payables", fy);
+              const dOCL  = delta("Other Current Liabilities", fy);
+              const cfoItems = [pat, depn, dAR !== null ? -dAR : null, dInv !== null ? -dInv : null, dAP, dOCL];
+              const cfo = cfoItems.every(p => p === null) ? null : cfoItems.reduce<number>((s, v) => s + (v ?? 0), 0);
+              const dFA  = delta("Fixed Assets (Net)", fy);
+              const cfi  = dFA !== null && depn !== null ? -((dFA) + depn) : null;
+              const dLT  = delta("Long Term Borrowings", fy);
+              const dST  = delta("Short Term Borrowings", fy);
+              const dNW  = delta("Net Worth", fy);
+              const eq   = dNW !== null && pat !== null ? dNW - pat : null;
+              const cffItems = [dLT, dST, eq];
+              const cff = cffItems.every(p => p === null) ? null : cffItems.reduce<number>((s, v) => s + (v ?? 0), 0);
+              const net  = (cfo !== null || cfi !== null || cff !== null) ? (cfo ?? 0) + (cfi ?? 0) + (cff ?? 0) : null;
+              dvRows.push(`FY${fy}: CFO=${fmt2(cfo)} | CFI=${fmt2(cfi)} | CFF=${fmt2(cff)} | Net Change=${fmt2(net)}`);
+              dvRows.push(`  PAT=${fmt2(pat)} | Depreciation=${fmt2(depn)} | ΔReceivables=${fmt2(dAR !== null ? -dAR : null)} | ΔInventory=${fmt2(dInv !== null ? -dInv : null)} | ΔPayables=${fmt2(dAP)} | ΔBorrowings(LT)=${fmt2(dLT)} | ΔBorrowings(ST)=${fmt2(dST)}`);
+            }
+            parts.push(dvRows.join("\n"));
+          }
+        }
+        // Also add key BS items for opening/closing cash
+        const cashLabels = ["Cash & Bank", "Cash & Cash Equivalents"];
+        const cashRow = cashLabels.flatMap(lb => {
+          const vals = recentYears.map(y => `FY${y}: ${lv(fyMap.get(y) ?? [], lb)}`).filter(v => !v.endsWith("—"));
+          return vals.length ? [`${lb}: ${recentYears.map(y => lv(fyMap.get(y) ?? [], lb)).join(" / ")}`] : [];
+        });
+        if (cashRow.length > 0) parts.push(`CASH BALANCES:\n${cashRow.join("\n")}`);
+      } else {
+        // Full financials for historical_financial (V-d); key summary for others
+        const isHistFin = sectionId === "historical_financial";
+        const summaryLabels = isHistFin
+          ? ["Turnover","Cost of Goods Sold","Gross Profit","EBITDA","Interest Expense","PAT","Net Worth","Long Term Borrowings","Short Term Borrowings","Total Debt","Cash & Bank","Total Assets"]
+          : ["Turnover","Gross Profit","EBITDA","PAT","Net Worth","Total Debt"];
+        const keyRows = summaryLabels
+          .map(lb => `${lb}: ${recentYears.map(y => lv(fyMap.get(y)!, lb)).join(" / ")}`)
+          .filter(r => !r.endsWith("— / — / —") && !r.endsWith("— / —") && !r.endsWith("—"));
+        parts.push(`FINANCIAL SUMMARY (${recentYears.map(y=>`FY${y}`).join(" / ")}, ₹ Lakhs):\n${keyRows.join("\n")}`);
+      }
+    }
+
+    if (ratios.length > 0 && !["historical_pl_obs","historical_bs_obs","cash_flow_obs"].includes(sectionId)) {
+      // Only use years that have actual historical financial data — exclude projected-only years
+      const histFYSet = new Set(financials.filter(r => r.statement_type !== "projections").map(r => r.fiscal_year));
+      const ratYears = [...new Set(
+        ratios.filter(r => histFYSet.has(r.fiscal_year)).map(r => r.fiscal_year)
+      )].sort().slice(-3);
+      const keyRatios = ["dscr","current_ratio","debt_to_equity","ebitda_margin","net_profit_margin"];
+      const ratSummary = keyRatios.map(name => {
+        // Build per-year values across all recent years (skip zero — stale bad-compute artifact)
+        const perYear = ratYears.map(fy => {
+          const candidates = ratios
+            .filter(r => r.ratio_name === name && r.fiscal_year === fy)
+            .sort((a, b) => (b.ratio_value != null ? 1 : 0) - (a.ratio_value != null ? 1 : 0));
+          // Prefer a non-zero value for this FY
+          const row = candidates.find(r => r.ratio_value != null && Number(r.ratio_value) !== 0) ?? candidates[0];
+          if (!row || row.ratio_value == null) return `FY${fy}: —`;
+          const val = Number(row.ratio_value);
+          const PCT = new Set(["ebitda_margin","net_profit_margin","gross_margin","roa","roe","roce"]);
+          const fmtV = PCT.has(name) ? `${(val*100).toFixed(1)}%` : `${val.toFixed(2)}x`;
+          return `FY${fy}: ${fmtV}`;
+        });
+        // Use latest non-zero row for status
+        const latestRow = ratios
+          .filter(r => r.ratio_name === name && ratYears.includes(r.fiscal_year) && r.ratio_value != null && Number(r.ratio_value) !== 0)
+          .sort((a, b) => b.fiscal_year - a.fiscal_year)[0];
+        if (!latestRow && perYear.every(s => s.endsWith("—"))) return null;
+        const latestVal = latestRow?.ratio_value != null ? Number(latestRow.ratio_value) : null;
+        const computed = freshStatus(name, latestVal);
+        const statusLabel = computed !== "na" ? computed : (latestRow?.threshold_status ?? "?");
+        return `${name} [${perYear.join(" | ")}] — Status: ${statusLabel}`;
+      }).filter(Boolean);
+      if (ratSummary.length > 0) parts.push(`KEY RATIOS (recent years):\n${ratSummary.join("\n")}`);
+    }
+  }
+
+  // Bank statement data for cash flow sections
+  if (["cash_flow", "cash_flow_obs"].includes(sectionId) && bankRows.length > 0) {
+    parts.push(buildBankSection(bankRows).slice(0, 1200));
+  }
+
+  // Accumn data for due diligence
+  if (sectionId === "due_diligence" && accumnReport) {
+    parts.push(buildAccumnSection(accumnReport).slice(0, 1200));
+  }
+
+  // Triangulation data for due diligence and triangulation_analysis
+  if (["due_diligence", "triangulation_analysis"].includes(sectionId) && triRow) {
+    parts.push(buildTriangulationSection(triRow).slice(0, 1500));
+  }
+
+  return parts.join("\n\n");
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -664,11 +1105,12 @@ Deno.serve(async (req) => {
     });
 
     const body = await req.json();
-    const { case_id, analyst_notes_for_ic, phase, prior_sections } = body as {
+    const { case_id, analyst_notes_for_ic, phase, prior_sections, section_ids } = body as {
       case_id: string;
       analyst_notes_for_ic?: string;
       phase?: 1 | 2;
       prior_sections?: Record<string, { markdown: string }>;
+      section_ids?: string[];
     };
     if (!case_id) return new Response(JSON.stringify({ error: "case_id required" }), {
       status: 400, headers: { ...cors, "Content-Type": "application/json" },
@@ -685,6 +1127,170 @@ Deno.serve(async (req) => {
     if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
+
+    // Per-section generation for IC Deck tab
+    if (section_ids && Array.isArray(section_ids) && section_ids.length > 0) {
+      // Fetch case data plus all supplementary sources for rich context
+      const [caseRes, finRes, ratioRes, bankRes, accumnRes, triRes] = await Promise.all([
+        supabase.from("credit_cases").select("*").eq("id", case_id).single(),
+        supabase.from("extracted_financials").select("*").eq("case_id", case_id),
+        supabase.from("financial_ratios").select("*").eq("case_id", case_id),
+        supabase.from("bank_statement_data").select("*").eq("case_id", case_id).order("month"),
+        supabase.from("gst_accumn_reports").select("report_data").eq("case_id", case_id).limit(1),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (supabase as any).from("triangulation_data").select("report_data").eq("case_id", case_id).limit(1),
+      ]);
+      const cc = caseRes.data as Record<string, unknown> | null;
+      const financials = (finRes.data ?? []) as FinRow[];
+      const ratios = (ratioRes.data ?? []) as RatioRow[];
+      const bankRows = (bankRes.data ?? []) as BankRow[];
+      const accumnReport = ((accumnRes.data ?? []) as AccumnReportRow[])[0]?.report_data ?? null;
+      const triRow = ((triRes.data ?? []) as TriangulationReportRow[])[0] ?? null;
+
+      // Fetch company profile and directors — by company_id if linked, otherwise by name
+      let company: CompanyRow | null = null;
+      let directors: DirectorRow[] | null = null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const db = supabase as any;
+      if (cc?.company_id) {
+        const [companyRes, directorsRes] = await Promise.all([
+          db.from("companies").select("*").eq("id", cc.company_id).single(),
+          db.from("company_directors").select("name,designation,din,shareholding,appointed_current,remarks").eq("company_id", cc.company_id),
+        ]);
+        company  = (companyRes.data  ?? null) as CompanyRow | null;
+        directors = (directorsRes.data ?? null) as DirectorRow[] | null;
+      } else if (cc?.client_name) {
+        // Fallback: find company by name (case-insensitive)
+        const nameRes = await db.from("companies").select("*").ilike("name", `%${cc.client_name}%`).limit(1);
+        if (nameRes.data?.length) {
+          company = nameRes.data[0] as CompanyRow;
+          const dirRes = await db.from("company_directors").select("name,designation,din,shareholding,appointed_current,remarks").eq("company_id", (company as CompanyRow & { id: string }).id);
+          directors = (dirRes.data ?? null) as DirectorRow[] | null;
+        }
+      }
+
+      const section_templates: Record<string, unknown> = {};
+
+      for (const sectionId of section_ids) {
+        const ragContext = await getRagContext(supabase, case_id, sectionId, Deno.env.get("GEMINI_API_KEY") ?? "");
+        const sectionDataContext = buildSectionContext(cc, financials, ratios, sectionId, ragContext, {
+          company, directors, bankRows, accumnReport, triRow,
+        });
+
+        // ── Special handler: risk_assessment → rich categorised format ──────────
+        if (sectionId === "risk_assessment") {
+          const riskPrompt = `You are a Senior Credit Analyst at an Islamic NBFC. Generate a comprehensive risk assessment for the Investment Committee note.
+
+Case: ${cc?.client_name ?? "Unknown"} | Industry: ${cc?.industry ?? "?"} | Amount: INR ${cc?.deal_amount ?? "?"} Lakhs | Product: ${cc?.product_type ?? "?"}
+
+${sectionDataContext}
+
+Generate risks grouped by category. Return ONLY valid JSON (no markdown, no explanation):
+{
+  "categories": [
+    {
+      "category": "Business/Industry Risk",
+      "intro": "One sentence describing this risk category and why it matters for this company.",
+      "items": [
+        {
+          "title": "Short descriptive risk name (5-8 words)",
+          "risk": "Specific risk description (2-3 sentences, include actual numbers where known).",
+          "mitigation": "Concrete mitigation measures the company has or Rehbar can enforce (2-3 sentences).",
+          "severity": "high"
+        }
+      ]
+    },
+    {
+      "category": "Financial Risk",
+      "intro": "One sentence describing financial risk exposure.",
+      "items": [...]
+    }
+  ]
+}
+
+Categories to include: Business/Industry Risk (3-5 items), Financial Risk (3-5 items). Optionally add: Transaction Risk, Operational Risk if relevant.
+Severity must be exactly "high", "medium", or "low".
+Every risk and mitigation must be specific to this company — no generic statements.`;
+
+          try {
+            const text = await callAIText({
+              systemPrompt: "You are a credit analyst writing an Investment Committee risk register. Return only valid JSON.",
+              userText: riskPrompt,
+              maxTokens: 2000,
+            });
+            const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+            const parsed = JSON.parse(cleaned);
+            section_templates[sectionId] = {
+              categories: parsed.categories ?? [],
+              generated_at: new Date().toISOString(),
+            };
+          } catch {
+            section_templates[sectionId] = {
+              categories: [],
+              generated_at: new Date().toISOString(),
+            };
+          }
+          continue;
+        }
+
+        // ── Standard handler: structured rows + flags (PPTX table layout) ──────
+        const sectionSchema = SECTION_SCHEMAS[sectionId] ?? SECTION_SCHEMAS["default"];
+        const prompt = `You are a Senior Credit Analyst at Rehbar, an Islamic NBFC. Generate structured IC Deck content for the "${sectionId}" section.
+
+Case: ${cc?.client_name ?? "Unknown"} | Amount: INR ${cc?.deal_amount ?? "?"} Lakhs | Product: ${cc?.product_type ?? "?"} | Industry: ${cc?.industry ?? "?"}
+
+${sectionDataContext}
+
+INSTRUCTIONS:
+- Use ONLY the data provided above. Do NOT say "not provided" if the information exists anywhere in the data above.
+${["client_promoter","executive_summary"].includes(sectionId) ? `- For company identity fields (registered address, CIN, date of incorporation): look in the MCA/Corpository section and CASE DATA above.
+- For year established: use "Year of Establishment" or "Date of Incorporation" or "year_established" from CASE DATA/MCA.
+- For promoters & directors: use the Board of Directors table (names, DIN, shareholding). Also check cc.promoter_details.` : `- Focus on the financial and operational data in the context. Do NOT comment on missing company registry fields (address, CIN, directors) — those belong in the Client Profile section, not here.`}
+- For financial figures: use the FINANCIAL SUMMARY numbers exactly as given. State actual values (e.g. "Turnover grew from ₹X to ₹Y") — never say 0.00 or flag a ratio as failing unless the ratio value in the context explicitly shows that.
+- Flags must only highlight genuine data anomalies visible in the numbers — NOT missing company identity fields, NOT missing future projection data.
+- If a specific field truly has NO data anywhere in the context above, write ONLY: "Not on file — analyst to confirm" (one short phrase, no paragraphs).
+- NEVER write multi-sentence placeholder explanations about what data is missing. One short phrase maximum per gap.
+
+Generate the following labeled rows (key-value table format matching Rehbar IC Deck slides). Be specific — include actual names, numbers, dates, addresses from the data above.
+
+${sectionSchema.rowLabels.map((l, i) => `Row ${i+1} label: "${l}"`).join("\n")}
+
+Return ONLY valid JSON (no markdown, no explanation):
+{
+  "rows": [
+    ${sectionSchema.rowLabels.map(l => `{ "label": "${l}", "text": "Specific content using actual data from above. 2-3 sentences." }`).join(",\n    ")}
+  ],
+  "flags": ["Key risk or concern with specific numbers. Empty array if no concerns."]
+}`;
+
+        try {
+          const text = await callAIText({
+            systemPrompt: "You are a credit analyst writing Investment Committee deck sections. Return only valid JSON. Extract and use actual data from the context — company name, address, CIN, year established, directors, financial figures. If a field is genuinely absent, write 'Not on file — analyst to confirm' (not a paragraph). Never invent placeholder guidance paragraphs.",
+            userText: prompt,
+            maxTokens: 1800,
+          });
+
+          const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+          const parsed = JSON.parse(cleaned);
+          section_templates[sectionId] = {
+            rows: parsed.rows ?? [],
+            flags: parsed.flags ?? [],
+            generated_at: new Date().toISOString(),
+          };
+        } catch {
+          section_templates[sectionId] = {
+            rows: [],
+            flags: [],
+            generated_at: new Date().toISOString(),
+          };
+        }
+      }
+
+      return new Response(
+        JSON.stringify({ section_templates }),
+        { headers: { ...cors, "Content-Type": "application/json" } }
+      );
+    }
 
     const { data: cc } = await supabase.from("credit_cases").select("*").eq("id", case_id).single();
     if (!cc) return new Response(JSON.stringify({ error: "Case not found" }), {
@@ -814,7 +1420,7 @@ Deno.serve(async (req) => {
     // Each phase targets ~2,500 tokens → ~40s at 60 tok/s → safe inside 115s.
 
     const PHASE1_IDS = ["executive_summary","client_promoter","investment_structure","rehbar_funding_history","historical_financial","projections"];
-    const PHASE2_IDS = ["key_ratios","cash_flow","due_diligence","risk_assessment","visit_reference","product_specifics","triangulation_analysis"];
+    const PHASE2_IDS = ["key_ratios","cash_flow","due_diligence","risk_assessment","visit_reference","exec_recommendation","product_specifics","triangulation_analysis"];
 
     const activeIds = (phase === 2) ? PHASE2_IDS : PHASE1_IDS;
 
@@ -829,7 +1435,8 @@ Deno.serve(async (req) => {
       cash_flow:             "Avg monthly credits vs proposed rental (coverage ratio), ABB adequacy, bounce signal, visible EMI lenders. Flag: >50% credit decline = REVENUE CONTRACTION; <40% banking vs GST = ROUTING RISK.",
       due_diligence:         "GST compliance: turnover vs P&L variance, late filings, ITC utilisation. Accumn: top customers/suppliers (name/%), circular transactions. Triangulation cross-check if available.",
       risk_assessment:       "Risk table: | Category | Risk | Observation | Mitigant | Severity |. Min 6 risks: business, financial, transaction. Severity: HIGH/MEDIUM/LOW.",
-      visit_reference:       "Use the VISIT REPORT DATA block. Summarise: (1) site visit status + key observations; (2) reference check outcomes per type (Done/Pending/N/A) + any specific findings noted; (3) exec recommendation if provided. Flag any Pending checks as pre-disbursement conditions. Use 'Not provided — analyst to confirm' for missing fields.",
+      visit_reference:       "Use the VISIT REPORT DATA block. Summarise: (1) site visit status + key observations; (2) reference check outcomes per type (Done/Pending/N/A) + any specific findings noted. Flag any Pending checks as pre-disbursement conditions. Use 'Not provided — analyst to confirm' for missing fields.",
+      exec_recommendation:   "Executive Team's holistic recommendation for this deal. Summarise: company overview in 1 sentence, 3–4 key deal strengths (financial metrics, collateral quality, promoter credibility), any conditions or caveats, and the team's overall stance (supportive/conditional). Do NOT use the words 'Approve', 'Decline', or 'Defer'. Anchor every point in actual data from the case.",
       product_specifics:        "SOP rules for this product type — confirmed or excepted. Projection waiver with SOP §XII basis. Policy exceptions with justification.",
       triangulation_analysis:   "UI renders the full Accumn triangulation tables. Analyst observations only (no tables). Cover: (1) Profile verification — list any mismatches found (Name/DOB/Address) and their significance; (2) Financial cross-check — compare GST revenue vs ITR Revenue from Operations vs Banking Credits, flag divergence %; (3) Customer/supplier concentration — top 2 customers by % rev, any single-customer risk > 40%; (4) Circular/related-party transactions — count flagged, largest exposure, whether arms-length nature is confirmed; (5) Overall data quality — are the three sources consistent, any unexplained gaps. Flag: ROUTING RISK if banking credits < 30% of GST revenue.",
     };
