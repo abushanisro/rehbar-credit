@@ -1,7 +1,8 @@
 import React from "react";
 import { SlideShell } from "./SlideShell";
-import type { RatioRow } from "@/features/case/types";
+import type { RatioRow, ExtractedRow } from "@/features/case/types";
 import { RATIO_DISPLAY_NAMES } from "@/features/credit/domain";
+import { icGetItems, icLiVal } from "@/tabs/case/ic/ICComponents";
 
 const DS = {
   navy:    "#0F1B2D",
@@ -17,6 +18,7 @@ interface SectionTemplate { rows?: RowItem[]; headline?: string; bullets?: strin
 
 interface KeyRatiosCardProps {
   ratios: RatioRow[];
+  extracted?: ExtractedRow[];
   pageNumStart: number;
   template?: SectionTemplate;
   generating?: boolean;
@@ -50,15 +52,29 @@ const THRESHOLDS: Record<string, { g: number; a: number; hi: boolean }> = {
   ronw:                  { g: 0.12, a: 0.06, hi: true  },
   revenue_growth:        { g: 0.15, a: 0.0,  hi: true  },
   // Efficiency
-  asset_turnover:        { g: 1.10, a: 0.70, hi: true  },
-  capital_employed_turnover: { g: 1.60, a: 1.00, hi: true },
-  fixed_assets_turnover: { g: 2.00, a: 1.00, hi: true  },
-  receivables_turnover:  { g: 6.00, a: 3.00, hi: true  },
-  debtor_days:           { g: 45,   a: 90,   hi: false },
-  creditor_days:         { g: 60,   a: 90,   hi: true  },
-  inventory_days:        { g: 60,   a: 90,   hi: false },
-  // R-score
+  asset_turnover:           { g: 1.10, a: 0.70, hi: true  },
+  capital_employed_turnover:{ g: 1.60, a: 1.00, hi: true  },
+  fixed_assets_turnover:    { g: 2.00, a: 1.00, hi: true  },
+  receivables_turnover:     { g: 6.00, a: 3.00, hi: true  },
+  debtor_days:              { g: 45,   a: 90,   hi: false  },
+  creditor_days:            { g: 60,   a: 90,   hi: true   },
+  inventory_days:           { g: 60,   a: 90,   hi: false  },
+  cash_conversion_cycle:    { g: 60,   a: 120,  hi: false  },
+  working_capital_turnover: { g: 6.0,  a: 3.0,  hi: true   },
+  total_assets_equity:      { g: 2.5,  a: 4.0,  hi: false  },
+  // R-score composite + sub-components (all: higher = better)
   r_score_composite:     { g: 2.0,  a: 1.0,  hi: true  },
+  r_score_ebitda_ta:     { g: 0.08, a: 0.04, hi: true  },
+  r_score_equity_ol:     { g: 0.40, a: 0.20, hi: true  },
+  r_score_re_ta:         { g: 0.25, a: 0.12, hi: true  },
+  r_score_wc_ta:         { g: 0.15, a: 0.05, hi: true  },
+  // Expense ratios (lower % of sales = better)
+  employee_cost_pct:     { g: 0.15, a: 0.25, hi: false },
+  finance_cost_pct:      { g: 0.03, a: 0.06, hi: false },
+  other_expenses_pct:    { g: 0.10, a: 0.20, hi: false },
+  raw_material_pct:      { g: 0.50, a: 0.75, hi: false },
+  // Return ratios
+  return_on_fixed_assets:{ g: 0.20, a: 0.10, hi: true  },
 };
 function evalStatus(name: string, value: number | null, stored: string | null): string | null {
   if (value === null) return stored;
@@ -125,6 +141,46 @@ function fmtRatioVal(name: string, val: number | null): string {
   return `${val.toFixed(2)}x`;
 }
 
+// ── Revenue growth from extracted financials (fallback when ratio is null) ────
+const REVENUE_ALIASES = [
+  "Turnover","Gross Sales","Revenue from Sale of Products",
+  "Total Revenue from Operations","Revenue","Net Sales","Total Revenue",
+];
+
+function extractedRevenue(extracted: ExtractedRow[], fy: number): number | null {
+  const items = icGetItems(extracted, fy); // already filters projections + runs deriveFinancialItems
+  for (const alias of REVENUE_ALIASES) {
+    const v = icLiVal(items, alias);
+    if (v != null) return Number(v);
+  }
+  return null;
+}
+
+function computeRevenueGrowth(extracted: ExtractedRow[], year: number): number | null {
+  const curr = extractedRevenue(extracted, year);
+  if (curr == null) return null;
+  // Walk prior years from most recent to oldest until we find one with revenue data
+  const priorYears = Array.from(new Set(
+    extracted.filter(r => r.statement_type !== "projections" && r.fiscal_year < year).map(r => r.fiscal_year)
+  )).sort((a, b) => b - a);
+  for (const py of priorYears) {
+    const prev = extractedRevenue(extracted, py);
+    if (prev != null && prev !== 0) return (curr - prev) / Math.abs(prev);
+  }
+  return null;
+}
+
+// ── YoY delta for a ratio value ───────────────────────────────────────────────
+function YoYDelta({ name, first, last }: { name: string; first: number | null; last: number | null }) {
+  if (first == null || last == null || first === 0) return <span style={{ color: DS.muted }}>—</span>;
+  const pct = ((last - first) / Math.abs(first)) * 100;
+  const sign = pct > 0 ? "+" : "";
+  const t = THRESHOLDS[name];
+  const improving = t ? (t.hi ? pct > 0 : pct < 0) : null;
+  const color = improving == null ? DS.body : improving ? "#15803D" : "#B91C1C";
+  return <span style={{ color, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{sign}{pct.toFixed(1)}%</span>;
+}
+
 // ── Per-category ratio table ──────────────────────────────────────────────────
 interface RatioCategoryPanelProps {
   roman: string;
@@ -133,16 +189,17 @@ interface RatioCategoryPanelProps {
   pageNum: number;
   category: string;
   ratios: RatioRow[];
+  extracted?: ExtractedRow[];
 }
 
-function RatioCategoryPanel({ roman, romanSuffix, title, pageNum, category, ratios }: RatioCategoryPanelProps) {
+function RatioCategoryPanel({ roman, romanSuffix, title, pageNum, category, ratios, extracted }: RatioCategoryPanelProps) {
   const catRatios = ratios.filter(r => r.category === category);
   const years = Array.from(new Set(catRatios.map(r => r.fiscal_year))).sort();
   const names = Array.from(new Set(catRatios.map(r => r.ratio_name)));
 
-  // Only show years that have at least one non-null value
+  // Only show years that have at least one non-null value in this category
   const meaningfulYears = years.filter(y =>
-    catRatios.some(r => r.fiscal_year === y && r.ratio_value != null && Number(r.ratio_value) !== 0)
+    catRatios.some(r => r.fiscal_year === y && r.ratio_value != null)
   );
 
   return (
@@ -160,42 +217,64 @@ function RatioCategoryPanel({ roman, romanSuffix, title, pageNum, category, rati
                 {meaningfulYears.map(y => (
                   <th key={y} style={{ padding: "7px 10px", textAlign: "right", fontSize: 10, fontWeight: 700, color: DS.body }}>FY{y}</th>
                 ))}
+                {meaningfulYears.length >= 2 && (
+                  <th style={{ padding: "7px 10px", textAlign: "right", fontSize: 10, fontWeight: 700, color: DS.body }}>Δ YoY</th>
+                )}
                 <th style={{ padding: "7px 10px", textAlign: "right", fontSize: 10, fontWeight: 700, color: DS.body }}>Benchmark</th>
                 <th style={{ padding: "7px 10px", textAlign: "center", fontSize: 10, fontWeight: 700, color: DS.body }}>Status</th>
               </tr>
             </thead>
             <tbody>
               {names.map((name, i) => {
-                // Prefer the latest year with a real non-zero value.
-                // Projected-year rows (FY+1, FY+2) often have 0.00 from compute-ratios
-                // run on projection data — using them as "latest" causes wrong FAIL status.
-                const latest =
-                  catRatios
-                    .filter(r => r.ratio_name === name && r.ratio_value != null && Number(r.ratio_value) !== 0)
-                    .sort((a, b) => b.fiscal_year - a.fiscal_year)[0]
-                  ??
-                  catRatios
-                    .filter(r => r.ratio_name === name)
-                    .sort((a, b) => b.fiscal_year - a.fiscal_year)[0];
+                // Resolve ratio value for a year — falls back to computed revenue_growth from extracted
+                const resolveVal = (y: number): number | null => {
+                  const r = catRatios.find(x => x.ratio_name === name && x.fiscal_year === y);
+                  const stored = r?.ratio_value != null ? Number(r.ratio_value) : null;
+                  if (stored !== null) return stored;
+                  if (name === "revenue_growth" && extracted?.length) return computeRevenueGrowth(extracted, y);
+                  return null;
+                };
+
+                // Latest year with a real non-null value
+                const filledYears = meaningfulYears.filter(y => resolveVal(y) != null);
+                const latestYear = filledYears[filledYears.length - 1];
+                const latestRow = catRatios.filter(r => r.ratio_name === name).sort((a, b) => b.fiscal_year - a.fiscal_year)[0];
+                const latestVal = latestYear != null ? resolveVal(latestYear) : null;
+
+                // YoY: between last two filled years for this row
+                const firstFilledYear = filledYears[0];
+                const lastFilledYear  = filledYears[filledYears.length - 1];
+                const firstVal = firstFilledYear != null ? resolveVal(firstFilledYear) : null;
+                const lastVal  = lastFilledYear  != null ? resolveVal(lastFilledYear)  : null;
+
                 return (
                   <tr key={name} style={{ background: i % 2 === 0 ? "#FFFFFF" : DS.altRow }}>
                     <td style={{ padding: "7px 12px", fontSize: 11, color: DS.body, borderBottom: "1px solid #EBEBEB" }}>
                       {RATIO_DISPLAY_NAMES[name] ?? name}
                     </td>
                     {meaningfulYears.map(y => {
-                      const r = catRatios.find(x => x.ratio_name === name && x.fiscal_year === y);
-                      const val = r?.ratio_value != null ? Number(r.ratio_value) : null;
+                      const val = resolveVal(y);
                       return (
                         <td key={y} style={{ padding: "7px 10px", textAlign: "right", fontSize: 11, color: DS.body, borderBottom: "1px solid #EBEBEB", fontVariantNumeric: "tabular-nums" }}>
                           {fmtRatioVal(name, val)}
                         </td>
                       );
                     })}
+                    {meaningfulYears.length >= 2 && (
+                      <td style={{ padding: "7px 10px", textAlign: "right", fontSize: 11, borderBottom: "1px solid #EBEBEB" }}>
+                        <YoYDelta name={name} first={firstVal} last={firstFilledYear !== lastFilledYear ? lastVal : null} />
+                      </td>
+                    )}
                     <td style={{ padding: "7px 10px", textAlign: "right", fontSize: 11, color: DS.muted, borderBottom: "1px solid #EBEBEB", fontVariantNumeric: "tabular-nums" }}>
-                      {latest?.benchmark != null ? fmtRatioVal(name, Number(latest.benchmark)) : "—"}
+                      {(() => {
+                        const db = latestRow?.benchmark != null ? Number(latestRow.benchmark) : null;
+                        const fallback = THRESHOLDS[name]?.g ?? null;
+                        const bm = db ?? fallback;
+                        return bm != null ? fmtRatioVal(name, bm) : "—";
+                      })()}
                     </td>
                     <td style={{ padding: "7px 10px", textAlign: "center", borderBottom: "1px solid #EBEBEB" }}>
-                      <StatusBadge status={evalStatus(name, latest?.ratio_value != null ? Number(latest.ratio_value) : null, latest?.threshold_status ?? null)} />
+                      <StatusBadge status={evalStatus(name, latestVal, latestRow?.threshold_status ?? null)} />
                     </td>
                   </tr>
                 );
@@ -221,7 +300,7 @@ const CATEGORIES: { category: string; suffix: string; title: string }[] = [
   { category: "return",       suffix: "h", title: "Key Ratios – Return Ratios" },
 ];
 
-export function KeyRatiosCard({ ratios, pageNumStart, template, generating, onGenerate }: KeyRatiosCardProps) {
+export function KeyRatiosCard({ ratios, extracted, pageNumStart, template, generating, onGenerate }: KeyRatiosCardProps) {
   return (
     <>
       {CATEGORIES.map((cat, idx) => (
@@ -233,6 +312,7 @@ export function KeyRatiosCard({ ratios, pageNumStart, template, generating, onGe
           pageNum={pageNumStart + idx}
           category={cat.category}
           ratios={ratios}
+          extracted={extracted}
         />
       ))}
 

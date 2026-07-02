@@ -891,6 +891,10 @@ interface SectionContextOpts {
   bankRows?: BankRow[];
   accumnReport?: AccumnReport | null;
   triRow?: TriangulationReportRow | null;
+  gstRows?: GstRow[];
+  cibilBlock?: string;
+  visitReport?: Record<string, unknown> | null;
+  provisionalBlock?: string;
 }
 
 function buildSectionContext(
@@ -902,10 +906,15 @@ function buildSectionContext(
   opts?: SectionContextOpts,
 ): string {
   const parts: string[] = [];
-  const { company, directors, bankRows = [], accumnReport, triRow } = opts ?? {};
+  const { company, directors, bankRows = [], accumnReport, triRow, gstRows = [], cibilBlock, visitReport, provisionalBlock } = opts ?? {};
 
   // RAG context
   if (ragContext) parts.push(`DOCUMENT CONTEXT:\n${ragContext}`);
+
+  // Analyst notes — highlighted block so Claude prioritises them
+  if (cc?.analyst_notes) {
+    parts.push(`ANALYST NOTES (priority — incorporate these observations into your analysis):\n${cc.analyst_notes}`);
+  }
 
   // Case metadata — full set of fields
   if (cc) {
@@ -929,7 +938,7 @@ function buildSectionContext(
     );
     if (cc.promoter_details) caseLines.push(`Promoters: ${cc.promoter_details}`);
     if (cc.group_summary) caseLines.push(`Group Summary: ${cc.group_summary}`);
-    if (cc.analyst_notes) caseLines.push(`Analyst Notes: ${cc.analyst_notes}`);
+    if (cc.rehbar_history) caseLines.push(`Rehbar Funding History: ${cc.rehbar_history}`);
     parts.push(`CASE DATA:\n${caseLines.join("\n")}`);
   }
 
@@ -1074,9 +1083,24 @@ function buildSectionContext(
     }
   }
 
+  // Provisional financials for financial / projection sections
+  if (["historical_financial","historical_pl_obs","historical_bs_obs","projections","key_ratios","executive_summary","cash_flow_obs"].includes(sectionId) && provisionalBlock) {
+    parts.push(`PROVISIONAL / CURRENT-YEAR DATA:\n${provisionalBlock}`);
+  }
+
   // Bank statement data for cash flow sections
   if (["cash_flow", "cash_flow_obs"].includes(sectionId) && bankRows.length > 0) {
     parts.push(buildBankSection(bankRows).slice(0, 1200));
+  }
+
+  // GST returns for compliance / triangulation / executive summary
+  if (["due_diligence","triangulation_analysis","cash_flow","executive_summary"].includes(sectionId) && gstRows.length > 0) {
+    parts.push(buildGstSection(gstRows).slice(0, 1_200));
+  }
+
+  // CIBIL / CRIF data for promoter and risk sections
+  if (["client_promoter","executive_summary","risk_assessment","exec_recommendation"].includes(sectionId) && cibilBlock) {
+    parts.push(cibilBlock.slice(0, 1_200));
   }
 
   // Accumn data for due diligence
@@ -1087,6 +1111,11 @@ function buildSectionContext(
   // Triangulation data for due diligence and triangulation_analysis
   if (["due_diligence", "triangulation_analysis"].includes(sectionId) && triRow) {
     parts.push(buildTriangulationSection(triRow).slice(0, 1500));
+  }
+
+  // Visit report for visit_reference and exec_recommendation
+  if (["visit_reference","exec_recommendation"].includes(sectionId) && visitReport) {
+    parts.push(buildVisitReportSection(visitReport).slice(0, 1_500));
   }
 
   return parts.join("\n\n");
@@ -1131,7 +1160,7 @@ Deno.serve(async (req) => {
     // Per-section generation for IC Deck tab
     if (section_ids && Array.isArray(section_ids) && section_ids.length > 0) {
       // Fetch case data plus all supplementary sources for rich context
-      const [caseRes, finRes, ratioRes, bankRes, accumnRes, triRes] = await Promise.all([
+      const [caseRes, finRes, ratioRes, bankRes, accumnRes, triRes, gstRes, cibilRes] = await Promise.all([
         supabase.from("credit_cases").select("*").eq("id", case_id).single(),
         supabase.from("extracted_financials").select("*").eq("case_id", case_id),
         supabase.from("financial_ratios").select("*").eq("case_id", case_id),
@@ -1139,6 +1168,8 @@ Deno.serve(async (req) => {
         supabase.from("gst_accumn_reports").select("report_data").eq("case_id", case_id).limit(1),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (supabase as any).from("triangulation_data").select("report_data").eq("case_id", case_id).limit(1),
+        supabase.from("gst_return_data").select("*").eq("case_id", case_id).order("period"),
+        supabase.from("cibil_report_data").select("cibil_rank,total_outstanding,borrower_name,report_date,report_data").eq("case_id", case_id).order("created_at", { ascending: false }).limit(10),
       ]);
       const cc = caseRes.data as Record<string, unknown> | null;
       const financials = (finRes.data ?? []) as FinRow[];
@@ -1146,6 +1177,13 @@ Deno.serve(async (req) => {
       const bankRows = (bankRes.data ?? []) as BankRow[];
       const accumnReport = ((accumnRes.data ?? []) as AccumnReportRow[])[0]?.report_data ?? null;
       const triRow = ((triRes.data ?? []) as TriangulationReportRow[])[0] ?? null;
+      const gstRows = (gstRes.data ?? []) as GstRow[];
+      const cibilRows = (cibilRes.data ?? []) as CibilReportRow[];
+      const cibilBlockDeck = buildCibilSection(cibilRows);
+      const icNoteJsonDeck = (cc?.ic_note ?? {}) as Record<string, unknown>;
+      const provisionalPeriodsDeck = (icNoteJsonDeck["provisional"] ?? []) as ProvPeriod[];
+      const visitReportDeck = icNoteJsonDeck["visit_report"] as Record<string, unknown> | undefined;
+      const provisionalBlockDeck = buildProvisionalSection(provisionalPeriodsDeck).slice(0, 1_400);
 
       // Fetch company profile and directors — by company_id if linked, otherwise by name
       let company: CompanyRow | null = null;
@@ -1175,6 +1213,7 @@ Deno.serve(async (req) => {
         const ragContext = await getRagContext(supabase, case_id, sectionId, Deno.env.get("GEMINI_API_KEY") ?? "");
         const sectionDataContext = buildSectionContext(cc, financials, ratios, sectionId, ragContext, {
           company, directors, bankRows, accumnReport, triRow,
+          gstRows, cibilBlock: cibilBlockDeck, visitReport: visitReportDeck ?? null, provisionalBlock: provisionalBlockDeck,
         });
 
         // ── Special handler: risk_assessment → rich categorised format ──────────
@@ -1242,14 +1281,14 @@ Case: ${cc?.client_name ?? "Unknown"} | Amount: INR ${cc?.deal_amount ?? "?"} La
 ${sectionDataContext}
 
 INSTRUCTIONS:
+- BREVITY IS CRITICAL. Every row value must be a single short phrase or 1 sentence — max 20 words. IC deck slides, not prose.
 - Use ONLY the data provided above. Do NOT say "not provided" if the information exists anywhere in the data above.
 ${["client_promoter","executive_summary"].includes(sectionId) ? `- For company identity fields (registered address, CIN, date of incorporation): look in the MCA/Corpository section and CASE DATA above.
 - For year established: use "Year of Establishment" or "Date of Incorporation" or "year_established" from CASE DATA/MCA.
-- For promoters & directors: use the Board of Directors table (names, DIN, shareholding). Also check cc.promoter_details.` : `- Focus on the financial and operational data in the context. Do NOT comment on missing company registry fields (address, CIN, directors) — those belong in the Client Profile section, not here.`}
-- For financial figures: use the FINANCIAL SUMMARY numbers exactly as given. State actual values (e.g. "Turnover grew from ₹X to ₹Y") — never say 0.00 or flag a ratio as failing unless the ratio value in the context explicitly shows that.
-- Flags must only highlight genuine data anomalies visible in the numbers — NOT missing company identity fields, NOT missing future projection data.
-- If a specific field truly has NO data anywhere in the context above, write ONLY: "Not on file — analyst to confirm" (one short phrase, no paragraphs).
-- NEVER write multi-sentence placeholder explanations about what data is missing. One short phrase maximum per gap.
+- For promoters & directors: use the Board of Directors table (names, DIN, shareholding). Also check cc.promoter_details.` : `- Focus on financial and operational data only. Do NOT mention missing company registry fields.`}
+- For financial figures: state actual numbers only (e.g. "₹X Cr → ₹Y Cr, +Z%"). No narrative, no interpretation.
+- Flags: one-line risks with specific numbers only. No vague statements.
+- If data is truly absent: write "Not on file" (3 words, nothing more).
 
 Generate the following labeled rows (key-value table format matching Rehbar IC Deck slides). Be specific — include actual names, numbers, dates, addresses from the data above.
 
@@ -1258,14 +1297,14 @@ ${sectionSchema.rowLabels.map((l, i) => `Row ${i+1} label: "${l}"`).join("\n")}
 Return ONLY valid JSON (no markdown, no explanation):
 {
   "rows": [
-    ${sectionSchema.rowLabels.map(l => `{ "label": "${l}", "text": "Specific content using actual data from above. 2-3 sentences." }`).join(",\n    ")}
+    ${sectionSchema.rowLabels.map(l => `{ "label": "${l}", "text": "Key fact only — 1 short phrase or 1 sentence, max 20 words. Use actual numbers/names from the data." }`).join(",\n    ")}
   ],
-  "flags": ["Key risk or concern with specific numbers. Empty array if no concerns."]
+  "flags": ["One-line risk with specific numbers. Empty array if no concerns."]
 }`;
 
         try {
           const text = await callAIText({
-            systemPrompt: "You are a credit analyst writing Investment Committee deck sections. Return only valid JSON. Extract and use actual data from the context — company name, address, CIN, year established, directors, financial figures. If a field is genuinely absent, write 'Not on file — analyst to confirm' (not a paragraph). Never invent placeholder guidance paragraphs.",
+            systemPrompt: "You are a credit analyst writing Investment Committee deck slides. Return only valid JSON. Each row value must be SHORT — one phrase or one sentence, max 20 words. Think slide bullet, not paragraph. Use actual data: names, numbers, dates. If absent: 'Not on file'. No explanations, no filler, no multi-sentence text.",
             userText: prompt,
             maxTokens: 1800,
           });
@@ -1441,6 +1480,60 @@ Return ONLY valid JSON (no markdown, no explanation):
       triangulation_analysis:   "UI renders the full Accumn triangulation tables. Analyst observations only (no tables). Cover: (1) Profile verification — list any mismatches found (Name/DOB/Address) and their significance; (2) Financial cross-check — compare GST revenue vs ITR Revenue from Operations vs Banking Credits, flag divergence %; (3) Customer/supplier concentration — top 2 customers by % rev, any single-customer risk > 40%; (4) Circular/related-party transactions — count flagged, largest exposure, whether arms-length nature is confirmed; (5) Overall data quality — are the three sources consistent, any unexplained gaps. Flag: ROUTING RISK if banking credits < 30% of GST revenue.",
     };
 
+    // ── RAG: past confirmed errors for this case + similar industry patterns ──
+    let knownMistakesBlock = "";
+    try {
+      const smKey = Deno.env.get("SUPERMEMORY_API_KEY");
+
+      // Track 1 — DB: confirmed errors on this specific case from previous runs
+      const { data: caseErrors } = await supabase
+        .from("ic_ai_errors")
+        .select("section_id, error_type, title, detail, suggested_fix")
+        .eq("case_id", case_id)
+        .eq("analyst_verdict", "confirmed")
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      const caseErrorLines = (caseErrors ?? []).map(
+        (e: { section_id: string; error_type: string; title: string; detail: string; suggested_fix: string | null }) =>
+          `[THIS CASE — ${e.section_id}] ${e.error_type.toUpperCase()}: ${e.title}. ${e.detail}` +
+          (e.suggested_fix ? ` Fix: ${e.suggested_fix}` : "")
+      );
+
+      // Track 2 — Supermemory: case-specific memories (analyst notes from prior runs)
+      const smCaseLines: string[] = [];
+      if (smKey) {
+        const caseRes = await fetch(
+          `https://api.supermemory.ai/v3/search?q=${encodeURIComponent("IC errors " + cc.client_name)}&containerTags=${encodeURIComponent("case-" + case_id)}&limit=5`,
+          { headers: { "Authorization": `Bearer ${smKey}` }, signal: AbortSignal.timeout(4_000) }
+        ).catch(() => null);
+        if (caseRes?.ok) {
+          const j = await caseRes.json() as { results?: Array<{ content: string }> };
+          smCaseLines.push(...(j.results ?? []).map(r => `[CASE MEMORY] ${r.content}`));
+        }
+      }
+
+      // Track 3 — Supermemory: industry/product-type patterns across all cases
+      const smIndustryLines: string[] = [];
+      if (smKey) {
+        const q = encodeURIComponent(`IC errors ${cc.industry ?? ""} ${cc.product_type ?? ""} credit analysis`);
+        const indRes = await fetch(
+          `https://api.supermemory.ai/v3/search?q=${q}&containerTags=rehbar-ic-errors&limit=8`,
+          { headers: { "Authorization": `Bearer ${smKey}` }, signal: AbortSignal.timeout(4_000) }
+        ).catch(() => null);
+        if (indRes?.ok) {
+          const j = await indRes.json() as { results?: Array<{ content: string }> };
+          smIndustryLines.push(...(j.results ?? []).slice(0, 4).map(r => `[INDUSTRY PATTERN] ${r.content}`));
+        }
+      }
+
+      const allLines = [...caseErrorLines, ...smCaseLines, ...smIndustryLines];
+      if (allLines.length > 0) {
+        knownMistakesBlock = `\n\nKNOWN ERRORS TO AVOID (confirmed by analyst from past generations of this and similar cases):\n` +
+          allLines.map((l, i) => `${i + 1}. ${l}`).join("\n\n");
+      }
+    } catch { /* non-blocking — generation continues without memory context */ }
+
     const systemPrompt = `You are a Senior Credit Analyst at Rehbar Financial Services. Drafting an IC Credit Appraisal Note for experienced IC members.
 
 ABOUT REHBAR:
@@ -1448,10 +1541,11 @@ Rehbar is a Sharia-compliant NBFC. OL: asset owned by RERL, rentals attract GST,
 
 PROJECTION RULES (SOP §XII): OL/FL — waive if deal < ₹100L or DSCR covers it (state waiver). PF/TF — not required. PLS/HL — required.
 
-WRITING: STRICT TOKEN BUDGET — each section markdown ≤ 400 tokens. 2 bullets maximum per section. No paragraphs. Insights only — never repeat raw numbers. Missing data = "Not provided — analyst to confirm". No fabrication. No recommendation (APPROVE/DECLINE/DEFER). Sections V/VI/VII: UI renders tables, write observations only — no tables in markdown.`;
+WRITING: STRICT TOKEN BUDGET — each section markdown ≤ 400 tokens. 2 bullets maximum per section. No paragraphs. Insights only — never repeat raw numbers. Missing data = "Not provided — analyst to confirm". No fabrication. No recommendation (APPROVE/DECLINE/DEFER). Sections V/VI/VII: UI renders tables, write observations only — no tables in markdown.${knownMistakesBlock}`;
 
     const userText = `Draft sections ${activeIds.map(id => id.replace(/_/g," ")).join(", ")} of the IC Appraisal Note.
-${analyst_notes_for_ic ? `\nANALYST NOTES (highest priority): ${analyst_notes_for_ic}\n` : ""}
+${analyst_notes_for_ic ? `\nANALYST NOTES (highest priority — incorporate into every relevant section): ${analyst_notes_for_ic}\n` : ""}
+${!analyst_notes_for_ic && safeCase.analyst_notes ? `\nANALYST NOTES (from case file — incorporate into every relevant section): ${safeCase.analyst_notes}\n` : ""}
 ━━━ CASE DATA ━━━
 ${JSON.stringify(safeCase, null, 2)}${buildRagBlock("executive_summary")}
 

@@ -22,6 +22,7 @@ interface DealSummaryCc {
 
 interface DealSummaryCardProps {
   cc: DealSummaryCc;
+  dealWarning?: string | null;
 }
 
 function fmtAmount(v: number | null | undefined): string {
@@ -30,15 +31,16 @@ function fmtAmount(v: number | null | undefined): string {
   return `₹ ${v.toFixed(2)} L`;
 }
 
-export function DealSummaryCard({ cc }: DealSummaryCardProps) {
-  const rows: [string, string][] = [
-    ["Product & Amount", [cc.product_type, fmtAmount(cc.deal_amount)].filter(Boolean).join("   ")],
-    ["Purpose / End Use", cc.end_use ?? "—"],
-    ["Tenure", cc.tenure_months != null ? `${cc.tenure_months} months` : "—"],
-    ["Expected IRR", cc.expected_irr != null ? `${cc.expected_irr}%` : "—"],
-    ["Industry / Sector", cc.industry ?? "—"],
-    ["Collaterals / Security", cc.collateral_summary ?? "—"],
-    ["Legal Constitution", cc.legal_constitution ?? "—"],
+export function DealSummaryCard({ cc, dealWarning }: DealSummaryCardProps) {
+  const amountDisplay = [cc.product_type, fmtAmount(cc.deal_amount)].filter(Boolean).join("   ");
+  const rows: [string, string, boolean][] = [
+    ["Product & Amount", amountDisplay, !!dealWarning],
+    ["Purpose / End Use", cc.end_use ?? "—", false],
+    ["Tenure", cc.tenure_months != null ? `${cc.tenure_months} months` : "—", false],
+    ["Expected IRR", cc.expected_irr != null ? `${cc.expected_irr}%` : "—", false],
+    ["Industry / Sector", cc.industry ?? "—", false],
+    ["Collaterals / Security", cc.collateral_summary ?? "—", false],
+    ["Legal Constitution", cc.legal_constitution ?? "—", false],
   ];
 
   return (
@@ -46,12 +48,12 @@ export function DealSummaryCard({ cc }: DealSummaryCardProps) {
       <div style={{ padding: "0 0 4px", fontFamily: DS.bodyFont }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <tbody>
-            {rows.map(([label, value], i) => (
+            {rows.map(([label, value, hasWarning], i) => (
               <tr
                 key={label}
                 style={{
                   borderBottom: "1px solid #E8E8E4",
-                  background: i % 2 === 0 ? "#FFFFFF" : "#F5F5F0",
+                  background: hasWarning ? "#FFF8F0" : (i % 2 === 0 ? "#FFFFFF" : "#F5F5F0"),
                 }}
               >
                 <td
@@ -59,7 +61,7 @@ export function DealSummaryCard({ cc }: DealSummaryCardProps) {
                     width: 180,
                     padding: "9px 20px",
                     fontSize: 11,
-                    color: DS.muted,
+                    color: hasWarning ? "#92400E" : DS.muted,
                     verticalAlign: "top",
                     fontStyle: "normal",
                   }}
@@ -74,7 +76,23 @@ export function DealSummaryCard({ cc }: DealSummaryCardProps) {
                     lineHeight: 1.5,
                   }}
                 >
-                  {value || "—"}
+                  <span>{value || "—"}</span>
+                  {hasWarning && dealWarning && (
+                    <span style={{
+                      marginLeft: 10,
+                      display: "inline-block",
+                      background: "#FEF3C7",
+                      color: "#92400E",
+                      fontSize: 9,
+                      fontWeight: 700,
+                      padding: "2px 7px",
+                      borderRadius: 3,
+                      letterSpacing: "0.04em",
+                      verticalAlign: "middle",
+                    }}>
+                      ⚠ VERIFY UNITS
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}

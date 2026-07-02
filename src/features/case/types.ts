@@ -109,3 +109,29 @@ export interface AccumnReport {
   gstr_comparison?: AccumnGstrRow[];
   circular_transactions?: AccumnCircular[];
 }
+
+// ── AI-detected IC analysis errors ───────────────────────────────────────────
+export type AIErrorType =
+  | 'hallucination'
+  | 'unit_error'
+  | 'cross_section_mismatch'
+  | 'missing_data'
+  | 'illogical_narrative'
+  | 'template_gap';
+
+export interface AIDetectedError {
+  id: string;
+  case_id: string;
+  generation_run: string;
+  section_id: string;
+  error_type: AIErrorType;
+  severity: 'hard' | 'warn';
+  title: string;
+  detail: string;
+  suggested_fix?: string | null;
+  analyst_verdict: 'confirmed' | 'dismissed' | null;
+  analyst_note?: string | null;
+  supermemory_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}

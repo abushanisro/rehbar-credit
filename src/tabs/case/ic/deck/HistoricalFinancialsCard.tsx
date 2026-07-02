@@ -1,5 +1,6 @@
 import React from "react";
 import { SlideShell } from "./SlideShell";
+import { NarrativeCard } from "./NarrativeCard";
 import type { ExtractedRow } from "@/features/case/types";
 import { icGetItems, icLiVal, icFmt } from "@/tabs/case/ic/ICComponents";
 
@@ -23,6 +24,12 @@ interface HistoricalFinancialsCardProps {
   template?: SectionTemplate;
   generating?: boolean;
   onGenerate?: () => void;
+  plObsTemplate?: SectionTemplate;
+  generatingPlObs?: boolean;
+  onGeneratePlObs?: () => void;
+  bsObsTemplate?: SectionTemplate;
+  generatingBsObs?: boolean;
+  onGenerateBsObs?: () => void;
 }
 
 type RawItem = { label: string; value: number | null; override_value?: number | null };
@@ -54,29 +61,55 @@ function yoyPct(curr: number | null, prev: number | null): React.ReactNode {
   return <span style={{ color, fontWeight: 500 }}>{sign}{pct.toFixed(1)}%</span>;
 }
 
-// ── Get all unique labels from rows of a given statement_type ─────────────────
-function getDynamicLabels(rows: ExtractedRow[]): string[] {
-  const seen = new Set<string>();
-  const labels: string[] = [];
-  for (const row of rows) {
-    for (const item of (row.line_items as unknown as RawItem[]) ?? []) {
-      if (item.label && !seen.has(item.label)) {
-        seen.add(item.label);
-        labels.push(item.label);
-      }
-    }
-  }
-  return labels;
-}
+// ── Curated label configs — defines display name + raw aliases to try ─────────
+interface LabelConfig { label: string; aliases?: string[] }
 
-// ── Get value for a label directly from raw rows ──────────────────────────────
-function getRawVal(rows: ExtractedRow[], fy: number, label: string): number | null {
+const PL_CONFIG: LabelConfig[] = [
+  { label: "Turnover",               aliases: ["Revenue from Sale of Products","Gross Sales","Total Revenue from Operations","Total Revenue","Revenue","Net Sales","Total Revenue from Operations"] },
+  { label: "Cost of Materials",      aliases: ["Cost of Materials Consumed","Cost of Goods Sold","Purchases of Stock in Trade","Direct Costs"] },
+  { label: "Changes in Inventories", aliases: ["Changes in Inventories of Finished Goods, Work In Progress and Stock In Trade","Changes in Inventories"] },
+  { label: "Gross Profit",           aliases: [] },
+  { label: "Employee Costs",         aliases: ["Total Employee Benefit Expense","Employee Benefit Expense"] },
+  { label: "Other Expenses",         aliases: ["Total Other Expenses","Other Expenses"] },
+  { label: "EBITDA",                 aliases: [] },
+  { label: "Depreciation",          aliases: ["Total Depreciation, Depletion and Amortization Expense","Depreciation"] },
+  { label: "EBIT",                   aliases: [] },
+  { label: "Finance Costs",         aliases: ["Interest Expense","Finance Cost","Finance Costs"] },
+  { label: "Profit Before Tax",     aliases: ["Profit before Tax","Profit before Exceptional and Extraordinary Items and Tax","Profit before Extraordinary Items and Tax","PBT"] },
+  { label: "PAT",                   aliases: ["Profit/(Loss) for the Period from Continuing Operations","Profit/(Loss)","Net Profit","Profit/(Loss)"] },
+];
+
+const BS_CONFIG: LabelConfig[] = [
+  { label: "Share Capital",              aliases: [] },
+  { label: "Reserves & Surplus",         aliases: [] },
+  { label: "Net Worth",                  aliases: ["Networth","Total Equity"] },
+  { label: "Long-term Borrowings",       aliases: ["Long Term Borrowings"] },
+  { label: "Short-term Borrowings",      aliases: ["Short Term Borrowings"] },
+  { label: "Total Debt",                 aliases: [] },
+  { label: "Trade Payables",             aliases: [] },
+  { label: "Other Current Liabilities",  aliases: [] },
+  { label: "Total Current Liabilities",  aliases: ["Current Liabilities"] },
+  { label: "Fixed Assets (Net)",         aliases: ["Net Block of Assets","Tangible Assets","Total Fixed Asset","Net Block","Total Non Current Assets"] },
+  { label: "Inventories",               aliases: ["Inventory"] },
+  { label: "Trade Receivables",          aliases: [] },
+  { label: "Cash & Bank",               aliases: ["Cash & Cash Equivalents","Cash and Bank"] },
+  { label: "Short-term Loans & Advances", aliases: [] },
+  { label: "Total Current Assets",       aliases: ["Current Assets"] },
+  { label: "Total Assets",              aliases: ["TOTAL ASSETS","Total Equity & Liabilities"] },
+  { label: "Capital Employed",           aliases: [] },
+];
+
+// ── Get value for a label (tries display name + aliases) ──────────────────────
+function getRawVal(rows: ExtractedRow[], fy: number, label: string, aliases: string[] = []): number | null {
+  const candidates = [label, ...aliases];
   for (const row of rows.filter(r => r.fiscal_year === fy)) {
     const items = (row.line_items as unknown as RawItem[]) ?? [];
-    const item = items.find(i => i.label === label);
-    if (item) {
-      const v = item.override_value !== undefined && item.override_value !== null ? item.override_value : item.value;
-      if (v !== null) return scaleToDisplay(Number(v), row.unit);
+    for (const candidate of candidates) {
+      const item = items.find(i => i.label === candidate);
+      if (item) {
+        const v = item.override_value !== undefined && item.override_value !== null ? item.override_value : item.value;
+        if (v !== null) return scaleToDisplay(Number(v), row.unit);
+      }
     }
   }
   return null;
@@ -88,36 +121,32 @@ interface DynTableProps {
   title: string;
   pageNum: number;
   years: number[];
-  rows: ExtractedRow[];        // rows for this statement type
-  allRows: ExtractedRow[];     // all non-projection rows (for fallback labels)
-  fallbackLabels?: string[];   // used if no typed rows found
+  rows: ExtractedRow[];
+  allRows: ExtractedRow[];
+  config: LabelConfig[];       // curated ordered labels with aliases
 }
 
-function DynTable({ roman, title, pageNum, years, rows, allRows, fallbackLabels }: DynTableProps) {
+function DynTable({ roman, title, pageNum, years, rows, allRows, config }: DynTableProps) {
   const shownYears = years.slice(-5);
   const lastTwo = shownYears.slice(-2);
 
-  // Determine labels
-  const useFallback = rows.length === 0;
-  const rawLabels = useFallback ? (fallbackLabels ?? []) : getDynamicLabels(rows);
-
-  // Filter to labels with at least one non-null value
-  const activeLabels = rawLabels.filter(label =>
-    shownYears.some(y => {
-      const v = useFallback
-        ? (() => { const items = icGetItems(allRows.concat(/* projected filtered out above */[]), y); return icLiVal(items, label); })()
-        : getRawVal(rows, y, label);
-      return v !== null;
-    })
-  );
-
-  const getVal = (label: string, fy: number): number | null => {
-    if (useFallback) {
-      const items = icGetItems(allRows, fy);
-      return scaleToDisplay(icLiVal(items, label), allRows.find(r => r.fiscal_year === fy)?.unit ?? null);
+  const getVal = (cfg: LabelConfig, fy: number): number | null => {
+    // Try typed rows first, fall back to allRows
+    const v = getRawVal(rows.length > 0 ? rows : allRows, fy, cfg.label, cfg.aliases ?? []);
+    if (v !== null) return v;
+    // Last resort: icLiVal alias lookup
+    const items = icGetItems(allRows, fy);
+    const unit = allRows.find(r => r.fiscal_year === fy)?.unit ?? null;
+    const candidates = [cfg.label, ...(cfg.aliases ?? [])];
+    for (const c of candidates) {
+      const val = icLiVal(items, c);
+      if (val !== null) return scaleToDisplay(val, unit);
     }
-    return getRawVal(rows, fy, label);
+    return null;
   };
+
+  // Only show rows with at least one non-null value
+  const activeConfig = config.filter(cfg => shownYears.some(y => getVal(cfg, y) !== null));
 
   const rawUnit = rows.find(r => r.unit)?.unit ?? allRows.find(r => r.unit)?.unit ?? null;
   const unitLabel = resolvedUnitLabel(rawUnit).replace(/^[₹\s]+/, "");
@@ -125,7 +154,7 @@ function DynTable({ roman, title, pageNum, years, rows, allRows, fallbackLabels 
   return (
     <SlideShell roman={roman} title={`${title} (₹ ${unitLabel})`} pageNum={pageNum}>
       <div style={{ padding: "0 0 4px", fontFamily: DS.bodyFont }}>
-        {activeLabels.length === 0 ? (
+        {activeConfig.length === 0 ? (
           <div style={{ padding: "32px 20px", textAlign: "center", fontSize: 11, color: DS.muted, fontStyle: "italic" }}>
             No data available
           </div>
@@ -143,13 +172,15 @@ function DynTable({ roman, title, pageNum, years, rows, allRows, fallbackLabels 
               </tr>
             </thead>
             <tbody>
-              {activeLabels.map((label, i) => {
-                const vals = shownYears.map(y => getVal(label, y));
-                const curr = lastTwo.length >= 2 ? getVal(label, lastTwo[1]) : null;
-                const prev = lastTwo.length >= 2 ? getVal(label, lastTwo[0]) : null;
+              {activeConfig.map((cfg, i) => {
+                const vals = shownYears.map(y => getVal(cfg, y));
+                // Use the last two years that have actual data for this row
+                const filledYears = shownYears.filter(y => getVal(cfg, y) !== null);
+                const curr = filledYears.length >= 1 ? getVal(cfg, filledYears[filledYears.length - 1]) : null;
+                const prev = filledYears.length >= 2 ? getVal(cfg, filledYears[filledYears.length - 2]) : null;
                 return (
-                  <tr key={label} style={{ background: i % 2 === 0 ? "#FFFFFF" : DS.altRow }}>
-                    <td style={{ padding: "7px 12px", fontSize: 11, color: DS.body, borderBottom: "1px solid #EBEBEB" }}>{label}</td>
+                  <tr key={cfg.label} style={{ background: i % 2 === 0 ? "#FFFFFF" : DS.altRow }}>
+                    <td style={{ padding: "7px 12px", fontSize: 11, color: DS.body, borderBottom: "1px solid #EBEBEB" }}>{cfg.label}</td>
                     {vals.map((v, vi) => (
                       <td key={vi} style={{ padding: "7px 10px", textAlign: "right", fontSize: 11, color: DS.body, borderBottom: "1px solid #EBEBEB", fontVariantNumeric: "tabular-nums" }}>
                         {icFmt(v)}
@@ -172,7 +203,7 @@ function DynTable({ roman, title, pageNum, years, rows, allRows, fallbackLabels 
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export function HistoricalFinancialsCard({ extracted, pageNumStart, template, generating, onGenerate }: HistoricalFinancialsCardProps) {
+export function HistoricalFinancialsCard({ extracted, pageNumStart, template, generating, onGenerate, plObsTemplate, generatingPlObs, onGeneratePlObs, bsObsTemplate, generatingBsObs, onGenerateBsObs }: HistoricalFinancialsCardProps) {
   const histRows = extracted.filter(r => r.statement_type !== "projections");
   const histYears = Array.from(new Set(histRows.map(r => r.fiscal_year))).sort();
 
@@ -180,9 +211,6 @@ export function HistoricalFinancialsCard({ extracted, pageNumStart, template, ge
   const plRows = histRows.filter(r => r.statement_type === "profit_loss");
   const bsRows = histRows.filter(r => r.statement_type === "balance_sheet");
 
-  // Fallback labels when no typed rows exist (e.g. all_in_one uploads)
-  const PL_FALLBACK = ["Turnover", "Cost of Goods Sold", "Gross Profit", "Operating Expenses", "EBITDA", "Depreciation", "EBIT", "Interest Expense", "Profit Before Tax", "Tax", "PAT"];
-  const BS_FALLBACK = ["Share Capital", "Reserves & Surplus", "Net Worth", "Long Term Borrowings", "Short Term Borrowings", "Total Debt", "Trade Payables", "Current Liabilities", "Fixed Assets (Net)", "Inventory", "Trade Receivables", "Cash & Bank", "Current Assets", "Total Assets"];
 
   // Projected rows
   const projRows = extracted.filter(r => r.statement_type === "projections").sort((a, b) => a.fiscal_year - b.fiscal_year);
@@ -212,7 +240,7 @@ export function HistoricalFinancialsCard({ extracted, pageNumStart, template, ge
 
   return (
     <>
-      {/* V-a: Profit & Loss */}
+      {/* V-a: Profit & Loss table */}
       <DynTable
         roman="V-a"
         title="Historical Financials – Profit & Loss"
@@ -220,22 +248,42 @@ export function HistoricalFinancialsCard({ extracted, pageNumStart, template, ge
         years={histYears}
         rows={plRows}
         allRows={histRows}
-        fallbackLabels={PL_FALLBACK}
+        config={PL_CONFIG}
       />
 
-      {/* V-b: Balance Sheet */}
-      <DynTable
+      {/* V-b: P&L Analysis (AI) */}
+      <NarrativeCard
         roman="V-b"
-        title="Historical Financials – Balance Sheet"
+        title="P&L Statement – Observations"
         pageNum={pageNumStart + 1}
+        template={plObsTemplate}
+        generating={generatingPlObs}
+        onGenerate={onGeneratePlObs}
+      />
+
+      {/* V-c: Balance Sheet table */}
+      <DynTable
+        roman="V-c"
+        title="Historical Financials – Balance Sheet"
+        pageNum={pageNumStart + 2}
         years={histYears}
         rows={bsRows}
         allRows={histRows}
-        fallbackLabels={BS_FALLBACK}
+        config={BS_CONFIG}
       />
 
-      {/* V-c: Projected Financials */}
-      <SlideShell roman="V-c" title="Projected Financials (₹ Lakhs)" pageNum={pageNumStart + 2}>
+      {/* V-d: Balance Sheet Analysis (AI) */}
+      <NarrativeCard
+        roman="V-d"
+        title="Balance Sheet – Observations"
+        pageNum={pageNumStart + 3}
+        template={bsObsTemplate}
+        generating={generatingBsObs}
+        onGenerate={onGenerateBsObs}
+      />
+
+      {/* V-e: Projected Financials */}
+      <SlideShell roman="V-e" title="Projected Financials (₹ Lakhs)" pageNum={pageNumStart + 4}>
         <div style={{ padding: "0 0 4px", fontFamily: DS.bodyFont }}>
           {projYears.length === 0 ? (
             <div style={{ padding: "32px 20px", textAlign: "center", fontSize: 11, color: DS.muted, fontStyle: "italic" }}>
@@ -268,11 +316,11 @@ export function HistoricalFinancialsCard({ extracted, pageNumStart, template, ge
         </div>
       </SlideShell>
 
-      {/* V-d: Narrative Commentary */}
+      {/* V-f: Overall Financial Commentary */}
       <SlideShell
-        roman="V-d"
-        title="Historical Financial Analysis – Commentary"
-        pageNum={pageNumStart + 3}
+        roman="V-f"
+        title="Historical Financial Analysis – Overall Commentary"
+        pageNum={pageNumStart + 5}
         generating={generating}
         onGenerate={template ? onGenerate : undefined}
       >

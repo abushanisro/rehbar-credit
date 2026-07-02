@@ -7,6 +7,8 @@ import { AuthProvider, useAuth } from "@/features/auth/AuthProvider";
 import { ProtectedRoute } from "@/features/auth/ProtectedRoute";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AnalystChat } from "@/components/analyst/AnalystChat";
+import { RAGPanel } from "@/components/rag/RAGPanel";
+import { useState, useEffect } from "react";
 import Auth from "./pages/Auth";
 import Pipeline from "./pages/Pipeline";
 import NewCase from "./pages/NewCase";
@@ -40,6 +42,22 @@ function AnalystChatGuard() {
   return <AnalystChat />;
 }
 
+// Renders the RAG panel on every protected staff page
+function RAGPanelGuard() {
+  const { pathname } = useLocation();
+  const { role } = useAuth();
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    const handler = () => setOpen(o => !o);
+    window.addEventListener("toggle-rag-panel", handler);
+    return () => window.removeEventListener("toggle-rag-panel", handler);
+  }, []);
+
+  if (pathname === "/auth" || ["ic_member", "credit_committee"].includes(role ?? "")) return null;
+  return <RAGPanel open={open} onClose={() => setOpen(false)} />;
+}
+
 const App = () => (
   <ErrorBoundary>
     <QueryClientProvider client={queryClient}>
@@ -63,6 +81,7 @@ const App = () => (
               <Route path="*" element={<NotFound />} />
             </Routes>
             <AnalystChatGuard />
+            <RAGPanelGuard />
           </AuthProvider>
         </BrowserRouter>
       </TooltipProvider>

@@ -316,6 +316,7 @@ export const TerminalHeader = () => {
       if (e.key === "F4") { e.preventDefault(); window.dispatchEvent(new CustomEvent("toggle-analyst-chat")); }
       if (e.key === "F5") { e.preventDefault(); navigate("/users"); }
       if (e.key === "F6") { e.preventDefault(); navigate("/observability"); }
+      if (e.key === "F7") { e.preventDefault(); window.dispatchEvent(new CustomEvent("toggle-rag-panel")); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -378,6 +379,19 @@ export const TerminalHeader = () => {
           <span className="hidden lg:block text-sm text-muted-foreground mr-2 tabular-nums">
             {fmtClock(now)}
           </span>
+
+          {/* RAG Knowledge Base toggle */}
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent("toggle-rag-panel"))}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-2 transition-colors"
+            title="Knowledge Base (F7)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" />
+            </svg>
+            <span className="hidden lg:block">RAG</span>
+          </button>
 
           {/* Notification bell */}
           {user && <NotificationBell userId={user.id} />}

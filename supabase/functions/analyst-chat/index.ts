@@ -364,9 +364,33 @@ Deno.serve(async (req) => {
       status: 401, headers: { ...cors, "Content-Type": "application/json" },
     });
 
-    const systemPrompt = case_id
+    const baseSystemPrompt = case_id
       ? await buildCaseSystemPrompt(sb, case_id, page_name)
       : await buildGlobalSystemPrompt(sb, page_name, current_path);
+
+    // ── Supermemory RAG: retrieve relevant knowledge for this query ───────────
+    let memoryBlock = "";
+    const smKey = Deno.env.get("SUPERMEMORY_API_KEY");
+    if (smKey && messages.length > 0) {
+      try {
+        const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
+        const query = encodeURIComponent(`${lastUserMsg} ${page_name} rehbar credit`);
+        const smRes = await fetch(
+          `https://api.supermemory.ai/v3/search?q=${query}&containerTags=rehbar-ic-errors&limit=6`,
+          { headers: { "Authorization": `Bearer ${smKey}` }, signal: AbortSignal.timeout(4_000) }
+        );
+        if (smRes.ok) {
+          const smJson = await smRes.json() as { results?: Array<{ content: string }> };
+          const mems = (smJson.results ?? []).slice(0, 4);
+          if (mems.length > 0) {
+            memoryBlock = `\n\n━━━ MEMORY CONTEXT (past confirmed analyst findings — use as background knowledge) ━━━\n` +
+              mems.map((m, i) => `${i + 1}. ${m.content}`).join("\n\n");
+          }
+        }
+      } catch { /* non-blocking */ }
+    }
+
+    const systemPrompt = baseSystemPrompt + memoryBlock;
 
     const key = Deno.env.get("ANTHROPIC_API_KEY");
     if (!key) throw new Error("ANTHROPIC_API_KEY not set");

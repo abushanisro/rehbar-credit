@@ -504,6 +504,7 @@ function CaseViewInner() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
+  const [generationRun, setGenerationRun] = useState<string | null>(null);
   const [extractError, setExtractError] = useState<{ title: string; detail?: string; action?: string } | null>(null);
   const [canvasAnnotations, setCanvasAnnotations] = useState<UserAnnotation[]>([]);
   const [editingCell, setEditingCell] = useState<{ stmtType: string; fy: number; label: string; field: "label" | "value" } | null>(null);
@@ -2278,6 +2279,23 @@ function CaseViewInner() {
       if (narData?.ic_note) {
         setCc(prev => prev ? { ...prev, ic_note: narData.ic_note as Json, status: "ic_review" } : prev);
       }
+      // Fire-and-forget: validate IC note for semantic errors (non-blocking)
+      const run = new Date().toISOString();
+      setGenerationRun(run);
+      supabase.functions.invoke("validate-ic-analysis", {
+        body: {
+          case_id:        cc.id,
+          generation_run: run,
+          ic_note:        narData?.ic_note ?? {},
+          financials:     activeExtracted ?? [],
+          ratios:         ratios ?? [],
+          deal: {
+            client_name:  cc.client_name,
+            deal_amount:  cc.deal_amount != null ? Number(cc.deal_amount) : null,
+            product_type: cc.product_type ?? null,
+          },
+        },
+      }).catch(() => {});
       setTab("ic_note");
     } catch (e) {
       clearInterval(tick);
@@ -5528,8 +5546,10 @@ Respond ONLY with a JSON object matching this schema exactly:
           company={linkedCompany}
           directors={linkedDirs}
           cibilData={cibilData}
+          gstData={gstData.map(r => ({ period: r.period, total_turnover: r.total_turnover ?? null }))}
           onGenerateSection={runNarrativeSection}
           generatingSection={generatingSection}
+          generationRun={generationRun}
         />
       )}
 
@@ -5615,6 +5635,7 @@ Respond ONLY with a JSON object matching this schema exactly:
             company={linkedCompany}
             directors={linkedDirs}
             triangulationData={triangulationData?.report_data ?? null}
+            generationRun={generationRun}
             onPdf={ic?.sections ? () => {
               const docEl = document.getElementById("ic-note-doc");
               if (!docEl) return;

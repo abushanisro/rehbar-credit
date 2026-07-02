@@ -5,6 +5,7 @@ import {
 } from "docx";
 import type { IcNoteShape } from "@/tabs/case/ic/ICNoteDocument";
 import type { CaseRow, ExtractedRow, RatioRow } from "@/features/case/types";
+import { icGetItems, icLiVal } from "@/tabs/case/ic/ICComponents";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 // Page: Letter (8.5") – 0.75" margins → content = 7" = 10080 twips
@@ -54,7 +55,21 @@ const WORD_THRESHOLDS: Record<string, { g: number; a: number; hi: boolean }> = {
   roce:               { g: 0.15, a: 0.08, hi: true  },
   roic:               { g: 0.12, a: 0.06, hi: true  },
   ronw:               { g: 0.12, a: 0.06, hi: true  },
-  r_score_composite:  { g: 2.0,  a: 1.0,  hi: true  },
+  r_score_composite:       { g: 2.0,  a: 1.0,  hi: true  },
+  ebt_margin:              { g: 0.10, a: 0.05, hi: true  },
+  revenue_growth:          { g: 0.15, a: 0.05, hi: true  },
+  employee_cost_pct:       { g: 0.15, a: 0.25, hi: false },
+  finance_cost_pct:        { g: 0.03, a: 0.06, hi: false },
+  other_expenses_pct:      { g: 0.10, a: 0.20, hi: false },
+  raw_material_pct:        { g: 0.50, a: 0.75, hi: false },
+  return_on_fixed_assets:  { g: 0.20, a: 0.10, hi: true  },
+  r_score_ebitda_ta:       { g: 0.08, a: 0.04, hi: true  },
+  r_score_equity_ol:       { g: 0.40, a: 0.20, hi: true  },
+  r_score_re_ta:           { g: 0.25, a: 0.12, hi: true  },
+  r_score_wc_ta:           { g: 0.15, a: 0.05, hi: true  },
+  cash_conversion_cycle:   { g: 60,   a: 120,  hi: false },
+  working_capital_turnover:{ g: 6.0,  a: 3.0,  hi: true  },
+  total_assets_equity:     { g: 2.5,  a: 4.0,  hi: false },
 };
 function wordRatioStatus(name: string, value: number | null, stored: string | null | undefined): string {
   if (value === null || !Number.isFinite(value)) return stored ?? "na";
@@ -387,6 +402,122 @@ function finTable(extracted: ExtractedRow[], labels: string[], uLabel: string): 
   })];
 }
 
+// ── Curated financial labels with aliases (mirrors DynTable in HistoricalFinancialsCard) ──
+interface LabelConfig { label: string; aliases?: string[] }
+
+const PL_CONFIG: LabelConfig[] = [
+  { label: "Turnover",               aliases: ["Revenue from Sale of Products","Gross Sales","Total Revenue from Operations","Total Revenue","Revenue","Net Sales"] },
+  { label: "Cost of Materials",      aliases: ["Cost of Materials Consumed","Cost of Goods Sold","Purchases of Stock in Trade","Direct Costs"] },
+  { label: "Changes in Inventories", aliases: ["Changes in Inventories of Finished Goods, Work In Progress and Stock In Trade","Changes in Inventories"] },
+  { label: "Gross Profit",           aliases: [] },
+  { label: "Employee Costs",         aliases: ["Total Employee Benefit Expense","Employee Benefit Expense"] },
+  { label: "Other Expenses",         aliases: ["Total Other Expenses","Other Expenses"] },
+  { label: "EBITDA",                 aliases: [] },
+  { label: "Depreciation",           aliases: ["Total Depreciation, Depletion and Amortization Expense","Depreciation"] },
+  { label: "EBIT",                   aliases: [] },
+  { label: "Finance Costs",          aliases: ["Interest Expense","Finance Cost","Finance Costs"] },
+  { label: "Profit Before Tax",      aliases: ["Profit before Tax","Profit before Exceptional and Extraordinary Items and Tax","Profit before Extraordinary Items and Tax","PBT"] },
+  { label: "PAT",                    aliases: ["Profit/(Loss) for the Period from Continuing Operations","Profit/(Loss)","Net Profit"] },
+];
+
+const BS_CONFIG: LabelConfig[] = [
+  { label: "Share Capital",               aliases: [] },
+  { label: "Reserves & Surplus",          aliases: [] },
+  { label: "Net Worth",                   aliases: ["Networth","Total Equity"] },
+  { label: "Long-term Borrowings",        aliases: ["Long Term Borrowings"] },
+  { label: "Short-term Borrowings",       aliases: ["Short Term Borrowings"] },
+  { label: "Total Debt",                  aliases: [] },
+  { label: "Trade Payables",              aliases: [] },
+  { label: "Other Current Liabilities",   aliases: [] },
+  { label: "Total Current Liabilities",   aliases: ["Current Liabilities"] },
+  { label: "Fixed Assets (Net)",          aliases: ["Net Block of Assets","Tangible Assets","Total Fixed Asset","Net Block","Total Non Current Assets"] },
+  { label: "Inventories",                 aliases: ["Inventory"] },
+  { label: "Trade Receivables",           aliases: [] },
+  { label: "Cash & Bank",                 aliases: ["Cash & Cash Equivalents","Cash and Bank"] },
+  { label: "Short-term Loans & Advances", aliases: [] },
+  { label: "Total Current Assets",        aliases: ["Current Assets"] },
+  { label: "Total Assets",               aliases: ["TOTAL ASSETS","Total Equity & Liabilities"] },
+  { label: "Capital Employed",            aliases: [] },
+];
+
+function liValWithAliases(rows: ExtractedRow[], fy: number, label: string, aliases: string[], unit: string | null): number | null {
+  const candidates = [label, ...aliases];
+  for (const row of rows.filter(r => r.fiscal_year === fy)) {
+    const items = (row.line_items as unknown as LineItem[]) ?? [];
+    for (const candidate of candidates) {
+      const item = items.find(i => i.label === candidate);
+      if (item) {
+        const v = item.override_value !== undefined && item.override_value !== null ? item.override_value : item.value;
+        if (v !== null) return scaleUnit(Number(v), unit);
+      }
+    }
+  }
+  return null;
+}
+
+function finTableCurated(typed: ExtractedRow[], allHist: ExtractedRow[], config: LabelConfig[], uLabel: string): (Paragraph | Table)[] {
+  const unit = rawUnit(allHist);
+  const shownY = histFyYears(allHist).slice(-5);
+  if (!shownY.length) {
+    return [new Paragraph({ children: [new TextRun({ text: "No historical data available.", color: CLR.muted, size: SZ.base, italics: true, font: "Calibri" })], spacing: { before: 80, after: 80 } })];
+  }
+  const getV = (cfg: LabelConfig, fy: number): number | null => {
+    // 1) Try typed rows (P&L-only or BS-only rows)
+    const src = typed.length > 0 ? typed : allHist;
+    const v = liValWithAliases(src, fy, cfg.label, cfg.aliases ?? [], unit);
+    if (v !== null) return v;
+    // 2) Widen search to all historical rows
+    if (typed.length > 0) {
+      const v2 = liValWithAliases(allHist, fy, cfg.label, cfg.aliases ?? [], unit);
+      if (v2 !== null) return v2;
+    }
+    // 3) Last resort: derived items (computes Gross Profit, EBITDA, EBIT, Capital Employed, etc.)
+    const derived = icGetItems(allHist, fy);
+    for (const candidate of [cfg.label, ...(cfg.aliases ?? [])]) {
+      const val = icLiVal(derived, candidate);
+      if (val !== null) return scaleUnit(val, unit);
+    }
+    return null;
+  };
+  const activeConfig = config.filter(cfg => shownY.some(y => getV(cfg, y) !== null));
+  const yoyW  = 1100;
+  const yearW = Math.floor((CW - COL.finLabel - yoyW) / shownY.length);
+  const widths = [COL.finLabel, ...shownY.map(() => yearW), yoyW];
+  const headers = [`Item (₹ ${uLabel})`, ...shownY.map(y => `FY ${y}`), "YoY %"];
+  const rows: string[][] = [];
+  for (const cfg of activeConfig) {
+    const vals = shownY.map(y => getV(cfg, y));
+    const filledY = shownY.filter(y => getV(cfg, y) !== null);
+    const curr = filledY.length >= 1 ? getV(cfg, filledY[filledY.length - 1]) : null;
+    const prev = filledY.length >= 2 ? getV(cfg, filledY[filledY.length - 2]) : null;
+    let yoy = "—";
+    if (curr !== null && prev !== null && prev !== 0) {
+      const pct = ((curr - prev) / Math.abs(prev)) * 100;
+      yoy = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
+    }
+    rows.push([cfg.label, ...vals.map(fmtNum), yoy]);
+  }
+  if (!rows.length) {
+    return [new Paragraph({ children: [new TextRun({ text: "No data for these items.", color: CLR.muted, size: SZ.base, italics: true, font: "Calibri" })], spacing: { before: 80, after: 80 } })];
+  }
+  return [new Table({ width: { size: CW, type: WidthType.DXA }, rows: [goldRow(headers, widths), ...rows.map((r, i) => dataRow(r, widths, i))], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } })];
+}
+
+const REVENUE_WORD_ALIASES = ["Turnover","Gross Sales","Revenue from Sale of Products","Total Revenue from Operations","Revenue","Net Sales","Total Revenue"];
+
+function computeWordRevenueGrowth(extracted: ExtractedRow[], year: number): number | null {
+  const unit = rawUnit(extracted);
+  const hist = extracted.filter(r => r.statement_type !== "projections");
+  const curr = liValWithAliases(hist, year, REVENUE_WORD_ALIASES[0], REVENUE_WORD_ALIASES.slice(1), unit);
+  if (curr == null) return null;
+  const priorYears = [...new Set(hist.filter(r => r.fiscal_year < year).map(r => r.fiscal_year as number))].sort((a, b) => b - a);
+  for (const py of priorYears) {
+    const prev = liValWithAliases(hist, py, REVENUE_WORD_ALIASES[0], REVENUE_WORD_ALIASES.slice(1), unit);
+    if (prev != null && prev !== 0) return (curr - prev) / Math.abs(prev);
+  }
+  return null;
+}
+
 const RATIO_NAMES: Record<string, string> = {
   dscr: "DSCR", icr: "ICR", fccr: "FCCR",
   current_ratio: "Current Ratio", quick_ratio: "Quick Ratio", cash_ratio: "Cash Ratio",
@@ -412,7 +543,22 @@ export async function generateIcDeckWord(params: {
   const tpls = (ic.section_templates ?? {}) as Record<string, SectionTemplate>;
   const logo = await fetchLogo();
 
-  const SKIP_KEYS = new Set(["id","created_at","updated_at","case_id","org_id","company_id","user_id","vector","embedding","search_vector"]);
+  const SKIP_KEYS = new Set([
+    // Internal DB fields
+    "id","created_at","updated_at","case_id","org_id","company_id","user_id",
+    "vector","embedding","search_vector",
+    // Redundant / internal company fields
+    "is_active","created_by",
+    // Legal constitution already in Deal Summary and often conflicts with MCA data
+    "legal_constitution",
+    // Raw MCA fields — too technical / cluttered for IC deck
+    "mca_about","mca_category","mca_type","mca_products_services","mca_cin","mca_status",
+  ]);
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isCleanValue = (v: string) =>
+    v.trim().length > 0 &&
+    !UUID_RE.test(v.trim()) &&
+    !v.trimStart().startsWith("CLAUDE INSTRUCTIONS");
 
   const children: (Paragraph | Table)[] = [];
 
@@ -544,7 +690,7 @@ export async function generateIcDeckWord(params: {
   // ── Company Profile ────────────────────────────────────────────────────────
   if (company && Object.keys(company).length > 0) {
     const entries = Object.entries(company)
-      .filter(([k, v]) => !SKIP_KEYS.has(k) && v != null && String(v).trim())
+      .filter(([k, v]) => !SKIP_KEYS.has(k) && v != null && isCleanValue(String(v)))
       .map(([k, v]) => [cap(k), String(v)] as [string, string]);
     if (entries.length) {
       children.push(sectionHdr(null, "Company Profile"));
@@ -660,33 +806,39 @@ export async function generateIcDeckWord(params: {
   const unit = rawUnit(extracted);
   const uLabel = unitLabel(unit);
 
-  const histGroups: { title: string; labels: string[] }[] = [
-    { title: `Historical Financials – P&L (1/2)  (₹ ${uLabel})`,
-      labels: ["Turnover","Cost of Goods Sold","Gross Profit","Operating Expenses","EBITDA"] },
-    { title: `Historical Financials – P&L (2/2)  (₹ ${uLabel})`,
-      labels: ["EBIT","Interest Expense","Profit Before Tax","Tax","PAT"] },
-    { title: `Historical Financials – Balance Sheet (1/3)  (₹ ${uLabel})`,
-      labels: ["Fixed Assets (Net)","Inventory","Trade Receivables","Cash & Bank","Current Assets"] },
-    { title: `Historical Financials – Balance Sheet (2/3)  (₹ ${uLabel})`,
-      labels: ["Trade Payables","Short Term Borrowings","Long Term Borrowings","Current Liabilities","Total Debt"] },
-    { title: `Historical Financials – Balance Sheet (3/3)  (₹ ${uLabel})`,
-      labels: ["Net Worth","Capital Employed","Working Capital","Total Assets"] },
-  ];
+  const histRows = extracted.filter(r => r.statement_type !== "projections");
+  const plRows   = extracted.filter(r => r.statement_type === "profit_loss");
+  const bsRows   = extracted.filter(r => r.statement_type === "balance_sheet");
 
-  for (const grp of histGroups) {
-    children.push(sectionHdr("V", grp.title));
-    children.push(spacer(80));
-    finTable(extracted, grp.labels, uLabel).forEach(el => children.push(el));
-    children.push(spacer(200));
-  }
+  // V-a: P&L table
+  children.push(sectionHdr("V-a", `Historical Financials – Profit & Loss (₹ ${uLabel})`));
+  children.push(spacer(80));
+  finTableCurated(plRows, histRows, PL_CONFIG, uLabel).forEach(el => children.push(el));
+  children.push(spacer(200));
 
-  // V-f: Projections
+  // V-b: P&L Observations (AI narrative)
+  children.push(sectionHdr("V-b", "P&L Statement – Observations"));
+  narrativeBody(tpls["historical_pl_obs"]).forEach(p => children.push(p));
+  children.push(spacer(160));
+
+  // V-c: Balance Sheet table
+  children.push(sectionHdr("V-c", `Historical Financials – Balance Sheet (₹ ${uLabel})`));
+  children.push(spacer(80));
+  finTableCurated(bsRows, histRows, BS_CONFIG, uLabel).forEach(el => children.push(el));
+  children.push(spacer(200));
+
+  // V-d: Balance Sheet Observations (AI narrative)
+  children.push(sectionHdr("V-d", "Balance Sheet – Observations"));
+  narrativeBody(tpls["historical_bs_obs"]).forEach(p => children.push(p));
+  children.push(spacer(160));
+
+  // V-e: Projected Financials
   {
     const projYears = [...new Set(
       extracted.filter(r => r.statement_type === "projections" && r.fiscal_year != null).map(r => r.fiscal_year as number),
     )].sort((a, b) => a - b);
 
-    children.push(sectionHdr("V", "Projected Financials  (₹ Lakhs)"));
+    children.push(sectionHdr("V-e", "Projected Financials (₹ Lakhs)"));
     children.push(spacer(80));
 
     if (!projYears.length) {
@@ -702,8 +854,8 @@ export async function generateIcDeckWord(params: {
     children.push(spacer(200));
   }
 
-  // V-g: Commentary
-  children.push(sectionHdr("V", "Historical Financial Analysis – Commentary"));
+  // V-f: Overall Commentary (AI narrative)
+  children.push(sectionHdr("V-f", "Historical Financial Analysis – Overall Commentary"));
   narrativeBody(tpls["historical_financial"]).forEach(p => children.push(p));
   children.push(spacer(160));
 
@@ -734,25 +886,47 @@ export async function generateIcDeckWord(params: {
     if (!allYears.length) continue;
     const years = allYears.slice(-5);
 
-    const byName: Record<string, { vals: Record<string, string>; bench: string }> = {};
+    const byName: Record<string, { rawVals: Record<string, number | null>; displayVals: Record<string, string>; bench: string; ratioName: string }> = {};
     for (const r of catR as never as Record<string, unknown>[]) {
-      const dn = RATIO_NAMES[String(r["ratio_name"] ?? "")] ?? cap(String(r["ratio_name"] ?? ""));
-      if (!byName[dn]) byName[dn] = { vals: {}, bench: "—" };
-      const rawVal  = r["ratio_value"] != null ? Number(r["ratio_value"]) : null;
-      const val    = rawVal != null ? rawVal.toFixed(2) : "—";
-      const status = wordRatioStatus(String(r["ratio_name"] ?? ""), rawVal, r["threshold_status"] as string | null);
+      const rName = String(r["ratio_name"] ?? "");
+      const dn = RATIO_NAMES[rName] ?? cap(rName);
+      if (!byName[dn]) byName[dn] = { rawVals: {}, displayVals: {}, bench: "—", ratioName: rName };
+      let rawVal = r["ratio_value"] != null ? Number(r["ratio_value"]) : null;
+      if (rawVal === null && rName === "revenue_growth") {
+        rawVal = computeWordRevenueGrowth(extracted, Number(r["fiscal_year"]));
+      }
+      const status = wordRatioStatus(rName, rawVal, r["threshold_status"] as string | null);
       const suffix = status === "green" ? " ✓" : status === "red" ? " ✗" : status === "amber" ? " !" : "";
-      byName[dn].vals[String(r["fiscal_year"])] = val + suffix;
-      if (r["benchmark"] != null) byName[dn].bench = String(r["benchmark"]);
+      byName[dn].rawVals[String(r["fiscal_year"])] = rawVal;
+      byName[dn].displayVals[String(r["fiscal_year"])] = rawVal != null ? rawVal.toFixed(2) + suffix : "—";
+      // Benchmark: DB value ?? threshold green value
+      const dbBench = r["benchmark"] != null ? Number(r["benchmark"]) : null;
+      const thr = WORD_THRESHOLDS[rName];
+      const bm = dbBench ?? thr?.g ?? null;
+      if (bm != null && byName[dn].bench === "—") byName[dn].bench = bm.toFixed(2);
     }
 
     const names  = Object.keys(byName);
+    const yoyW   = 900;
     const benchW = 1100;
-    const ratiLW = 2880;
-    const yrW    = Math.floor((CW - ratiLW - benchW) / years.length);
-    const rWidths = [ratiLW, ...years.map(() => yrW), benchW];
-    const rHdr   = goldRow(["Ratio", ...years.map(y => `FY ${y}`), "Bench"], rWidths);
-    const rRows  = names.map((n, i) => dataRow([trunc(n, 40), ...years.map(y => byName[n].vals[String(y)] ?? "—"), byName[n].bench], rWidths, i));
+    const ratiLW = 2520;
+    const yrW    = Math.floor((CW - ratiLW - yoyW - benchW) / years.length);
+    const rWidths = [ratiLW, ...years.map(() => yrW), yoyW, benchW];
+    const rHdr   = goldRow(["Ratio", ...years.map(y => `FY ${y}`), "Δ YoY", "Bench"], rWidths);
+    const rRows  = names.map((n, i) => {
+      const info = byName[n];
+      const filledY = years.filter(y => info.rawVals[String(y)] != null);
+      let yoyStr = "—";
+      if (filledY.length >= 2) {
+        const last  = info.rawVals[String(filledY[filledY.length - 1])]!;
+        const prev2 = info.rawVals[String(filledY[filledY.length - 2])]!;
+        if (prev2 !== 0) {
+          const pct = ((last - prev2) / Math.abs(prev2)) * 100;
+          yoyStr = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
+        }
+      }
+      return dataRow([trunc(n, 40), ...years.map(y => info.displayVals[String(y)] ?? "—"), yoyStr, info.bench], rWidths, i);
+    });
 
     children.push(sectionHdr("VII", CAT_TITLES[cat] ?? cap(cat)));
     children.push(spacer(80));

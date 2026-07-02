@@ -95,16 +95,39 @@ const STARTERS_COMPANIES = [
   "Summarise the company portfolio",
 ];
 
+const STARTERS_TEAM = [
+  "Who are the active team members?",
+  "Which analyst has the most cases in review?",
+  "Are there any cases without an assigned analyst?",
+];
+
+const STARTERS_SYSTEM = [
+  "Are there any failed extractions in the pipeline?",
+  "Which cases have stalled in a status for too long?",
+  "Summarise recent extraction errors across the portfolio",
+  "Are there any red-flag ratio cases needing attention?",
+];
+
+const STARTERS_IC = [
+  "What cases are currently in IC review?",
+  "Summarise the IC deck for the latest case",
+  "What are the common errors found in recent IC notes?",
+  "Which cases have confirmed AI analysis errors?",
+];
+
 function usePageContext() {
   const location = useLocation();
   const caseMatch = useMatch("/case/:id");
   const compMatch = useMatch("/companies/:id");
   const path = location.pathname;
 
-  if (caseMatch?.params.id) return { caseId: caseMatch.params.id, pageName: "Case Detail", starters: STARTERS_CASE };
-  if (compMatch?.params.id) return { caseId: undefined, pageName: "Company Detail", starters: STARTERS_COMPANIES };
-  if (path === "/companies") return { caseId: undefined, pageName: "Companies", starters: STARTERS_COMPANIES };
-  if (path === "/new")       return { caseId: undefined, pageName: "New Case",   starters: STARTERS_PIPELINE };
+  if (caseMatch?.params.id) return { caseId: caseMatch.params.id, pageName: "Case Detail",    starters: STARTERS_CASE };
+  if (compMatch?.params.id) return { caseId: undefined, pageName: "Company Detail",            starters: STARTERS_COMPANIES };
+  if (path === "/companies") return { caseId: undefined, pageName: "Companies",                starters: STARTERS_COMPANIES };
+  if (path === "/new")       return { caseId: undefined, pageName: "New Case",                 starters: STARTERS_PIPELINE };
+  if (path === "/users")     return { caseId: undefined, pageName: "Team",                     starters: STARTERS_TEAM };
+  if (path === "/observability") return { caseId: undefined, pageName: "System",               starters: STARTERS_SYSTEM };
+  if (path === "/ic")        return { caseId: undefined, pageName: "IC Portal",                starters: STARTERS_IC };
   return { caseId: undefined, pageName: "Pipeline", starters: STARTERS_PIPELINE };
 }
 
@@ -306,6 +329,14 @@ export function AnalystChat() {
               <span className="ml-2 text-[#444]">— {pageName}</span>
             </p>
           </div>
+
+          {/* RAG badge */}
+          <span
+            title="Supermemory RAG active — past analyst findings are automatically retrieved and included in every response"
+            style={{ fontSize: 8, letterSpacing: "0.08em", background: "rgba(232,114,28,0.12)", color: "#E8721C", border: "1px solid rgba(232,114,28,0.3)", borderRadius: 3, padding: "1px 5px", whiteSpace: "nowrap", flexShrink: 0 }}
+          >
+            RAG ◈
+          </span>
 
           {/* drag hint */}
           <div className="ml-2 text-[#333] flex-shrink-0" title="Drag to reposition">

@@ -13,6 +13,7 @@ import type { TriangulationData } from "@/lib/triangulation-excel-parser";
 import { UploadGrid } from "@/components/case/UploadGrid";
 import { ICAnnotationLayer, annotationsToSvgString } from "./ICAnnotationLayer";
 import type { Annotation, DrawTool } from "./ICAnnotationLayer";
+import { ICErrorPanel } from "./ICErrorPanel";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -423,6 +424,7 @@ export function ICNoteDocument({
   triangulationData,
   onPdf,
   onPpt,
+  generationRun,
 }: {
   cc: CaseRow;
   extracted: ExtractedRow[];
@@ -454,6 +456,7 @@ export function ICNoteDocument({
   triangulationData?: TriangulationData | null;
   onPdf?: () => void;
   onPpt?: () => void;
+  generationRun?: string | null;
 }) {
   const [editBlock, setEditBlock]                       = useState<{ sectionId: string; blockIdx: number; val: string } | null>(null);
   const [showComments, setShowComments]                 = useState(false);
@@ -891,6 +894,17 @@ export function ICNoteDocument({
           ⚠ AI-Generated Draft — Analyst review and approval required before circulation to IC members
         </div>
       </div>
+
+      {/* ── AI Semantic Error Panel ──────────────────────────────────────────── */}
+      {generationRun && (
+        <div style={{ padding: "12px 28px 0" }}>
+          <ICErrorPanel
+            caseId={cc.id}
+            generationRun={generationRun}
+            caseContext={{ client_name: cc.client_name, industry: cc.industry ?? null, product_type: cc.product_type ?? null }}
+          />
+        </div>
+      )}
 
       {/* ── Body: nav sidebar + document content + comments ─────────────────── */}
       <div id="ic-note-body-row" style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>

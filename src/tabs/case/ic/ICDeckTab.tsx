@@ -4,6 +4,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { generateIcDeckWord } from "@/lib/ic-deck-word-export";
 import type { IcNoteShape } from "./ICNoteDocument";
 import type { ExtractedRow, RatioRow } from "@/features/case/types";
+import { runDataQualityChecks, type DataQualityIssue } from "@/features/case/dataQualityChecks";
+import { ICErrorPanel } from "./ICErrorPanel";
 
 // ── Deck components ───────────────────────────────────────────────────────────
 import { SlideShell }               from "./deck/SlideShell";
@@ -44,8 +46,10 @@ export interface ICDeckTabProps {
   company: Record<string, string | null> | null;
   directors: Record<string, string | null>[];
   cibilData: CibilReportRow[];
+  gstData: { period: string; total_turnover: number | null }[];
   onGenerateSection: (sectionId: string) => Promise<void>;
   generatingSection: string | null;
+  generationRun?: string | null;
 }
 
 // ── Section metadata (narrative sections only) ─────────────────────────────────
@@ -65,9 +69,7 @@ const DECK_SECTIONS: DeckSection[] = [
   { id: "net_worth_income",      roman: "II-c",  title: "Net Worth and Sources of Income",                  short: "Net Worth",        type: "narrative",   slideCount: 1 },
   { id: "investment_structure",  roman: "III",   title: "Proposed Investment Structure",                   short: "Investment",      type: "narrative",   slideCount: 1 },
   { id: "rehbar_funding_history",roman: "IV",    title: "Rehbar Funding History",                          short: "Funding History", type: "narrative",   slideCount: 1 },
-  { id: "historical_financial",  roman: "V",     title: "Historical Financial Analysis",                   short: "Financials",      type: "financials",  slideCount: 4 },
-  { id: "historical_pl_obs",    roman: "V-e",   title: "P&L Statement – Observations",                    short: "P&L Obs",         type: "narrative",   slideCount: 1 },
-  { id: "historical_bs_obs",    roman: "V-f",   title: "Balance Sheet – Observations",                    short: "BS Obs",          type: "narrative",   slideCount: 1 },
+  { id: "historical_financial",  roman: "V",     title: "Historical Financial Analysis",                   short: "Financials",      type: "financials",  slideCount: 6 },
   { id: "projections",           roman: "VI",    title: "Projections & Estimates",                         short: "Projections",     type: "narrative",   slideCount: 1 },
   { id: "key_ratios",            roman: "VII",   title: "Key Financial Ratios",                            short: "Key Ratios",      type: "ratios",      slideCount: 9 },
   { id: "cash_flow",             roman: "VIII-a", title: "Cash Flow Statement",                             short: "Cash Flow",       type: "narrative",   slideCount: 1 },
@@ -116,13 +118,32 @@ export function ICDeckTab({
   company,
   directors,
   cibilData,
+  gstData,
   onGenerateSection,
   generatingSection,
+  generationRun,
 }: ICDeckTabProps) {
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [exportingWord, setExportingWord] = useState(false);
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const mainRef = useRef<HTMLDivElement | null>(null);
+
+  // ── Analyst Notes state ───────────────────────────────────────────────────
+  const [analystNotes, setAnalystNotes] = useState(cc.analyst_notes ?? "");
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [notesSaved, setNotesSaved] = useState(false);
+
+  const saveAnalystNotes = async () => {
+    setSavingNotes(true);
+    setNotesSaved(false);
+    try {
+      await supabase.from("credit_cases").update({ analyst_notes: analystNotes || null }).eq("id", cc.id);
+      setNotesSaved(true);
+      setTimeout(() => setNotesSaved(false), 2500);
+    } finally {
+      setSavingNotes(false);
+    }
+  };
 
   const handleExportWord = useCallback(async () => {
     setExportingWord(true);
@@ -182,6 +203,19 @@ export function ICDeckTab({
 
   // ── Section templates helper ──────────────────────────────────────────────
   const tpl = ic.section_templates ?? {};
+
+  // ── Data quality checks ───────────────────────────────────────────────────
+  const dqIssues: DataQualityIssue[] = React.useMemo(
+    () => runDataQualityChecks(
+      { deal_amount: cc.deal_amount != null ? Number(cc.deal_amount) : null, client_name: cc.client_name },
+      extracted ?? [],
+      gstData ?? [],
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cc.id, cc.deal_amount, (extracted ?? []).length, (gstData ?? []).length],
+  );
+  const hardIssues = dqIssues.filter(d => d.severity === "hard");
+  const warnIssues = dqIssues.filter(d => d.severity === "warn");
 
   // ── TOC sections list ─────────────────────────────────────────────────────
   const tocSections = DECK_SECTIONS.map((sec, idx) => ({
@@ -256,6 +290,25 @@ export function ICDeckTab({
             {exportingWord ? "Exporting…" : "Download Word"}
           </button>
         </div>
+
+        {/* Analyst Notes shortcut */}
+        <button
+          onClick={() => sectionRefs.current["_notes"]?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          style={{
+            display: "flex", alignItems: "center", gap: 6,
+            width: "100%", textAlign: "left",
+            background: "rgba(245,197,24,0.08)",
+            border: "none", borderLeft: `2px solid ${DS.gold}`,
+            padding: "7px 14px",
+            fontSize: 10, fontWeight: 700,
+            color: DS.gold,
+            cursor: "pointer", fontFamily: DS.bodyFont,
+            letterSpacing: "0.04em", textTransform: "uppercase",
+            marginBottom: 4,
+          }}
+        >
+          ✏ Analyst Notes
+        </button>
 
         {/* Pre-section items */}
         {[
@@ -385,6 +438,123 @@ export function ICDeckTab({
           alignItems: "center",
         }}
       >
+        {/* ── Data Quality Banner ───────────────────────────────────────── */}
+        {dqIssues.length > 0 && (
+          <div style={{ width: "100%", maxWidth: 960, marginBottom: 16 }}>
+            {hardIssues.length > 0 && (
+              <div style={{ background: "#FEF2F2", border: "1.5px solid #EF4444", borderRadius: 6, padding: "12px 16px", marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, color: "#991B1B" }}>⛔</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#991B1B", letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                    {hardIssues.length} Data Quality Issue{hardIssues.length > 1 ? "s" : ""} — Must Fix Before IC
+                  </span>
+                </div>
+                {hardIssues.map(issue => (
+                  <div key={issue.id} style={{ marginBottom: 8, paddingLeft: 20, borderLeft: "3px solid #EF4444" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#7F1D1D", marginBottom: 2 }}>{issue.title}</div>
+                    <div style={{ fontSize: 10.5, color: "#991B1B", lineHeight: 1.6 }}>{issue.detail}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {warnIssues.length > 0 && (
+              <div style={{ background: "#FFFBEB", border: "1.5px solid #F59E0B", borderRadius: 6, padding: "12px 16px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, color: "#B45309" }}>⚠</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                    {warnIssues.length} Analyst Flag{warnIssues.length > 1 ? "s" : ""} — Review Before Voting
+                  </span>
+                </div>
+                {warnIssues.map(issue => (
+                  <div key={issue.id} style={{ marginBottom: 8, paddingLeft: 20, borderLeft: "3px solid #F59E0B" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#78350F", marginBottom: 2 }}>{issue.title}</div>
+                    <div style={{ fontSize: 10.5, color: "#92400E", lineHeight: 1.6 }}>{issue.detail}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── AI Semantic Error Panel ─────────────────────────────────── */}
+        {generationRun && (
+          <ICErrorPanel
+            caseId={cc.id}
+            generationRun={generationRun}
+            caseContext={{ client_name: cc.client_name, industry: cc.industry ?? null, product_type: cc.product_type ?? null }}
+          />
+        )}
+
+        {/* ── Analyst Notes Panel ──────────────────────────────────────── */}
+        <div
+          ref={(el) => { sectionRefs.current["_notes"] = el; }}
+          style={{
+            width: "100%", maxWidth: 960,
+            marginBottom: 20,
+            background: "#FFFDF0",
+            border: "1.5px solid #F5C518",
+            borderRadius: 6,
+            padding: "16px 20px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: DS.navy, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                ✏ Analyst Notes
+              </div>
+              <div style={{ fontSize: 10, color: "#78716C", marginTop: 2 }}>
+                Write observations, concerns, or context about this deal — fed to Claude when generating IC sections.
+              </div>
+            </div>
+            <button
+              onClick={saveAnalystNotes}
+              disabled={savingNotes}
+              style={{
+                padding: "6px 16px",
+                background: notesSaved ? "#16A34A" : DS.navy,
+                color: DS.white,
+                border: "none",
+                borderRadius: 4,
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: savingNotes ? "wait" : "pointer",
+                letterSpacing: "0.02em",
+                minWidth: 80,
+                transition: "background 0.2s",
+              }}
+            >
+              {savingNotes ? "Saving…" : notesSaved ? "✓ Saved" : "Save"}
+            </button>
+          </div>
+          <textarea
+            value={analystNotes}
+            onChange={(e) => setAnalystNotes(e.target.value)}
+            placeholder="e.g. Promoter has strong track record in textiles. GST data shows 15% gap vs ITR — flag for triangulation. Collateral valuation pending as of July 2026. Client requested 36-month tenure due to expansion cycle…"
+            rows={6}
+            style={{
+              width: "100%",
+              resize: "vertical",
+              background: "#FFFEF5",
+              border: "1px solid rgba(245,197,24,0.4)",
+              borderRadius: 4,
+              padding: "10px 12px",
+              fontSize: 12,
+              color: DS.navy,
+              fontFamily: DS.bodyFont,
+              lineHeight: 1.65,
+              outline: "none",
+              boxSizing: "border-box",
+            }}
+            onFocus={(e) => { e.currentTarget.style.borderColor = DS.gold; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = "rgba(245,197,24,0.4)"; }}
+          />
+          {analystNotes.trim().length > 0 && (
+            <div style={{ fontSize: 9.5, color: "#A8A29E", marginTop: 6, textAlign: "right" }}>
+              {analystNotes.trim().split(/\s+/).length} words · {analystNotes.length} chars — saved to case file and used in AI generation
+            </div>
+          )}
+        </div>
+
         {/* 1. Cover */}
         <div id="deck-section-cover" ref={(el) => { sectionRefs.current["_cover"] = el; }} style={{ width: "100%", maxWidth: 960 }}>
           <CoverCard
@@ -401,18 +571,21 @@ export function ICDeckTab({
 
         {/* 3. Deal Summary */}
         <div ref={(el) => { sectionRefs.current["_deal"] = el; }} style={{ width: "100%", maxWidth: 960 }}>
-          <DealSummaryCard cc={{
-            client_name:         cc.client_name,
-            case_code:           cc.case_code ?? null,
-            product_type:        cc.product_type ?? null,
-            deal_amount:         cc.deal_amount != null ? Number(cc.deal_amount) : null,
-            tenure_months:       cc.tenure_months ?? null,
-            expected_irr:        cc.expected_irr != null ? Number(cc.expected_irr) : null,
-            end_use:             cc.end_use ?? null,
-            collateral_summary:  cc.collateral_summary ?? null,
-            industry:            cc.industry ?? null,
-            legal_constitution:  cc.legal_constitution ?? null,
-          }} />
+          <DealSummaryCard
+            cc={{
+              client_name:         cc.client_name,
+              case_code:           cc.case_code ?? null,
+              product_type:        cc.product_type ?? null,
+              deal_amount:         cc.deal_amount != null ? Number(cc.deal_amount) : null,
+              tenure_months:       cc.tenure_months ?? null,
+              expected_irr:        cc.expected_irr != null ? Number(cc.expected_irr) : null,
+              end_use:             cc.end_use ?? null,
+              collateral_summary:  cc.collateral_summary ?? null,
+              industry:            cc.industry ?? null,
+              legal_constitution:  cc.legal_constitution ?? null,
+            }}
+            dealWarning={dqIssues.find(d => d.section === "deal")?.detail ?? null}
+          />
         </div>
 
         {/* 4. Company Profile */}
@@ -511,6 +684,12 @@ export function ICDeckTab({
                   template={tpl["historical_financial"]}
                   generating={generatingSection === "historical_financial"}
                   onGenerate={() => onGenerateSection("historical_financial")}
+                  plObsTemplate={tpl["historical_pl_obs"]}
+                  generatingPlObs={generatingSection === "historical_pl_obs"}
+                  onGeneratePlObs={() => onGenerateSection("historical_pl_obs")}
+                  bsObsTemplate={tpl["historical_bs_obs"]}
+                  generatingBsObs={generatingSection === "historical_bs_obs"}
+                  onGenerateBsObs={() => onGenerateSection("historical_bs_obs")}
                 />
               )}
 
@@ -518,6 +697,7 @@ export function ICDeckTab({
               {sec.type === "ratios" && (
                 <KeyRatiosCard
                   ratios={ratios}
+                  extracted={extracted}
                   pageNumStart={pageStart}
                   template={tpl["key_ratios"]}
                   generating={generatingSection === "key_ratios"}
