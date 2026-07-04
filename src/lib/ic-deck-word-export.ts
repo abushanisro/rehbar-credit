@@ -583,6 +583,13 @@ const RATIO_NAMES: Record<string, string> = {
 };
 
 // ── Main export ───────────────────────────────────────────────────────────────
+interface CibilReportRowWord {
+  id: string;
+  borrower_name: string | null;
+  report_date: string | null;
+  report_data: Record<string, unknown>;
+}
+
 export async function generateIcDeckWord(params: {
   cc: CaseRow;
   ic: IcNoteShape;
@@ -591,8 +598,9 @@ export async function generateIcDeckWord(params: {
   company?: Record<string, string | null> | null;
   directors?: Record<string, string | null>[] | null;
   photoBlobs?: { name: string; data: ArrayBuffer; mimeType: string }[];
+  cibilData?: CibilReportRowWord[];
 }): Promise<void> {
-  const { cc, ic, extracted, ratios, company, directors, photoBlobs = [] } = params;
+  const { cc, ic, extracted, ratios, company, directors, photoBlobs = [], cibilData = [] } = params;
   const clientName = cc.client_name ?? "Borrower";
   const tpls = (ic.section_templates ?? {}) as Record<string, SectionTemplate>;
   const logo = await fetchLogo();
@@ -743,7 +751,147 @@ export async function generateIcDeckWord(params: {
   addNarrative("I",   "Executive Summary",        "executive_summary");
   addNarrative("II",   "Client & Promoter Profile",       "client_promoter");
   addNarrative("II-b", "CIBIL Report Summary",             "cibil_report");
-  addNarrative("II-c", "Net Worth and Sources of Income",  "net_worth_income");
+
+  // ── II-c – Net Worth and Sources of Income (data-driven, no Generate button) ─
+  {
+    children.push(sectionHdr("II-c", "Net Worth and Sources of Income"));
+
+    // ── Promoter personal liabilities from CIBIL ──────────────────────────────
+    const consumerReports = cibilData.filter(row => {
+      const rd = row.report_data as Record<string, unknown>;
+      return !rd?.report_type || rd.report_type === "consumer";
+    });
+
+    if (consumerReports.length > 0) {
+      children.push(new Paragraph({
+        children: [new TextRun({ text: "PROMOTER / DIRECTOR — PERSONAL NET WORTH STATEMENTS", bold: true, color: CLR.muted, size: SZ.sm, font: "Calibri", characterSpacing: 40 })],
+        spacing: { before: 120, after: 60 },
+      }));
+
+      for (const row of consumerReports) {
+        const rd = row.report_data as Record<string, unknown>;
+        const name = (rd.borrower_name as string) || row.borrower_name || "Unknown";
+        const pan  = (rd.pan as string) || "—";
+        const SECURED_TYPES = new Set(["Home Loan","Housing Loan","Mortgage Loan","Loan Against Property","Vehicle Loan","Auto Loan","Gold Loan","Two Wheeler Loan"]);
+        const accounts = ((rd.accounts ?? []) as Record<string, unknown>[]).filter(a => {
+          const status = String(a.status ?? "").toLowerCase();
+          return status !== "closed" && ((a.current_balance as number) ?? 0) > 0;
+        });
+        const secured   = accounts.filter(a => SECURED_TYPES.has(String(a.account_type ?? "")));
+        const unsecured = accounts.filter(a => !SECURED_TYPES.has(String(a.account_type ?? "")));
+        const totalLiab = accounts.reduce((s, a) => s + ((a.current_balance as number) ?? 0), 0) / 100000;
+
+        children.push(new Paragraph({
+          children: [
+            new TextRun({ text: `${name}`, bold: true, color: CLR.navy, size: SZ.md, font: "Calibri" }),
+            new TextRun({ text: `  ·  PAN: ${pan}`, color: CLR.muted, size: SZ.base, font: "Calibri" }),
+            ...(row.report_date ? [new TextRun({ text: `  ·  Report Date: ${row.report_date}`, color: CLR.muted, size: SZ.base, font: "Calibri" })] : []),
+          ],
+          shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.altRow },
+          spacing: { before: 120, after: 60 },
+          indent: { left: 80 },
+        }));
+
+        const ASSET_ROWS = [
+          ["Immovable Properties", "Land, Buildings, Residential Properties"],
+          ["Investments",          "Shares, Bonds, Gold, Mutual Funds"],
+          ["Bank Balances",        "Savings / Current Bank Balance"],
+          ["Fixed Deposits",       "Bank FDs / Post Office Deposits"],
+          ["Vehicles",             "Personal Vehicles"],
+        ];
+        const liabRows: [string, string, string][] = [
+          ...secured.map(a => ["Secured Loans", String(a.account_type ?? "Secured Loan"), fmtNum(((a.current_balance as number) ?? 0) / 100000)] as [string, string, string]),
+          ...unsecured.map(a => ["Unsecured Loans", String(a.account_type ?? "Unsecured Loan"), fmtNum(((a.current_balance as number) ?? 0) / 100000)] as [string, string, string]),
+        ];
+
+        const nwW = [2520, 4200, 3360] as number[];
+        const nwHdr = new TableRow({ tableHeader: true, children: ["Category","Particulars","Amount (₹ L)"].map((h, i) => new TableCell({
+          children: [new Paragraph({ children: [new TextRun({ text: h, bold: true, color: CLR.body, size: SZ.base, font: "Calibri" })], alignment: i === 2 ? AlignmentType.RIGHT : AlignmentType.LEFT, spacing: { before: 60, after: 60 }, indent: { left: 80, right: 80 } })],
+          shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.gold }, width: { size: nwW[i], type: WidthType.DXA }, borders: BORDERS_THIN,
+        })) });
+
+        const assetRows = ASSET_ROWS.map(([cat, part], i) => new TableRow({ children: [
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: cat, color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 40, after: 40 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow }, width: { size: nwW[0], type: WidthType.DXA }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: part, color: CLR.muted, size: SZ.base, font: "Calibri" })], spacing: { before: 40, after: 40 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow }, width: { size: nwW[1], type: WidthType.DXA }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "—", color: CLR.muted, size: SZ.base, font: "Calibri" })], alignment: AlignmentType.RIGHT, spacing: { before: 40, after: 40 }, indent: { right: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow }, width: { size: nwW[2], type: WidthType.DXA }, borders: BORDERS_THIN }),
+        ]}));
+
+        const totalAssetsRow = new TableRow({ children: [
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "Total Assets (A)", bold: true, color: CLR.navy, size: SZ.base, font: "Calibri" })], spacing: { before: 60, after: 60 }, indent: { left: 80 } })], columnSpan: 2, shading: { type: ShadingType.CLEAR, color: "auto", fill: "#F0F0EA" }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "—", bold: true, color: CLR.navy, size: SZ.base, font: "Calibri" })], alignment: AlignmentType.RIGHT, spacing: { before: 60, after: 60 }, indent: { right: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: "#F0F0EA" }, width: { size: nwW[2], type: WidthType.DXA }, borders: BORDERS_THIN }),
+        ]});
+
+        const liabDataRows = liabRows.length === 0
+          ? [new TableRow({ children: [
+              new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "Loans Outstanding", color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 40, after: 40 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.white }, width: { size: nwW[0], type: WidthType.DXA }, borders: BORDERS_THIN }),
+              new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "No active accounts found in CIBIL", color: CLR.muted, size: SZ.base, font: "Calibri" })], spacing: { before: 40, after: 40 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.white }, width: { size: nwW[1], type: WidthType.DXA }, borders: BORDERS_THIN }),
+              new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "—", color: CLR.muted, size: SZ.base, font: "Calibri" })], alignment: AlignmentType.RIGHT, spacing: { before: 40, after: 40 }, indent: { right: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.white }, width: { size: nwW[2], type: WidthType.DXA }, borders: BORDERS_THIN }),
+            ]})]
+          : liabRows.map(([cat, part, amt], i) => new TableRow({ children: [
+              new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: cat, color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 40, after: 40 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow }, width: { size: nwW[0], type: WidthType.DXA }, borders: BORDERS_THIN }),
+              new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: part, color: CLR.muted, size: SZ.base, font: "Calibri" })], spacing: { before: 40, after: 40 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow }, width: { size: nwW[1], type: WidthType.DXA }, borders: BORDERS_THIN }),
+              new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: amt, color: CLR.body, size: SZ.base, font: "Calibri" })], alignment: AlignmentType.RIGHT, spacing: { before: 40, after: 40 }, indent: { right: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow }, width: { size: nwW[2], type: WidthType.DXA }, borders: BORDERS_THIN }),
+            ]}));
+
+        const totalLiabRow = new TableRow({ children: [
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "Total Liabilities (B)", bold: true, color: CLR.navy, size: SZ.base, font: "Calibri" })], spacing: { before: 60, after: 60 }, indent: { left: 80 } })], columnSpan: 2, shading: { type: ShadingType.CLEAR, color: "auto", fill: "#F0F0EA" }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: totalLiab > 0 ? fmtNum(totalLiab) : "—", bold: true, color: CLR.navy, size: SZ.base, font: "Calibri" })], alignment: AlignmentType.RIGHT, spacing: { before: 60, after: 60 }, indent: { right: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: "#F0F0EA" }, width: { size: nwW[2], type: WidthType.DXA }, borders: BORDERS_THIN }),
+        ]});
+
+        const netWorthRow = new TableRow({ children: [
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "NET WORTH (A – B)", bold: true, color: CLR.white, size: SZ.base, font: "Calibri" })], spacing: { before: 80, after: 80 }, indent: { left: 80 } })], columnSpan: 2, shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.navy }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: "—", bold: true, color: CLR.gold, size: SZ.base, font: "Calibri" })], alignment: AlignmentType.RIGHT, spacing: { before: 80, after: 80 }, indent: { right: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.navy }, width: { size: nwW[2], type: WidthType.DXA }, borders: BORDERS_THIN }),
+        ]});
+
+        children.push(new Table({
+          width: { size: CW, type: WidthType.DXA },
+          rows: [nwHdr, ...assetRows, totalAssetsRow, ...liabDataRows, totalLiabRow, netWorthRow],
+          borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN },
+        }));
+        children.push(new Paragraph({ children: [new TextRun({ text: "ⓘ Asset details require CA-certified personal financial statement — enter manually or upload to the financial review tab.", color: CLR.muted, size: SZ.sm, font: "Calibri", italics: true })], spacing: { before: 40, after: 80 } }));
+      }
+    } else {
+      children.push(new Paragraph({ children: [new TextRun({ text: "No promoter CIBIL reports found. Upload consumer CIBIL reports from the CIBIL tab.", color: CLR.muted, size: SZ.base, font: "Calibri", italics: true })], spacing: { before: 80, after: 80 } }));
+    }
+
+    // ── Source of Income from extracted financials ──────────────────────────
+    const histRows2 = extracted.filter(r => r.statement_type !== "projections");
+    const histYears2 = [...new Set(histRows2.map(r => r.fiscal_year as number))].sort().slice(-3);
+    const cfUnit2 = rawUnit(extracted);
+
+    if (histYears2.length > 0) {
+      children.push(new Paragraph({ children: [new TextRun({ text: "SOURCE OF INCOME (COMPANY FINANCIALS)", bold: true, color: CLR.muted, size: SZ.sm, font: "Calibri", characterSpacing: 40 })], spacing: { before: 160, after: 60 } }));
+
+      const SOI_PL = [
+        { label: "Turnover / Net Revenue", aliases: ["Turnover","Net Sales","Revenue","Total Income","Total Revenue from Operations"] },
+        { label: "Gross Profit",           aliases: ["Gross Profit"] },
+        { label: "EBITDA",                 aliases: ["EBITDA"] },
+        { label: "Interest Expense",       aliases: ["Interest Expense","Finance Costs","Finance Cost"] },
+        { label: "PAT (Net Profit)",        aliases: ["PAT","Net Profit","Profit After Tax"] },
+      ];
+      const SOI_BS = [
+        { label: "Net Worth",   aliases: ["Net Worth","Shareholders Equity","Total Equity"] },
+        { label: "Total Debt",  aliases: ["Total Debt","Total Borrowings"] },
+        { label: "Cash & Bank", aliases: ["Cash & Bank","Cash & Cash Equivalents","Cash and Bank"] },
+      ];
+
+      const soiLabelW = 2800;
+      const soiColW = Math.floor((CW - soiLabelW) / histYears2.length);
+      const soiWidths = [soiLabelW, ...histYears2.map(() => soiColW)];
+      const soiHdr = goldRow(["Item (₹ L)", ...histYears2.map(y => `FY ${y}`)], soiWidths);
+
+      const soiRows: TableRow[] = [];
+      for (const cfg of [...SOI_PL, ...SOI_BS]) {
+        const vals = histYears2.map(y => liValWithAliases(histRows2, y, cfg.label, cfg.aliases, cfUnit2));
+        if (vals.every(v => v === null)) continue;
+        soiRows.push(dataRow([cfg.label, ...vals.map(fmtNum)], soiWidths, soiRows.length));
+      }
+      if (soiRows.length > 0) {
+        children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [soiHdr, ...soiRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
+      }
+    }
+    children.push(spacer(160));
+  }
 
   // III – Investment Structure (table + narrative)
   children.push(sectionHdr("III", "Proposed Investment Structure"));

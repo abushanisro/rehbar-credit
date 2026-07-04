@@ -180,7 +180,7 @@ export function ICDeckTab({
         }
       } catch { /* photos are supplementary — continue without */ }
 
-      await generateIcDeckWord({ cc, ic, extracted, ratios, company, directors, photoBlobs });
+      await generateIcDeckWord({ cc, ic, extracted, ratios, company, directors, photoBlobs, cibilData });
     } finally {
       setExportingWord(false);
     }
