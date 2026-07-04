@@ -94,6 +94,92 @@ function blank(labels: string[]): LineItem[] {
   return labels.map(l => ({ label: l, value: null, confidence: 100, reviewed: true, override_value: null }));
 }
 
+// Derives CFO / CFI / CFF for any period whose CF data is entirely absent.
+// Uses the indirect method (PAT + D&A ± WC changes) when a prior period is available;
+// falls back to simplified PAT + Depreciation when not.
+function fillMissingCF(periods: ProvPeriod[]): void {
+  const sorted = [...periods].sort((a, b) =>
+    a.fiscal_year !== b.fiscal_year ? a.fiscal_year - b.fiscal_year : a.months_covered - b.months_covered
+  );
+  const flat = (items: LineItem[]): Record<string, number | null> => {
+    const d: Record<string, number | null> = {};
+    for (const it of items) d[it.label] = getv([it], it.label);
+    return d;
+  };
+  const nn = (a: number | null, b: number | null): number | null =>
+    a !== null && b !== null ? a - b : null;
+  const sumParts = (...vals: (number | null)[]): number | null => {
+    let t = 0, any = false;
+    for (const v of vals) if (v !== null) { t += v; any = true; }
+    return any ? t : null;
+  };
+
+  for (let i = 0; i < sorted.length; i++) {
+    const p = sorted[i];
+    if (getv(p.cf, "Cash from Operations") !== null) continue; // already has CF
+
+    const pl     = flat(p.pl);
+    const bs     = flat(p.bs);
+    const prevBs = i > 0 ? flat(sorted[i - 1].bs) : null;
+
+    const pat  = pl["PAT"]         ?? null;
+    const depr = pl["Depreciation"] ?? null;
+
+    let cfo: number | null = null;
+    let cfi: number | null = null;
+    let cff: number | null = null;
+
+    if (prevBs) {
+      // Full indirect method using BS deltas
+      const dAR  = nn(bs["Trade Receivables"],        prevBs["Trade Receivables"]);
+      const dInv = nn(bs["Inventory"],                 prevBs["Inventory"]);
+      const dOCA = nn(bs["Other Current Assets"],      prevBs["Other Current Assets"]);
+      const dAP  = nn(bs["Trade Payables"],            prevBs["Trade Payables"]);
+      const dOCL = nn(bs["Other Current Liabilities"], prevBs["Other Current Liabilities"]);
+
+      cfo = sumParts(
+        pat, depr,
+        dAR  !== null ? -dAR  : null,
+        dInv !== null ? -dInv : null,
+        dOCA !== null ? -dOCA : null,
+        dAP, dOCL,
+      );
+
+      const dFixed = nn(bs["Fixed Assets (Net)"], prevBs["Fixed Assets (Net)"]);
+      if (dFixed !== null && depr !== null) cfi = -(dFixed + depr);
+
+      const dLTB = nn(bs["Long Term Borrowings"],  prevBs["Long Term Borrowings"]);
+      const dSTB = nn(bs["Short Term Borrowings"], prevBs["Short Term Borrowings"]);
+      const dNW  = nn(bs["Net Worth"],              prevBs["Net Worth"]);
+      const eq   = dNW !== null ? dNW - (pat ?? 0) : null;
+      cff = sumParts(dLTB, dSTB, eq);
+
+      // Opening cash = prior period's closing cash & bank
+      const opening = prevBs["Cash & Bank"] ?? null;
+      if (opening !== null && getv(p.cf, "Opening Cash") === null)
+        p.cf = setv(p.cf, "Opening Cash", opening);
+    } else {
+      // Simplified: PAT + Depreciation only (no prior BS for WC/capex deltas)
+      cfo = pat !== null || depr !== null ? (pat ?? 0) + (depr ?? 0) : null;
+    }
+
+    if (cfo !== null) p.cf = setv(p.cf, "Cash from Operations", cfo);
+    if (cfi !== null) p.cf = setv(p.cf, "Cash from Investing",  cfi);
+    if (cff !== null) p.cf = setv(p.cf, "Cash from Financing",  cff);
+
+    // Recompute Net Change + Closing Cash now that we have the three components
+    const cfOps = getv(p.cf, "Cash from Operations") ?? 0;
+    const cfInv = getv(p.cf, "Cash from Investing")  ?? 0;
+    const cfFin = getv(p.cf, "Cash from Financing")  ?? 0;
+    const netChg = cfOps + cfInv + cfFin;
+    if (netChg !== 0) p.cf = setv(p.cf, "Net Change in Cash", netChg);
+
+    const open = getv(p.cf, "Opening Cash");
+    if (open !== null && netChg !== 0)
+      p.cf = setv(p.cf, "Closing Cash", open + netChg);
+  }
+}
+
 function annualize(v: number | null, mc: number): number | null {
   if (v == null || mc <= 0 || mc >= 12) return null;
   return (v / mc) * 12;
@@ -408,7 +494,9 @@ async function parseSimpleAnnualExcel(
     if (gv("bs", "Total Liabilities")   === 0 && ta !== 0) p.bs = setv(p.bs, "Total Liabilities",   ta);
   }
 
-  return Array.from(periodMap.values());
+  const result = Array.from(periodMap.values());
+  fillMissingCF(result);
+  return result;
 }
 
 // ── Monthly-tracking parser: Month | April | May | … | Total ───────────────
@@ -499,7 +587,9 @@ async function parseMonthlyTrackingFormat(
     }
   }
 
-  return Array.from(periods.values());
+  const result = Array.from(periods.values());
+  fillMissingCF(result);
+  return result;
 }
 
 // ── Schedule III / period-end two-column format (BS + P&L + CF in separate sheets) ─
@@ -748,7 +838,9 @@ async function parseSchIIIFormat(buf: ArrayBuffer, existingPeriods: ProvPeriod[]
     if (gv("cf", "Net Change in Cash") === 0 && netChg !== 0) p.cf = setv(p.cf, "Net Change in Cash", netChg);
   }
 
-  return Array.from(periods.values());
+  const schResult = Array.from(periods.values());
+  fillMissingCF(schResult);
+  return schResult;
 }
 
 // ── Main import dispatcher ──────────────────────────────────────────────────
@@ -907,7 +999,9 @@ async function importProvisionalExcel(file: File, existingPeriods: ProvPeriod[])
     if (gv("bs", "Total Liabilities")   === 0 && ta !== 0) p.bs = setv(p.bs, "Total Liabilities",   ta);
   }
 
-  return Array.from(periods.values());
+  const rtResult = Array.from(periods.values());
+  fillMissingCF(rtResult);
+  return rtResult;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1448,10 +1542,14 @@ export function ProvisionalTab({
             SHOW ANNUALIZED
           </label>
           <div className="ml-auto flex gap-2 flex-wrap items-center">
+            {viewPeriods.length > 0 && (
+              <span className="text-[9px] text-muted-foreground tracking-widest">REMOVE PERIOD:</span>
+            )}
             {viewPeriods.map(p => (
               <button key={p.id} onClick={() => handleRemove(p.id)}
-                className="text-[8px] border border-destructive/30 text-destructive/50 hover:text-destructive hover:border-destructive px-1.5 py-0.5 tracking-widest">
-                ✕ {p.label}
+                className="flex items-center gap-1 text-[10px] font-medium border border-destructive/50 text-destructive/70 hover:text-destructive hover:border-destructive hover:bg-destructive/5 px-2.5 py-1 rounded tracking-wide transition-colors"
+                title={`Remove ${p.label}`}>
+                <span className="text-[12px] leading-none">×</span> {p.label}
               </button>
             ))}
             <span className={`text-[9px] tracking-widest transition-opacity ${saving || saved ? "opacity-100" : "opacity-0"} ${saved ? "text-success" : "text-muted-foreground"}`}>

@@ -2,6 +2,7 @@ import {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   AlignmentType, ShadingType, WidthType, BorderStyle,
   Header, Footer, PageNumber, TabStopType, convertInchesToTwip, ImageRun,
+  HeadingLevel, TableOfContents,
 } from "docx";
 import type { IcNoteShape } from "@/tabs/case/ic/ICNoteDocument";
 import type { CaseRow, ExtractedRow, RatioRow } from "@/features/case/types";
@@ -128,8 +129,11 @@ function pageBreak(): Paragraph {
 }
 
 // Navy section header paragraph (mimics SlideShell navy bar)
+// heading: HEADING_1 is required so Word's TOC field picks it up
 function sectionHdr(roman: string | null, title: string): Paragraph {
   return new Paragraph({
+    heading: HeadingLevel.HEADING_1,
+    pageBreakBefore: true,
     children: [
       ...(roman
         ? [new TextRun({ text: roman + "   ", color: CLR.gold, bold: true, size: SZ.xl, font: "Georgia" })]
@@ -620,47 +624,11 @@ export async function generateIcDeckWord(params: {
   children.push(pageBreak());
 
   // ── Table of Contents ──────────────────────────────────────────────────────
-  children.push(sectionHdr(null, "Table of Contents"));
-  children.push(spacer(80));
-
-  const tocItems = [
-    ["I",    "Executive Summary"],
-    ["II",   "Client & Promoter Profile"],
-    ["III",  "Proposed Investment Structure"],
-    ["IV",   "Rehbar Funding History"],
-    ["V",    "Historical Financial Analysis (7 sub-sections)"],
-    ["VI",   "Projections & Estimates"],
-    ["VII",  "Key Financial Ratios (9 categories)"],
-    ["VIII", "Cash Flow Statement"],
-    ["IX",   "Due Diligence Excerpts"],
-    ["X",    "Risk Assessment & Mitigation"],
-    ["XI",   "Visit Report"],
-    ["XII",  "Executive Team Recommendation"],
-    ["XIII", "Specific Product Requirements"],
-    ["XIV",  "Triangulation Analysis"],
-    ["XV",   "Conditions Precedent"],
-    ["XVI",  "SWOT Analysis"],
-  ];
-
-  const tocWidths = [800, CW - 800];
-  const tocHdr = goldRow(["#", "Section"], tocWidths);
-  const tocRows = tocItems.map(([r, t], i) => new TableRow({
-    children: [
-      new TableCell({
-        children: [new Paragraph({ children: [new TextRun({ text: r, bold: true, color: CLR.navy, size: SZ.base, font: "Georgia" })], spacing: { before: 60, after: 60 }, alignment: AlignmentType.CENTER })],
-        shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow },
-        width: { size: tocWidths[0], type: WidthType.DXA }, borders: BORDERS_THIN,
-      }),
-      new TableCell({
-        children: [new Paragraph({ children: [new TextRun({ text: t, color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 60, after: 60 }, indent: { left: 80 } })],
-        shading: { type: ShadingType.CLEAR, color: "auto", fill: i % 2 === 0 ? CLR.white : CLR.altRow },
-        width: { size: tocWidths[1], type: WidthType.DXA }, borders: BORDERS_THIN,
-      }),
-    ],
+  // Word-native TOC field: clickable + auto page numbers. Word populates on open.
+  children.push(new TableOfContents("Table of Contents", {
+    hyperlink: true,          // \h  — makes each entry a clickable internal link
+    headingStyleRange: "1-1", // \1-1 — picks up Heading1 paragraphs only
   }));
-  children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [tocHdr, ...tocRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
-
-  children.push(pageBreak());
 
   // ── Deal Summary ───────────────────────────────────────────────────────────
   children.push(sectionHdr(null, "Deal Summary"));
@@ -684,8 +652,6 @@ export async function generateIcDeckWord(params: {
     return new TableRow({ children: [mkCell(row[0], true), mkCell(row[1]), mkCell(row[2], true), mkCell(row[3])] });
   });
   children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [dealHdr, ...dealRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
-
-  children.push(pageBreak());
 
   // ── Company Profile ────────────────────────────────────────────────────────
   if (company && Object.keys(company).length > 0) {
@@ -715,8 +681,6 @@ export async function generateIcDeckWord(params: {
     children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [dirHdr, ...dirRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
     children.push(spacer(200));
   }
-
-  children.push(pageBreak());
 
   // ── Narrative sections helper ──────────────────────────────────────────────
   function addNarrative(roman: string, title: string, id: string): void {
@@ -800,8 +764,6 @@ export async function generateIcDeckWord(params: {
     children.push(spacer(160));
   }
 
-  children.push(pageBreak());
-
   // ── Section V – Historical Financials ─────────────────────────────────────
   const unit = rawUnit(extracted);
   const uLabel = unitLabel(unit);
@@ -859,8 +821,6 @@ export async function generateIcDeckWord(params: {
   narrativeBody(tpls["historical_financial"]).forEach(p => children.push(p));
   children.push(spacer(160));
 
-  children.push(pageBreak());
-
   // ── VI – Projections narrative ─────────────────────────────────────────────
   addNarrative("VI", "Projections & Estimates", "projections");
 
@@ -879,8 +839,9 @@ export async function generateIcDeckWord(params: {
     (byCat[c] ??= []).push(r);
   }
   const cats = [...CAT_ORDER.filter(c => byCat[c]), ...Object.keys(byCat).filter(c => !CAT_ORDER.includes(c))];
+  const SUB_LETTERS = "abcdefghijklmnopqrstuvwxyz";
 
-  for (const cat of cats) {
+  for (const [catIdx, cat] of cats.entries()) {
     const catR = byCat[cat];
     const allYears = [...new Set(catR.map(r => Number((r as never as Record<string, unknown>)["fiscal_year"])).filter(Boolean))].sort((a, b) => a - b);
     if (!allYears.length) continue;
@@ -928,18 +889,18 @@ export async function generateIcDeckWord(params: {
       return dataRow([trunc(n, 40), ...years.map(y => info.displayVals[String(y)] ?? "—"), yoyStr, info.bench], rWidths, i);
     });
 
-    children.push(sectionHdr("VII", CAT_TITLES[cat] ?? cap(cat)));
+    const subLetter = SUB_LETTERS[catIdx] ?? String(catIdx + 1);
+    children.push(sectionHdr(`VII-${subLetter}`, CAT_TITLES[cat] ?? cap(cat)));
     children.push(spacer(80));
     children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [rHdr, ...rRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
     children.push(spacer(160));
   }
 
   // VII commentary
-  children.push(sectionHdr("VII", "Key Financial Ratios – Commentary"));
+  const commentaryLetter = SUB_LETTERS[cats.length] ?? String(cats.length + 1);
+  children.push(sectionHdr(`VII-${commentaryLetter}`, "Key Financial Ratios – Commentary"));
   narrativeBody(tpls["key_ratios"]).forEach(p => children.push(p));
   children.push(spacer(160));
-
-  children.push(pageBreak());
 
   // ── VIII – Cash Flow (derived indirect method from BS + P&L) ─────────────
   {
@@ -1113,8 +1074,6 @@ export async function generateIcDeckWord(params: {
   addNarrative("XIII", "Specific Product Requirements",  "product_specifics");
   addNarrative("XIV",  "Triangulation Analysis",         "triangulation_analysis");
 
-  children.push(pageBreak());
-
   // ── XV – Conditions Precedent ──────────────────────────────────────────────
   children.push(sectionHdr("XV", "Conditions Precedent"));
   children.push(spacer(80));
@@ -1175,8 +1134,6 @@ export async function generateIcDeckWord(params: {
     }
   }
   children.push(spacer(200));
-
-  children.push(pageBreak());
 
   // ── Annexures header ───────────────────────────────────────────────────────
   children.push(new Paragraph({
