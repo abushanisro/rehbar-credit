@@ -59,6 +59,7 @@ export interface IcNoteShape {
     cf: { label: string; value: number | null; override_value?: number | null }[];
   }[];
   projections_comment?: string;
+  projections_note?: { headline: string; bullets: string[]; flags: string[]; generated_at: string };
   visit_report?: {
     checklist?: {
       banker_reference?:   { status?: string; source?: string; notes?: string };

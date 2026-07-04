@@ -560,6 +560,7 @@ export function ProjectionsTab({
   onGenerateNote,
   onUpload,
   onDirectImport,
+  onClearImported,
   docs = [],
   onDelete,
   onRetry,
@@ -573,6 +574,7 @@ export function ProjectionsTab({
   onGenerateNote: () => void;
   onUpload?: (file: File, fiscalYear: number | null) => Promise<void>;
   onDirectImport?: (data: { fiscal_year: number; line_items: LineItem[]; unit: string }[]) => Promise<void>;
+  onClearImported?: () => Promise<void>;
   docs?: DocRow[];
   onDelete?: (doc: DocRow) => void;
   onRetry?: (doc: DocRow) => void;
@@ -623,7 +625,36 @@ export function ProjectionsTab({
 
   const [importBusy, setImportBusy] = useState(false);
   const [directBusy, setDirectBusy] = useState(false);
+  const [clearBusy,  setClearBusy]  = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [createFY, setCreateFY] = useState(new Date().getFullYear() + 1);
+  const [createUnit, setCreateUnit] = useState(projRows[0]?.unit ?? histPL[0]?.unit ?? "Lakhs");
+  const [createFields, setCreateFields] = useState<Record<string, string>>({});
+  const CREATE_LABELS = [
+    { label: "Projected Turnover",   key: "turnover" },
+    { label: "Projected EBITDA",     key: "ebitda" },
+    { label: "Projected PAT",        key: "pat" },
+    { label: "Projected Net Worth",  key: "networth" },
+    { label: "Projected Total Debt", key: "totalDebt" },
+    { label: "Projected Depreciation", key: "depr" },
+    { label: "Projected Interest Expense", key: "interest" },
+  ];
+  const handleCreate = async () => {
+    if (!onDirectImport) return;
+    const items: LineItem[] = CREATE_LABELS
+      .map(({ label, key }) => {
+        const raw = createFields[key]?.trim();
+        const val = raw ? parseFloat(raw.replace(/,/g, "")) : null;
+        return val != null && !isNaN(val) ? { label, value: val, confidence: 100, reviewed: true } : null;
+      })
+      .filter((x): x is LineItem => x !== null);
+    if (!items.length) { toast.error("Enter at least one value."); return; }
+    await onDirectImport([{ fiscal_year: createFY, line_items: items, unit: createUnit }]);
+    setShowCreateForm(false);
+    setCreateFields({});
+    toast.success(`Projection for FY${createFY} created`);
+  };
   const [projAnalysis,        setProjAnalysis]        = useState<string | null>(null);
   const [projAnalysisLoading, setProjAnalysisLoading] = useState(false);
   const [projAnalysisProgress, setProjAnalysisProgress] = useState(0);
@@ -785,6 +816,94 @@ OVERALL CREDIBILITY: One paragraph verdict on the projection quality and what th
               <span className="text-[11px] text-muted-foreground">Fill the template · upload · done. Balance Sheet, P&amp;L, Cash Flow.</span>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Manual Create ─────────────────────────────────────────────────── */}
+      {onDirectImport && (
+        <div className="mt-3 border-t border-border/30 pt-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setShowCreateForm(s => !s)}
+              className="flex items-center gap-1.5 text-sm text-muted-foreground border border-border rounded-lg px-4 py-2 hover:text-foreground hover:border-primary/50 hover:bg-surface transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Create Projection Manually
+            </button>
+
+            {onClearImported && projRows.some(r => r.document_id === null) && (
+              <button
+                onClick={async () => {
+                  if (!window.confirm("Remove all manually imported / created projections? This cannot be undone.")) return;
+                  setClearBusy(true);
+                  try { await onClearImported(); toast.success("Imported projections cleared"); }
+                  catch (e) { toast.error("Clear failed: " + (e instanceof Error ? e.message : String(e))); }
+                  finally { setClearBusy(false); }
+                }}
+                disabled={clearBusy}
+                className="flex items-center gap-1.5 text-sm text-destructive/70 border border-destructive/40 rounded-lg px-4 py-2 hover:text-destructive hover:border-destructive hover:bg-destructive/5 disabled:opacity-50 transition-colors"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+                </svg>
+                {clearBusy ? "Clearing…" : "Clear Imported Projections"}
+              </button>
+            )}
+          </div>
+
+          {showCreateForm && (
+            <div className="mt-3 border border-accent/30 bg-accent/5 rounded-lg p-4 space-y-3">
+              <div className="text-[9px] text-accent tracking-widest font-bold">NEW PROJECTION PERIOD</div>
+              <div className="flex gap-3 flex-wrap">
+                <div className="space-y-0.5">
+                  <label className="text-[9px] text-muted-foreground tracking-widest">FISCAL YEAR</label>
+                  <input
+                    type="number" value={createFY}
+                    onChange={e => setCreateFY(Number(e.target.value))}
+                    className="w-24 bg-input border border-border rounded px-2 py-1 text-xs font-mono focus:outline-none focus:border-primary"
+                  />
+                </div>
+                <div className="space-y-0.5">
+                  <label className="text-[9px] text-muted-foreground tracking-widest">UNIT</label>
+                  <select
+                    value={createUnit} onChange={e => setCreateUnit(e.target.value)}
+                    className="bg-input border border-border rounded px-2 py-1 text-xs focus:outline-none focus:border-primary"
+                  >
+                    {["Lakhs","Crores","INR","USD"].map(u => <option key={u}>{u}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {CREATE_LABELS.map(({ label, key }) => (
+                  <div key={key} className="space-y-0.5">
+                    <label className="text-[9px] text-muted-foreground tracking-widest">{label.replace("Projected ", "").toUpperCase()}</label>
+                    <input
+                      type="text" placeholder="—"
+                      value={createFields[key] ?? ""}
+                      onChange={e => setCreateFields(prev => ({ ...prev, [key]: e.target.value }))}
+                      className="w-full bg-input border border-border rounded px-2 py-1 text-xs font-mono focus:outline-none focus:border-primary"
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={handleCreate}
+                  className="bg-primary text-primary-foreground text-xs font-semibold px-4 py-1.5 rounded hover:bg-primary/90 transition-colors"
+                >
+                  Save Projection →
+                </button>
+                <button
+                  onClick={() => { setShowCreateForm(false); setCreateFields({}); }}
+                  className="border border-border text-xs px-3 py-1.5 rounded text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -531,6 +531,7 @@ function CaseViewInner() {
   const [icImportLabel, setIcImportLabel]     = useState("");
   const icImportFileRef = useRef<HTMLInputElement>(null);
   const [generatingSection, setGeneratingSection] = useState<string | null>(null);
+  const [dismissedDqIssues, setDismissedDqIssues] = useState<string[]>([]);
 
   // Sync sticky-header column widths to match the actual rendered body-table column widths
   useLayoutEffect(() => {
@@ -2160,14 +2161,16 @@ function CaseViewInner() {
         body: { case_id: cc.id, section_ids: [sectionId] },
       });
       if (error) throw error;
-      if (!data?.section_templates) throw new Error("No content returned from generation");
-      const merged = {
+      if (!data?.section_templates && !data?.swot && !data?.projections_note) throw new Error("No content returned from generation");
+      const merged: Record<string, unknown> = {
         ...(cc.ic_note as Record<string, unknown> ?? {}),
         section_templates: {
           ...((cc.ic_note as Record<string, unknown> | null)?.section_templates as Record<string, unknown> ?? {}),
-          ...data.section_templates,
+          ...(data.section_templates ?? {}),
         },
       };
+      if (data.swot) merged.swot = data.swot;
+      if (data.projections_note) merged.projections_note = data.projections_note;
       // Optimistic update immediately so the UI reflects content without waiting for DB round-trip.
       setCc(prev => prev ? { ...prev, ic_note: merged as Json } : prev);
       // Persist to DB — if this fails, the realtime subscription will revert on next reload.
@@ -2178,6 +2181,46 @@ function CaseViewInner() {
       toast.error(e instanceof Error ? e.message : "Generation failed");
     } finally {
       setGeneratingSection(null);
+    }
+  };
+
+  const handleDismissIssue = (issueId: string) => {
+    setDismissedDqIssues(prev => [...prev, issueId]);
+  };
+
+  const handleAutoFix = async (issueId: string) => {
+    if (!cc) return;
+
+    if (issueId === "projection_units_mismatch") {
+      // Multiply all projection line item values × 100 to convert rupees → lakhs
+      const projRows = (activeExtracted ?? []).filter(r => r.statement_type === "projections");
+      for (const row of projRows) {
+        const items = (row.line_items as { label: string; value: number | null; override_value?: number | null }[] | null) ?? [];
+        const updated = items.map(it => ({
+          ...it,
+          value: it.value != null ? it.value * 100 : null,
+          override_value: it.override_value != null ? it.override_value * 100 : it.override_value,
+        }));
+        const { error } = await supabase
+          .from("extracted_financials")
+          .update({ line_items: updated as never })
+          .eq("id", row.id);
+        if (error) { toast.error("Fix failed: " + error.message); return; }
+      }
+      await reload();
+      toast.success("Projection values multiplied ×100 (rupees → lakhs)");
+      setDismissedDqIssues(prev => [...prev, issueId]);
+    } else if (issueId === "deal_amount_unit_error") {
+      // Divide deal_amount ÷ 100
+      const newAmount = Number(cc.deal_amount ?? 0) / 100;
+      const { error } = await supabase
+        .from("credit_cases")
+        .update({ deal_amount: newAmount as never })
+        .eq("id", cc.id);
+      if (error) { toast.error("Fix failed: " + error.message); return; }
+      await reload();
+      toast.success(`Deal amount updated to ₹${newAmount.toFixed(2)} Lakhs`);
+      setDismissedDqIssues(prev => [...prev, issueId]);
     }
   };
 
@@ -5401,6 +5444,17 @@ Respond ONLY with a JSON object matching this schema exactly:
             onGenerateNote={runNarrative}
             onUpload={handleProjectionUpload}
             onDirectImport={handleDirectProjImport}
+            onClearImported={async () => {
+              if (!cc) return;
+              const { error } = await supabase
+                .from("extracted_financials")
+                .delete()
+                .eq("case_id", cc.id)
+                .eq("statement_type", "projections" as never)
+                .is("document_id", null);
+              if (error) throw new Error(error.message);
+              await reload();
+            }}
             docs={docs.filter(d => d.doc_class === "projections")}
             onDelete={handleDeleteDoc}
             onRetry={handleRetry}
@@ -5550,6 +5604,9 @@ Respond ONLY with a JSON object matching this schema exactly:
           onGenerateSection={runNarrativeSection}
           generatingSection={generatingSection}
           generationRun={generationRun}
+          onAutoFix={handleAutoFix}
+          onDismissIssue={handleDismissIssue}
+          dismissedIssues={dismissedDqIssues}
         />
       )}
 

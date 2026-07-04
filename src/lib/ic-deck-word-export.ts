@@ -2,7 +2,7 @@ import {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   AlignmentType, ShadingType, WidthType, BorderStyle,
   Header, Footer, PageNumber, TabStopType, convertInchesToTwip, ImageRun,
-  HeadingLevel, TableOfContents,
+  HeadingLevel, TableOfContents, ExternalHyperlink,
 } from "docx";
 import type { IcNoteShape } from "@/tabs/case/ic/ICNoteDocument";
 import type { CaseRow, ExtractedRow, RatioRow } from "@/features/case/types";
@@ -373,6 +373,56 @@ function projVal(extracted: ExtractedRow[], fy: number, label: string): number |
   return null;
 }
 
+// ── Smart YoY formatter ───────────────────────────────────────────────────────
+// • If the prior year is a tiny base (<5% of current), flags as low-base
+// • If absolute change is very small relative to the scale, shows absolute delta instead
+// • Keeps the raw % so it's auditable, but adds a parenthetical qualifier
+function fmtYoy(curr: number | null, prev: number | null, allVals?: (number | null)[]): string {
+  if (curr === null || prev === null || prev === 0) return "—";
+  const pct = ((curr - prev) / Math.abs(prev)) * 100;
+  const sign = pct > 0 ? "+" : "";
+  const pctStr = `${sign}${pct.toFixed(1)}%`;
+
+  // Low base: prior year is < 5% of current — the % is technically correct but misleading
+  if (Math.abs(prev) < Math.abs(curr) * 0.05) {
+    return `${pctStr} *`;  // asterisk = low-base effect explained in footer
+  }
+
+  // Extreme but not low-base (e.g. recovery from near-zero)
+  if (Math.abs(pct) > 500) {
+    return `${pctStr} *`;
+  }
+
+  // If we have 3+ values, compute a 2-year CAGR and show alongside the single-period YoY
+  if (allVals && allVals.length >= 3) {
+    const validVals = allVals.filter((v): v is number => v !== null && v > 0);
+    if (validVals.length >= 3) {
+      const first = validVals[0];
+      const last  = validVals[validVals.length - 1];
+      const n     = validVals.length - 1;
+      const cagr  = (Math.pow(last / first, 1 / n) - 1) * 100;
+      if (isFinite(cagr) && Math.abs(cagr - pct) > 5) {
+        // Only show CAGR when it meaningfully differs from 1Y change
+        const cagrSign = cagr >= 0 ? "+" : "";
+        return `${pctStr}\n${n}Y CAGR ${cagrSign}${cagr.toFixed(1)}%`;
+      }
+    }
+  }
+
+  return pctStr;
+}
+
+// Footer note appended to any table that uses fmtYoy
+function yoyFootnote(): Paragraph {
+  return new Paragraph({
+    children: [new TextRun({
+      text: "* Low-base or high-volatility YoY: prior-year value is less than 5% of current year. Percentage is mathematically correct but may not reflect sustainable run-rate growth.",
+      color: CLR.muted, size: SZ.sm - 1, font: "Calibri", italics: true,
+    })],
+    spacing: { before: 40, after: 40 },
+  });
+}
+
 function finTable(extracted: ExtractedRow[], labels: string[], uLabel: string): (Paragraph | Table)[] {
   const unit = rawUnit(extracted);
   const shownY = histFyYears(extracted).slice(-5);
@@ -384,26 +434,26 @@ function finTable(extracted: ExtractedRow[], labels: string[], uLabel: string): 
   const headers = [`Item (₹ ${uLabel})`, ...shownY.map(y => `FY ${y}`), "YoY %"];
 
   const rows: string[][] = [];
+  let hasLowBase = false;
   for (const label of labels) {
     const vals = shownY.map(y => liVal(extracted, y, label, unit));
     if (vals.every(v => v === null)) continue;
     const last = vals[vals.length - 1];
     const prev = vals[vals.length - 2] ?? null;
-    let yoy = "—";
-    if (last !== null && prev !== null && prev !== 0) {
-      const pct = ((last - prev) / Math.abs(prev)) * 100;
-      yoy = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
-    }
+    const yoy = fmtYoy(last, prev, vals);
+    if (yoy.includes("*")) hasLowBase = true;
     rows.push([label, ...vals.map(fmtNum), yoy]);
   }
 
   if (!rows.length) return [new Paragraph({ children: [new TextRun({ text: "No data for these items.", color: CLR.muted, size: SZ.base, italics: true, font: "Calibri" })], spacing: { before: 80, after: 80 } })];
 
-  return [new Table({
+  const out: (Paragraph | Table)[] = [new Table({
     width: { size: CW, type: WidthType.DXA },
     rows: [goldRow(headers, widths), ...rows.map((r, i) => dataRow(r, widths, i))],
     borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN },
   })];
+  if (hasLowBase) out.push(yoyFootnote());
+  return out;
 }
 
 // ── Curated financial labels with aliases (mirrors DynTable in HistoricalFinancialsCard) ──
@@ -489,22 +539,22 @@ function finTableCurated(typed: ExtractedRow[], allHist: ExtractedRow[], config:
   const widths = [COL.finLabel, ...shownY.map(() => yearW), yoyW];
   const headers = [`Item (₹ ${uLabel})`, ...shownY.map(y => `FY ${y}`), "YoY %"];
   const rows: string[][] = [];
+  let hasLowBase = false;
   for (const cfg of activeConfig) {
     const vals = shownY.map(y => getV(cfg, y));
     const filledY = shownY.filter(y => getV(cfg, y) !== null);
     const curr = filledY.length >= 1 ? getV(cfg, filledY[filledY.length - 1]) : null;
     const prev = filledY.length >= 2 ? getV(cfg, filledY[filledY.length - 2]) : null;
-    let yoy = "—";
-    if (curr !== null && prev !== null && prev !== 0) {
-      const pct = ((curr - prev) / Math.abs(prev)) * 100;
-      yoy = `${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`;
-    }
+    const yoy = fmtYoy(curr, prev, vals);
+    if (yoy.includes("*")) hasLowBase = true;
     rows.push([cfg.label, ...vals.map(fmtNum), yoy]);
   }
   if (!rows.length) {
     return [new Paragraph({ children: [new TextRun({ text: "No data for these items.", color: CLR.muted, size: SZ.base, italics: true, font: "Calibri" })], spacing: { before: 80, after: 80 } })];
   }
-  return [new Table({ width: { size: CW, type: WidthType.DXA }, rows: [goldRow(headers, widths), ...rows.map((r, i) => dataRow(r, widths, i))], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } })];
+  const out: (Paragraph | Table)[] = [new Table({ width: { size: CW, type: WidthType.DXA }, rows: [goldRow(headers, widths), ...rows.map((r, i) => dataRow(r, widths, i))], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } })];
+  if (hasLowBase) out.push(yoyFootnote());
+  return out;
 }
 
 const REVENUE_WORD_ALIASES = ["Turnover","Gross Sales","Revenue from Sale of Products","Total Revenue from Operations","Revenue","Net Sales","Total Revenue"];
@@ -794,35 +844,268 @@ export async function generateIcDeckWord(params: {
   narrativeBody(tpls["historical_bs_obs"]).forEach(p => children.push(p));
   children.push(spacer(160));
 
-  // V-e: Projected Financials
-  {
-    const projYears = [...new Set(
-      extracted.filter(r => r.statement_type === "projections" && r.fiscal_year != null).map(r => r.fiscal_year as number),
-    )].sort((a, b) => a - b);
-
-    children.push(sectionHdr("V-e", "Projected Financials (₹ Lakhs)"));
-    children.push(spacer(80));
-
-    if (!projYears.length) {
-      children.push(new Paragraph({ children: [new TextRun({ text: "No projection data available.", color: CLR.muted, size: SZ.base, font: "Calibri", italics: true })], spacing: { before: 80, after: 80 } }));
-    } else {
-      const projLabels = ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt"];
-      const pW = Math.floor((CW - COL.finLabel) / projYears.length);
-      const pWidths = [COL.finLabel, ...projYears.map(() => pW)];
-      const pHdr = goldRow(["Metric (₹ Lakhs)", ...projYears.map(y => `FY ${y} (P)`)], pWidths);
-      const pRows = projLabels.map((l, i) => dataRow([l, ...projYears.map(y => fmtNum(projVal(extracted, y, l)))], pWidths, i));
-      children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [pHdr, ...pRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
-    }
-    children.push(spacer(200));
-  }
+  // V-e is now part of VI — see below
 
   // V-f: Overall Commentary (AI narrative)
   children.push(sectionHdr("V-f", "Historical Financial Analysis – Overall Commentary"));
   narrativeBody(tpls["historical_financial"]).forEach(p => children.push(p));
   children.push(spacer(160));
 
-  // ── VI – Projections narrative ─────────────────────────────────────────────
-  addNarrative("VI", "Projections & Estimates", "projections");
+  // ── VI – Projections & Estimates ──────────────────────────────────────────
+  {
+    const projYears = [...new Set(
+      extracted.filter(r => r.statement_type === "projections" && r.fiscal_year != null).map(r => r.fiscal_year as number),
+    )].sort((a, b) => a - b);
+
+    children.push(sectionHdr("VI", "Projections & Estimates"));
+    children.push(spacer(80));
+
+    if (projYears.length) {
+      // ── Uploaded projections ──────────────────────────────────────────────
+      const projLabels = ["Projected Turnover","Projected EBITDA","Projected PAT","Projected Net Worth","Projected Total Debt"];
+      const pW = Math.floor((CW - COL.finLabel) / projYears.length);
+      const pWidths = [COL.finLabel, ...projYears.map(() => pW)];
+      const pHdr = goldRow(["Metric (₹ Lakhs)", ...projYears.map(y => `FY ${y} (P)`)], pWidths);
+      const pRows = projLabels.map((l, i) => dataRow([l, ...projYears.map(y => fmtNum(projVal(extracted, y, l)))], pWidths, i));
+      children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [pHdr, ...pRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
+    } else {
+      // ── AI-Estimated projections (Damped Holt-Winters) ────────────────────
+      const histFys = histFyYears(extracted);
+      if (histFys.length >= 2) {
+        const HORIZON = 3;
+        const latestFy = histFys.at(-1)!;
+        const forecastFys = Array.from({ length: HORIZON }, (_, i) => latestFy + 1 + i);
+
+        // Sustainable long-run growth rate used for blending when n < 3
+        const SUSTAINABLE = 0.20;
+        const PHI = 0.88;
+        const ALPHA = 0.4;
+        const BETA = 0.2;
+        const blendWeight = histFys.length < 3 ? 0.50 : histFys.length < 4 ? 0.25 : 0.05;
+        const confidence = histFys.length >= 5 ? "High" : histFys.length >= 4 ? "Medium" : histFys.length >= 3 ? "Low" : "Very Low";
+
+        function hwForecast(series: number[]): { f: number[]; hi: number[]; lo: number[] } {
+          if (series.length < 2) return { f: Array(HORIZON).fill(series[0] ?? 0), hi: [], lo: [] };
+          let initTrend = series.length >= 3
+            ? (() => {
+                const xs = series.map((_, i) => i - (series.length - 1) / 2);
+                const ssxy = xs.reduce((s, x, i) => s + x * series[i], 0);
+                const ssxx = xs.reduce((s, x) => s + x * x, 0);
+                return ssxx > 0 ? ssxy / ssxx : series[1] - series[0];
+              })()
+            : series[1] - series[0];
+          const cap = Math.abs(series.at(-1)!) * 0.60;
+          initTrend = Math.max(-cap, Math.min(cap, initTrend));
+          let lvl = series[0], trd = initTrend;
+          const fitted: number[] = [];
+          for (let i = 1; i < series.length; i++) {
+            const pLvl = lvl, pTrd = trd;
+            lvl = ALPHA * series[i] + (1 - ALPHA) * (pLvl + PHI * pTrd);
+            trd = BETA * (lvl - pLvl) + (1 - BETA) * PHI * pTrd;
+            fitted.push(lvl + PHI * trd);
+          }
+          const residuals = series.slice(1).map((v, i) => v - fitted[i]);
+          const resMean = residuals.reduce((s, r) => s + r, 0) / Math.max(residuals.length, 1);
+          const resVar = residuals.reduce((s, r) => s + Math.pow(r - resMean, 2), 0) / Math.max(residuals.length, 1);
+          const floor = Math.abs(series.at(-1)!) * (histFys.length < 3 ? 0.35 : 0.18);
+          const resStd = Math.max(Math.sqrt(resVar), floor);
+          const lastActual = series.at(-1)!;
+          const Z90 = 1.645;
+          const f: number[] = [], hi: number[] = [], lo: number[] = [];
+          let damp = 0;
+          for (let h = 1; h <= HORIZON; h++) {
+            damp += Math.pow(PHI, h);
+            const modelF = lvl + damp * trd;
+            const sustF = lastActual * Math.pow(1 + SUSTAINABLE, h);
+            const fc = (1 - blendWeight) * modelF + blendWeight * sustF;
+            f.push(fc);
+            const margin = Z90 * resStd * Math.sqrt(h) * (histFys.length < 3 ? 1.5 : 1.0);
+            hi.push(fc + margin);
+            lo.push(Math.max(0, fc - margin));
+          }
+          return { f, hi, lo };
+        }
+
+        function getSeries(stmtTypes: string[], aliases: string[]): number[] {
+          return histFys.map(fy => {
+            for (const st of stmtTypes) {
+              const row = extracted.find(r => r.statement_type === st && r.fiscal_year === fy);
+              if (!row) continue;
+              const items = (row.line_items as unknown as LineItem[]) ?? [];
+              for (const alias of aliases) {
+                const it = items.find(i => i.label === alias);
+                if (it) {
+                  const v = it.override_value ?? it.value;
+                  if (v !== null) return scaleUnit(Number(v), unit) ?? 0;
+                }
+              }
+            }
+            return 0;
+          });
+        }
+
+        const AI_METRICS: { label: string; stmts: string[]; aliases: string[] }[] = [
+          { label: "Turnover",   stmts: ["profit_loss"], aliases: ["Turnover","Total Revenue from Operations","Revenue","Net Sales","Total Income"] },
+          { label: "EBITDA",     stmts: ["profit_loss"], aliases: ["EBITDA","Earnings before Interest Tax and Depreciation"] },
+          { label: "PAT",        stmts: ["profit_loss"], aliases: ["PAT","Profit After Tax","Net Profit"] },
+          { label: "Net Worth",  stmts: ["balance_sheet"], aliases: ["Net Worth","Shareholders Equity","Total Equity"] },
+          { label: "Total Debt", stmts: ["balance_sheet"], aliases: ["Total Debt","Total Borrowings"] },
+        ];
+
+        const metricData = AI_METRICS.map(m => {
+          const series = getSeries(m.stmts, m.aliases);
+          const hw = hwForecast(series);
+          return { label: m.label, series, hw };
+        });
+
+        // Header note
+        children.push(new Paragraph({
+          children: [
+            new TextRun({ text: "AI-Estimated Financial Projections  ", bold: true, color: CLR.navy, size: SZ.sm, font: "Calibri" }),
+            new TextRun({ text: `[Confidence: ${confidence}  ·  Damped Holt-Winters φ=0.88  ·  ${histFys.length}Y data${histFys.length < 3 ? " (1Y growth only — not a CAGR)" : ""}`, color: CLR.muted, size: SZ.sm, font: "Calibri", italics: true }),
+            new TextRun({ text: blendWeight > 0.1 ? "  ·  Blended 50% toward 20% sustainable growth rate]" : "]", color: CLR.muted, size: SZ.sm, font: "Calibri", italics: true }),
+          ],
+          spacing: { before: 80, after: 80 },
+        }));
+
+        // Columns: Label | hist years | forecast years | CAGR | +90CI | -90CI
+        const totalCols = 1 + histFys.length + HORIZON + 3;
+        const colW = Math.floor(CW / totalCols);
+        const labelW = Math.max(colW, 1600);
+        const dataW = Math.floor((CW - labelW) / (histFys.length + HORIZON + 3));
+        const allWidths = [labelW, ...Array(histFys.length + HORIZON + 3).fill(dataW)];
+
+        const hdrLabels = [
+          "Metric (₹ L)",
+          ...histFys.map(y => `FY${y}\nActual`),
+          ...forecastFys.map(y => `FY${y}\nEst.`),
+          "CAGR", "+90% CI", "−90% CI",
+        ];
+        const aiHdr = goldRow(hdrLabels, allWidths);
+
+        const aiRows = metricData.map(({ label, series, hw }, ri) => {
+          const fcFirst = hw.f[0] ?? null;
+          const fcLast = hw.f.at(-1) ?? null;
+          let cagr = "—";
+          if (fcFirst !== null && fcLast !== null && fcFirst > 0 && HORIZON > 1) {
+            const c = (Math.pow(fcLast / fcFirst, 1 / (HORIZON - 1)) - 1) * 100;
+            if (isFinite(c)) cagr = `${c >= 0 ? "+" : ""}${c.toFixed(1)}%`;
+          }
+          const vals: string[] = [
+            label,
+            ...series.map(v => v !== 0 ? fmtNum(v) : "—"),
+            ...hw.f.map(fmtNum),
+            cagr,
+            hw.hi[0] != null ? fmtNum(hw.hi[0]) : "—",
+            hw.lo[0] != null ? fmtNum(hw.lo[0]) : "—",
+          ];
+          return dataRow(vals, allWidths, ri);
+        });
+
+        children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [aiHdr, ...aiRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
+        children.push(new Paragraph({
+          children: [new TextRun({ text: "▸ AI estimate only. Upload management projections to replace with actuals.", color: CLR.muted, size: SZ.sm - 2, font: "Calibri", italics: true })],
+          spacing: { before: 40, after: 40 },
+        }));
+      } else {
+        children.push(new Paragraph({ children: [new TextRun({ text: "No projection data available. Upload projections or ensure at least 2 years of historical financials for AI estimates.", color: CLR.muted, size: SZ.base, font: "Calibri", italics: true })], spacing: { before: 80, after: 80 } }));
+      }
+    }
+    children.push(spacer(200));
+
+    // ── Provisional Financials ──────────────────────────────────────────────────
+    const provPeriods = ((ic.provisional ?? []) as Array<{
+      id: string; label: string; fiscal_year: number; months_covered: number; unit: string;
+      pl: LineItem[]; bs: LineItem[]; cf: LineItem[];
+    }>).sort((a, b) => a.fiscal_year - b.fiscal_year);
+
+    function toProvLakhs(v: number | null, provUnit: string): number | null {
+      if (v === null) return null;
+      const u = provUnit.toLowerCase();
+      if (u === "inr" || u === "rupees" || u === "rs") return v / 1e5;
+      if (u === "crores" || u === "crore") return v * 100;
+      if (u === "thousands") return v / 100;
+      return v;
+    }
+    function getProvVal(items: LineItem[], label: string, provUnit: string): number | null {
+      const it = items.find(i => i.label === label);
+      if (!it) return null;
+      const v = it.override_value !== undefined && it.override_value !== null ? it.override_value : it.value;
+      return v !== null ? toProvLakhs(Number(v), provUnit) : null;
+    }
+
+    if (provPeriods.length > 0) {
+      const provColW = Math.floor((CW - COL.finLabel) / provPeriods.length);
+      const provWidths = [COL.finLabel, ...provPeriods.map(() => provColW)];
+      const periodHdrs = provPeriods.map(p => `${p.label || `FY${p.fiscal_year}`}\n${p.months_covered}M`);
+
+      function provTable(title: string, labels: string[], getter: (p: typeof provPeriods[0], label: string) => number | null): void {
+        const activeLabels = labels.filter(l => provPeriods.some(p => getter(p, l) !== null));
+        if (!activeLabels.length) return;
+        children.push(new Paragraph({ children: [new TextRun({ text: title, bold: true, color: CLR.navy, size: SZ.sm, font: "Calibri", allCaps: true })], spacing: { before: 160, after: 60 } }));
+        const hdr = goldRow(["Line Item (₹ L)", ...periodHdrs], provWidths);
+        const rows = activeLabels.map((l, ri) => dataRow([l, ...provPeriods.map(p => fmtNum(getter(p, l)))], provWidths, ri));
+        children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [hdr, ...rows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
+      }
+
+      const PROV_PL = ["Turnover","Cost of Goods Sold","Gross Profit","Operating Expenses","EBITDA","Depreciation","EBIT","Interest Expense","Profit Before Tax","Tax","PAT"];
+      const PROV_BS = ["Share Capital","Reserves & Surplus","Net Worth","Long Term Borrowings","Short Term Borrowings","Total Debt","Trade Payables","Other Current Liabilities","Current Liabilities","Total Liabilities","Fixed Assets (Net)","Inventory","Trade Receivables","Cash & Bank","Other Current Assets","Current Assets","Total Assets"];
+      const PROV_CF = ["Cash from Operations","Cash from Investing","Cash from Financing","Net Change in Cash","Opening Cash","Closing Cash"];
+
+      provTable("Provisional P&L (₹ Lakhs)", PROV_PL, (p, l) => getProvVal(p.pl, l, p.unit ?? "Lakhs"));
+      provTable("Provisional Balance Sheet (₹ Lakhs)", PROV_BS, (p, l) => getProvVal(p.bs, l, p.unit ?? "Lakhs"));
+      provTable("Provisional Cash Flow (₹ Lakhs)", PROV_CF, (p, l) => getProvVal(p.cf ?? [], l, p.unit ?? "Lakhs"));
+      children.push(spacer(200));
+    }
+
+    // ── Analyst commentary on projections ──────────────────────────────────────
+    const projComment = ic.projections_comment;
+    if (projComment && projComment.trim()) {
+      children.push(new Paragraph({ children: [new TextRun({ text: "Analyst Commentary", bold: true, color: CLR.navy, size: SZ.sm, font: "Calibri", allCaps: true })], spacing: { before: 120, after: 60 } }));
+      children.push(new Paragraph({ children: [new TextRun({ text: projComment.trim(), color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 60, after: 80 }, indent: { left: 200 } }));
+    }
+
+    // ── AI-generated projections narrative (if generated) ──────────────────
+    // ── AI Projection Analysis note ────────────────────────────────────────
+    const projNote = ic.projections_note;
+    if (projNote && (projNote.headline || projNote.bullets?.length)) {
+      children.push(new Paragraph({
+        children: [new TextRun({ text: "✦ AI Projection Analysis", bold: true, color: CLR.navy, size: SZ.sm, font: "Calibri", allCaps: true })],
+        spacing: { before: 160, after: 60 },
+      }));
+      if (projNote.headline) {
+        children.push(new Paragraph({
+          children: [new TextRun({ text: projNote.headline, bold: true, color: CLR.body, size: SZ.base, font: "Calibri" })],
+          spacing: { before: 40, after: 60 },
+          shading: { type: ShadingType.SOLID, color: "EEF2FF", fill: "EEF2FF" },
+          indent: { left: 200, right: 200 },
+        }));
+      }
+      for (const bullet of (projNote.bullets ?? [])) {
+        children.push(new Paragraph({
+          children: [new TextRun({ text: bullet, color: CLR.body, size: SZ.base, font: "Calibri" })],
+          bullet: { level: 0 },
+          spacing: { before: 30, after: 30 },
+          indent: { left: 360, hanging: 180 },
+        }));
+      }
+      for (const flag of (projNote.flags ?? [])) {
+        children.push(new Paragraph({
+          children: [new TextRun({ text: `⚠ ${flag}`, color: "B45309", size: SZ.base - 1, font: "Calibri", italics: true })],
+          spacing: { before: 40, after: 20 },
+          shading: { type: ShadingType.SOLID, color: "FFFBEB", fill: "FFFBEB" },
+          indent: { left: 200 },
+        }));
+      }
+    }
+
+    // ── Old narrative template (if generated separately) ────────────────────
+    const projTpl = tpls["projections"];
+    if (projTpl && (projTpl.rows?.length || projTpl.headline || projTpl.bullets?.length)) {
+      narrativeBody(projTpl).forEach(p => children.push(p));
+    }
+    children.push(spacer(160));
+  }
 
   // ── VII – Key Ratios ───────────────────────────────────────────────────────
   const CAT_ORDER  = ["coverage","liquidity","solvency","profitability","efficiency","expenses","r_score","return"];
@@ -986,6 +1269,29 @@ export async function generateIcDeckWord(params: {
   // ── X – Risk Matrix ────────────────────────────────────────────────────────
   children.push(sectionHdr("X", "Risk Assessment & Mitigation"));
   children.push(spacer(80));
+  const riskTpl = tpls["risk_assessment"] as unknown as { categories?: { category: string; intro?: string; items: { title: string; risk: string; mitigation: string; severity?: string }[] }[]; generated_at?: string } | undefined;
+  if (riskTpl?.categories?.length) {
+    // Generated rich format — render each category as a labelled block
+    for (const cat of riskTpl.categories) {
+      children.push(new Paragraph({ children: [new TextRun({ text: cat.category.toUpperCase(), bold: true, color: CLR.navy, size: SZ.sm + 2, font: "Calibri", allCaps: true })], spacing: { before: 200, after: 60 } }));
+      if (cat.intro) children.push(new Paragraph({ children: [new TextRun({ text: cat.intro, color: CLR.body, size: SZ.base, font: "Calibri", italics: true })], spacing: { before: 40, after: 80 } }));
+      const catW = [2400, 3400, 3200, 800] as number[];
+      const catHdr = goldRow(["Risk", "Description", "Mitigation", "Sev."], catW);
+      const catRows = cat.items.map((item, i) => {
+        const bg = i % 2 === 0 ? CLR.white : CLR.altRow;
+        const sevUpper = (item.severity ?? "").toUpperCase();
+        const sevColor = sevUpper === "HIGH" ? CLR.red : sevUpper === "MEDIUM" ? CLR.amber : CLR.blue;
+        return new TableRow({ children: [
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: item.title ?? "—", bold: true, color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 60, after: 60 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: bg }, width: { size: catW[0], type: WidthType.DXA }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: item.risk ?? "—", color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 60, after: 60 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: bg }, width: { size: catW[1], type: WidthType.DXA }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: item.mitigation ?? "—", color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 60, after: 60 }, indent: { left: 80 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: bg }, width: { size: catW[2], type: WidthType.DXA }, borders: BORDERS_THIN }),
+          new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: sevUpper.slice(0, 3) || "—", bold: true, color: sevColor, size: SZ.base, font: "Calibri" })], alignment: AlignmentType.CENTER, spacing: { before: 60, after: 60 } })], shading: { type: ShadingType.CLEAR, color: "auto", fill: bg }, width: { size: catW[3], type: WidthType.DXA }, borders: BORDERS_THIN }),
+        ]});
+      });
+      children.push(new Table({ rows: [catHdr, ...catRows], width: { size: 100, type: WidthType.PERCENTAGE }, columnWidths: catW }));
+      children.push(spacer(80));
+    }
+  } else {
   const risks = ic.risks ?? [];
   if (!risks.length) {
     children.push(new Paragraph({ children: [new TextRun({ text: "No risks entered. Add them in the IC Note tab.", color: CLR.muted, size: SZ.base, font: "Calibri", italics: true })], spacing: { before: 80, after: 80 } }));
@@ -1006,6 +1312,7 @@ export async function generateIcDeckWord(params: {
     });
     children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [rskHdr, ...rskRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
   }
+  } // end riskTpl else
   children.push(spacer(200));
 
   // ── XI – Visit Report (checklist + photos + narrative) ──────────────────────
@@ -1166,6 +1473,103 @@ export async function generateIcDeckWord(params: {
   }
   children.push(spacer(160));
   children.push(sectionHdr(null, "Rehbar Investment Approval Policies"));
+  children.push(spacer(80));
+
+  // IC Portal link (clickable hyperlink in Word)
+  {
+    const portalUrl = cc.case_code
+      ? `${window.location.origin}/ic?case=${encodeURIComponent(cc.case_code)}`
+      : `${window.location.origin}/ic`;
+
+    // Case under review box
+    children.push(new Paragraph({
+      children: [
+        new TextRun({ text: "Case Under Review:  ", bold: true, color: CLR.navy, size: SZ.base, font: "Calibri" }),
+        new TextRun({ text: `${clientName}${cc.case_code ? `  ·  ${cc.case_code}` : ""}`, color: CLR.body, size: SZ.base, font: "Calibri" }),
+      ],
+      shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.altRow },
+      spacing: { before: 60, after: 60 },
+      indent: { left: 160, right: 160 },
+      border: { left: { style: BorderStyle.SINGLE, size: 12, color: CLR.navy } },
+    }));
+    children.push(spacer(80));
+
+    // IC Review Portal label
+    children.push(new Paragraph({
+      children: [new TextRun({ text: "IC REVIEW PORTAL", bold: true, color: CLR.gold, size: SZ.sm, font: "Calibri", allCaps: true })],
+      shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.navy },
+      spacing: { before: 80, after: 0 },
+      indent: { left: 160, right: 160 },
+    }));
+    children.push(new Paragraph({
+      children: [new TextRun({ text: "Vote, comment, and discuss this case with the Investment Committee", color: "CCCCCC", size: SZ.base, font: "Calibri" })],
+      shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.navy },
+      spacing: { before: 40, after: 0 },
+      indent: { left: 160, right: 160 },
+    }));
+    // Clickable hyperlink
+    children.push(new Paragraph({
+      children: [
+        new ExternalHyperlink({
+          link: portalUrl,
+          children: [
+            new TextRun({
+              text: portalUrl,
+              style: "Hyperlink",
+              color: "F5C518",
+              size: SZ.sm,
+              font: "Courier New",
+            }),
+          ],
+        }),
+      ],
+      shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.navy },
+      spacing: { before: 40, after: 100 },
+      indent: { left: 160, right: 160 },
+    }));
+    children.push(spacer(80));
+
+    // Process steps — 2-column table
+    const STEPS = [
+      { num: "01", title: "Review IC Note",       desc: "Read the full credit memo, financial analysis, risk matrix and deal structure." },
+      { num: "02", title: "Comment by Section",   desc: "Add inline comments on any section — executive summary, financials, ratios, or conditions precedent." },
+      { num: "03", title: "Cast Your Vote",        desc: "Vote Approve, Conditional Approval, or Decline. Attach notes to your decision." },
+      { num: "04", title: "IC Decision Recorded", desc: "Once quorum is met, the final committee decision is locked and routed to the operations team." },
+    ];
+    children.push(new Paragraph({ children: [new TextRun({ text: "IC REVIEW PROCESS", bold: true, color: CLR.muted, size: SZ.sm, font: "Calibri", allCaps: true })], spacing: { before: 60, after: 60 } }));
+    const stepW = Math.floor(CW / 2);
+    for (let i = 0; i < STEPS.length; i += 2) {
+      const pair = STEPS.slice(i, i + 2);
+      const stepRow = new TableRow({
+        children: pair.map(step => new TableCell({
+          children: [
+            new Paragraph({ children: [new TextRun({ text: step.num, bold: true, color: CLR.navy, size: 28, font: "Calibri" })], spacing: { before: 60, after: 20 }, indent: { left: 80 } }),
+            new Paragraph({ children: [new TextRun({ text: step.title, bold: true, color: CLR.body, size: SZ.base, font: "Calibri" })], spacing: { before: 0, after: 30 }, indent: { left: 80 } }),
+            new Paragraph({ children: [new TextRun({ text: step.desc, color: CLR.muted, size: SZ.sm, font: "Calibri" })], spacing: { before: 0, after: 60 }, indent: { left: 80 } }),
+          ],
+          shading: { type: ShadingType.CLEAR, color: "auto", fill: CLR.altRow },
+          width: { size: stepW, type: WidthType.DXA },
+          borders: BORDERS_THIN,
+          margins: { top: 60, bottom: 60, left: 80, right: 80 },
+        })),
+      });
+      children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [stepRow], borders: BORDERS_THIN }));
+      children.push(spacer(60));
+    }
+
+    // Quorum policy note
+    children.push(spacer(40));
+    children.push(new Paragraph({
+      children: [
+        new TextRun({ text: "Quorum Policy: ", bold: true, color: "92400E", size: SZ.sm, font: "Calibri" }),
+        new TextRun({ text: "A minimum of 3 IC members must cast a vote for the decision to be binding. Conditional approvals require written conditions to be recorded before the deal proceeds to disbursement.", color: "92400E", size: SZ.sm, font: "Calibri" }),
+      ],
+      shading: { type: ShadingType.CLEAR, color: "auto", fill: "FFF8E1" },
+      border: { left: { style: BorderStyle.SINGLE, size: 12, color: "F5C518" } },
+      spacing: { before: 60, after: 60 },
+      indent: { left: 160, right: 160 },
+    }));
+  }
   children.push(spacer(200));
 
   // ── Closing ────────────────────────────────────────────────────────────────

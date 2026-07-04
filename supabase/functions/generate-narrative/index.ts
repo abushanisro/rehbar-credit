@@ -317,21 +317,52 @@ function buildTables(financials: FinRow[], ratios: RatioRow[], provisional?: Pro
     const ratYears = [...new Set(ratios.map(r => r.fiscal_year))].sort();
     const ratNames = [...new Set(ratios.map(r => r.ratio_name))]
       .filter(n => !n.startsWith("r_score_") || n === "r_score_composite");
+    // Derive ROE / RONW from raw financials for years where stored ratio is null
+    // (happens when negativeEquity guard suppresses it, or ratios not yet recomputed)
+    const PAT_ALIASES = ["PAT","Profit After Tax","Net Profit","Profit for the Period"];
+    const NW_ALIASES  = ["Net Worth","Shareholders Equity","Total Equity","Equity Share Capital","Share Capital + Reserves"];
+    function liGet(items: LineItem[], aliases: string[]): number | null {
+      for (const a of aliases) {
+        const it = items.find(i => i.label === a);
+        if (it) { const v = it.override_value ?? it.value; if (v !== null) return Number(v); }
+      }
+      return null;
+    }
+    function deriveRonw(fy: number): { val: number | null; note: string } {
+      const items = fyMap.get(fy) ?? [];
+      const pat = liGet(items, PAT_ALIASES);
+      const nw  = liGet(items, NW_ALIASES);
+      if (pat === null || nw === null) return { val: null, note: "data unavailable" };
+      if (nw === 0) return { val: null, note: "net worth = 0 (startup — not applicable)" };
+      if (nw < 0)  return { val: null, note: `negative equity (NW ₹${nw.toFixed(1)}L)` };
+      return { val: pat / nw, note: "" };
+    }
+
     const rows = ratNames.map(name => {
       const yCols = ratYears.map(fy => {
         const r = ratios.find(x => x.ratio_name === name && x.fiscal_year === fy);
+        // For ROE/RONW: fall back to derivation from raw financials if stored is null
+        if ((name === "ronw" || name === "roe") && (r?.ratio_value === null || r?.ratio_value === undefined)) {
+          const { val, note } = deriveRonw(fy);
+          if (val !== null) return fmt(name, val);
+          if (note) return note;
+        }
         return r ? fmt(name, r.ratio_value) : "—";
       });
       const first = ratios.find(x => x.ratio_name === name);
       const bm = first?.benchmark != null ? fmt(name, first.benchmark) : "—";
       const latestRatio = ratios.filter(x => x.ratio_name === name)
         .sort((a,b) => b.fiscal_year - a.fiscal_year)[0];
-      const latestVal = latestRatio?.ratio_value != null ? Number(latestRatio.ratio_value) : null;
+      let latestVal = latestRatio?.ratio_value != null ? Number(latestRatio.ratio_value) : null;
+      if (latestVal === null && (name === "ronw" || name === "roe")) {
+        const latestFy = ratYears[ratYears.length - 1];
+        if (latestFy) latestVal = deriveRonw(latestFy).val;
+      }
       const computed = freshStatus(name, latestVal);
       const status = computed !== "na" ? computed : (latestRatio?.threshold_status ?? "na");
       return [DISP[name]||name, ...yCols, bm, SL[status]||"—"];
     });
-    sectionVII = `**Key Financial Ratios**\n${mdTable(["Ratio",...ratYears.map(y=>`FY${y}`),"Benchmark","Status"], rows)}`;
+    sectionVII = `**Key Financial Ratios**\n${mdTable(["Ratio",...ratYears.map(y=>`FY${y}`),"Benchmark","Status"], rows)}\nNote: ROE/RONW values derived from PAT ÷ Net Worth when not stored. If shown as "negative equity" or "net worth = 0", state the reason explicitly — do NOT write "Not on file".`;
   }
 
   return { sectionV, sectionVI, sectionVII };
@@ -1208,6 +1239,8 @@ Deno.serve(async (req) => {
       }
 
       const section_templates: Record<string, unknown> = {};
+      let swotResult: { strengths: string[]; weaknesses: string[]; opportunities: string[]; threats: string[] } | null = null;
+      let projectionsNoteResult: { headline: string; bullets: string[]; flags: string[]; generated_at: string } | null = null;
 
       for (const sectionId of section_ids) {
         const ragContext = await getRagContext(supabase, case_id, sectionId, Deno.env.get("GEMINI_API_KEY") ?? "");
@@ -1252,15 +1285,42 @@ Severity must be exactly "high", "medium", or "low".
 Every risk and mitigation must be specific to this company — no generic statements.`;
 
           try {
-            const text = await callAIText({
-              systemPrompt: "You are a credit analyst writing an Investment Committee risk register. Return only valid JSON.",
+            const result = await callAI({
+              systemPrompt: "You are a credit analyst writing an Investment Committee risk register. Return structured JSON via the tool.",
               userText: riskPrompt,
-              maxTokens: 2000,
+              toolName: "save_risk_assessment",
+              toolDescription: "Save the structured risk assessment categories",
+              toolSchema: {
+                categories: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      category: { type: "string" },
+                      intro: { type: "string" },
+                      items: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          properties: {
+                            title: { type: "string" },
+                            risk: { type: "string" },
+                            mitigation: { type: "string" },
+                            severity: { type: "string", enum: ["high", "medium", "low"] },
+                          },
+                          required: ["title", "risk", "mitigation", "severity"],
+                        },
+                      },
+                    },
+                    required: ["category", "items"],
+                  },
+                },
+              },
+              toolRequired: ["categories"],
+              maxTokens: 3000,
             });
-            const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-            const parsed = JSON.parse(cleaned);
             section_templates[sectionId] = {
-              categories: parsed.categories ?? [],
+              categories: (result.categories as unknown[]) ?? [],
               generated_at: new Date().toISOString(),
             };
           } catch {
@@ -1268,6 +1328,100 @@ Every risk and mitigation must be specific to this company — no generic statem
               categories: [],
               generated_at: new Date().toISOString(),
             };
+          }
+          continue;
+        }
+
+        // ── Special handler: swot_analysis → { strengths, weaknesses, opportunities, threats } ──
+        if (sectionId === "swot_analysis") {
+          const swotPrompt = `You are a Senior Credit Analyst at an Islamic NBFC. Generate a SWOT analysis for the Investment Committee note.
+
+Case: ${cc?.client_name ?? "Unknown"} | Industry: ${cc?.industry ?? "?"} | Amount: INR ${cc?.deal_amount ?? "?"} Lakhs | Product: ${cc?.product_type ?? "?"}
+
+${sectionDataContext}
+
+Return ONLY valid JSON (no markdown, no explanation):
+{
+  "strengths": ["point 1", "point 2", "..."],
+  "weaknesses": ["point 1", "point 2", "..."],
+  "opportunities": ["point 1", "point 2", "..."],
+  "threats": ["point 1", "point 2", "..."]
+}
+
+Each array should have 3-5 concise bullet points. Be specific to this company and deal.`;
+
+          try {
+            const result = await callAI({
+              systemPrompt: "You are a credit analyst writing an Investment Committee SWOT analysis. Return structured JSON via the tool.",
+              userText: swotPrompt,
+              toolName: "save_swot_analysis",
+              toolDescription: "Save the SWOT analysis with four quadrants",
+              toolSchema: {
+                strengths:     { type: "array", items: { type: "string" } },
+                weaknesses:    { type: "array", items: { type: "string" } },
+                opportunities: { type: "array", items: { type: "string" } },
+                threats:       { type: "array", items: { type: "string" } },
+              },
+              toolRequired: ["strengths", "weaknesses", "opportunities", "threats"],
+              maxTokens: 1500,
+            });
+            swotResult = {
+              strengths:     (result.strengths     as string[]) ?? [],
+              weaknesses:    (result.weaknesses    as string[]) ?? [],
+              opportunities: (result.opportunities as string[]) ?? [],
+              threats:       (result.threats       as string[]) ?? [],
+            };
+          } catch {
+            swotResult = { strengths: [], weaknesses: [], opportunities: [], threats: [] };
+          }
+          continue;
+        }
+
+        // ── Special handler: projections_note → concise analyst note ────────────
+        if (sectionId === "projections_note") {
+          const projNotePrompt = `You are a Senior Credit Analyst at an Islamic NBFC writing a concise Investment Committee projection note.
+
+Case: ${cc?.client_name ?? "Unknown"} | Industry: ${cc?.industry ?? "?"} | Amount: INR ${cc?.deal_amount ?? "?"} Lakhs | Product: ${cc?.product_type ?? "?"}
+
+${sectionDataContext}
+
+Write a CONCISE analyst note (5-7 bullet points) covering:
+1. Revenue trajectory: historical trend + what projections/AI estimates show (include actual numbers)
+2. Profitability outlook: EBITDA and PAT trajectory
+3. Debt serviceability: how projected cash flows cover the proposed repayment
+4. Key assumption check: are projections realistic vs. historical performance?
+5. Provisional data signal: what the latest partial-year data indicates about trajectory
+6. 1-2 specific risks or flags if growth assumptions look aggressive
+
+Rules:
+- Be CONCISE. Each bullet: max 25 words. Use actual numbers from the data.
+- If no projections uploaded, base analysis on AI Holt-Winters estimates + provisional data.
+- Use Islamic finance framing (murabaha/ijarah/musharaka context where relevant).
+- Headline: one crisp sentence summarising the projection outlook.
+- Flags: serious concerns only (e.g. very high growth assumption, negative PAT projected, debt > NW).`;
+
+          try {
+            const result = await callAI({
+              systemPrompt: "You are a credit analyst. Return structured JSON via the tool. Be concise — each bullet max 25 words.",
+              userText: projNotePrompt,
+              toolName: "save_projections_note",
+              toolDescription: "Save the concise projection analyst note",
+              toolSchema: {
+                headline: { type: "string", description: "One sentence summary of projection outlook" },
+                bullets:  { type: "array", items: { type: "string" }, description: "5-7 concise analysis bullets" },
+                flags:    { type: "array", items: { type: "string" }, description: "Serious risks or concerns, empty array if none" },
+              },
+              toolRequired: ["headline", "bullets", "flags"],
+              maxTokens: 1200,
+            });
+            projectionsNoteResult = {
+              headline:     (result.headline as string) ?? "",
+              bullets:      (result.bullets  as string[]) ?? [],
+              flags:        (result.flags    as string[]) ?? [],
+              generated_at: new Date().toISOString(),
+            };
+          } catch {
+            projectionsNoteResult = { headline: "", bullets: [], flags: [], generated_at: new Date().toISOString() };
           }
           continue;
         }
@@ -1289,6 +1443,7 @@ ${["client_promoter","executive_summary"].includes(sectionId) ? `- For company i
 - For financial figures: state actual numbers only (e.g. "₹X Cr → ₹Y Cr, +Z%"). No narrative, no interpretation.
 - Flags: one-line risks with specific numbers only. No vague statements.
 - If data is truly absent: write "Not on file" (3 words, nothing more).
+${sectionId === "key_ratios" ? `- For "Return Ratios – ROE / RONW": NEVER write "Not on file". If ratio table shows "—", derive from PAT ÷ Net Worth using the financials table above. If net worth is negative or zero (early-stage company), write e.g. "Negative equity (NW ₹X L) — ROE not applicable; PAT ₹Y L". Include actual numbers.` : ""}
 
 Generate the following labeled rows (key-value table format matching Rehbar IC Deck slides). Be specific — include actual names, numbers, dates, addresses from the data above.
 
@@ -1325,8 +1480,12 @@ Return ONLY valid JSON (no markdown, no explanation):
         }
       }
 
+      const responsePayload: Record<string, unknown> = { section_templates };
+      if (swotResult) responsePayload.swot = swotResult;
+      if (projectionsNoteResult) responsePayload.projections_note = projectionsNoteResult;
+
       return new Response(
-        JSON.stringify({ section_templates }),
+        JSON.stringify(responsePayload),
         { headers: { ...cors, "Content-Type": "application/json" } }
       );
     }

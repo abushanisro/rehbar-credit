@@ -50,6 +50,9 @@ export interface ICDeckTabProps {
   onGenerateSection: (sectionId: string) => Promise<void>;
   generatingSection: string | null;
   generationRun?: string | null;
+  onAutoFix?: (issueId: string) => Promise<void>;
+  onDismissIssue?: (issueId: string) => void;
+  dismissedIssues?: string[];
 }
 
 // ── Section metadata (narrative sections only) ─────────────────────────────────
@@ -122,9 +125,13 @@ export function ICDeckTab({
   onGenerateSection,
   generatingSection,
   generationRun,
+  onAutoFix,
+  onDismissIssue,
+  dismissedIssues = [],
 }: ICDeckTabProps) {
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [exportingWord, setExportingWord] = useState(false);
+  const [fixingIssue, setFixingIssue] = useState<string | null>(null);
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const mainRef = useRef<HTMLDivElement | null>(null);
 
@@ -205,7 +212,7 @@ export function ICDeckTab({
   const tpl = ic.section_templates ?? {};
 
   // ── Data quality checks ───────────────────────────────────────────────────
-  const dqIssues: DataQualityIssue[] = React.useMemo(
+  const allDqIssues: DataQualityIssue[] = React.useMemo(
     () => runDataQualityChecks(
       { deal_amount: cc.deal_amount != null ? Number(cc.deal_amount) : null, client_name: cc.client_name },
       extracted ?? [],
@@ -214,8 +221,15 @@ export function ICDeckTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [cc.id, cc.deal_amount, (extracted ?? []).length, (gstData ?? []).length],
   );
+  const dqIssues = allDqIssues.filter(d => !dismissedIssues.includes(d.id));
   const hardIssues = dqIssues.filter(d => d.severity === "hard");
   const warnIssues = dqIssues.filter(d => d.severity === "warn");
+
+  // Auto-fix labels: issues that have a concrete programmatic fix
+  const AUTO_FIX_LABELS: Record<string, string> = {
+    projection_units_mismatch: "Auto Fix: Multiply projections × 100",
+    deal_amount_unit_error:    "Auto Fix: Divide deal amount ÷ 100",
+  };
 
   // ── TOC sections list ─────────────────────────────────────────────────────
   const tocSections = DECK_SECTIONS.map((sec, idx) => ({
@@ -451,8 +465,31 @@ export function ICDeckTab({
                 </div>
                 {hardIssues.map(issue => (
                   <div key={issue.id} style={{ marginBottom: 8, paddingLeft: 20, borderLeft: "3px solid #EF4444" }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#7F1D1D", marginBottom: 2 }}>{issue.title}</div>
-                    <div style={{ fontSize: 10.5, color: "#991B1B", lineHeight: 1.6 }}>{issue.detail}</div>
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "#7F1D1D", marginBottom: 2 }}>{issue.title}</div>
+                        <div style={{ fontSize: 10.5, color: "#991B1B", lineHeight: 1.6 }}>{issue.detail}</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexShrink: 0, paddingTop: 2 }}>
+                        {AUTO_FIX_LABELS[issue.id] && onAutoFix && (
+                          <button
+                            disabled={fixingIssue === issue.id}
+                            onClick={async () => { setFixingIssue(issue.id); try { await onAutoFix(issue.id); } finally { setFixingIssue(null); } }}
+                            style={{ fontSize: 10, fontWeight: 700, color: "#FFFFFF", background: "#991B1B", border: "none", borderRadius: 4, padding: "4px 10px", cursor: "pointer", opacity: fixingIssue === issue.id ? 0.6 : 1, whiteSpace: "nowrap" }}
+                          >
+                            {fixingIssue === issue.id ? "Fixing…" : AUTO_FIX_LABELS[issue.id]}
+                          </button>
+                        )}
+                        {onDismissIssue && (
+                          <button
+                            onClick={() => onDismissIssue(issue.id)}
+                            style={{ fontSize: 10, color: "#991B1B", background: "transparent", border: "1px solid #EF4444", borderRadius: 4, padding: "4px 10px", cursor: "pointer", whiteSpace: "nowrap" }}
+                          >
+                            Dismiss
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -467,8 +504,31 @@ export function ICDeckTab({
                 </div>
                 {warnIssues.map(issue => (
                   <div key={issue.id} style={{ marginBottom: 8, paddingLeft: 20, borderLeft: "3px solid #F59E0B" }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#78350F", marginBottom: 2 }}>{issue.title}</div>
-                    <div style={{ fontSize: 10.5, color: "#92400E", lineHeight: 1.6 }}>{issue.detail}</div>
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "#78350F", marginBottom: 2 }}>{issue.title}</div>
+                        <div style={{ fontSize: 10.5, color: "#92400E", lineHeight: 1.6 }}>{issue.detail}</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexShrink: 0, paddingTop: 2 }}>
+                        {AUTO_FIX_LABELS[issue.id] && onAutoFix && (
+                          <button
+                            disabled={fixingIssue === issue.id}
+                            onClick={async () => { setFixingIssue(issue.id); try { await onAutoFix(issue.id); } finally { setFixingIssue(null); } }}
+                            style={{ fontSize: 10, fontWeight: 700, color: "#FFFFFF", background: "#B45309", border: "none", borderRadius: 4, padding: "4px 10px", cursor: "pointer", opacity: fixingIssue === issue.id ? 0.6 : 1, whiteSpace: "nowrap" }}
+                          >
+                            {fixingIssue === issue.id ? "Fixing…" : AUTO_FIX_LABELS[issue.id]}
+                          </button>
+                        )}
+                        {onDismissIssue && (
+                          <button
+                            onClick={() => onDismissIssue(issue.id)}
+                            style={{ fontSize: 10, color: "#92400E", background: "transparent", border: "1px solid #F59E0B", borderRadius: 4, padding: "4px 10px", cursor: "pointer", whiteSpace: "nowrap" }}
+                          >
+                            Dismiss
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -649,6 +709,9 @@ export function ICDeckTab({
                   extracted={extracted}
                   provisional={ic.provisional}
                   comment={ic.projections_comment}
+                  note={ic.projections_note}
+                  generating={generatingSection === "projections_note"}
+                  onGenerate={() => onGenerateSection("projections_note")}
                   pageNum={pageStart}
                 />
               )}
@@ -730,6 +793,8 @@ export function ICDeckTab({
                 <SwotCard
                   swot={ic.swot}
                   pageNum={pageStart}
+                  generating={generatingSection === "swot_analysis"}
+                  onGenerate={() => onGenerateSection("swot_analysis")}
                 />
               )}
             </div>

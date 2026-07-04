@@ -16,6 +16,8 @@ interface SwotData {
 interface SwotCardProps {
   swot?: SwotData;
   pageNum: number;
+  generating?: boolean;
+  onGenerate?: () => void;
 }
 
 interface QuadrantConfig {
@@ -86,12 +88,12 @@ function SwotQuadrant({ config, items }: { config: QuadrantConfig; items: string
   );
 }
 
-export function SwotCard({ swot, pageNum }: SwotCardProps) {
+export function SwotCard({ swot, pageNum, generating, onGenerate }: SwotCardProps) {
   const empty: SwotData = { strengths: [], weaknesses: [], opportunities: [], threats: [] };
   const data = swot ?? empty;
 
   return (
-    <SlideShell roman="XV" title="SWOT Analysis" pageNum={pageNum}>
+    <SlideShell roman="XV" title="SWOT Analysis" pageNum={pageNum} generating={generating} onGenerate={onGenerate}>
       <div style={{ fontFamily: DS.bodyFont }}>
         {/* Top row */}
         <div style={{ display: "flex", borderBottom: "1px solid #E8E8E4" }}>
