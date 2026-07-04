@@ -741,7 +741,9 @@ export async function generateIcDeckWord(params: {
 
   // ── I–IV ─────────────────────────────────────────────────────────────────
   addNarrative("I",   "Executive Summary",        "executive_summary");
-  addNarrative("II",  "Client & Promoter Profile","client_promoter");
+  addNarrative("II",   "Client & Promoter Profile",       "client_promoter");
+  addNarrative("II-b", "CIBIL Report Summary",             "cibil_report");
+  addNarrative("II-c", "Net Worth and Sources of Income",  "net_worth_income");
 
   // III – Investment Structure (table + narrative)
   children.push(sectionHdr("III", "Proposed Investment Structure"));
@@ -1262,6 +1264,11 @@ export async function generateIcDeckWord(params: {
     narrativeBody(tpls["cash_flow"]).forEach(p => children.push(p));
     children.push(spacer(160));
   }
+
+  // ── VIII-b – Cash Flow Observations ──────────────────────────────────────
+  children.push(sectionHdr("VIII-b", "Cash Flow – Observations"));
+  narrativeBody(tpls["cash_flow_obs"]).forEach(p => children.push(p));
+  children.push(spacer(160));
 
   // ── IX – Due Diligence ────────────────────────────────────────────────────
   addNarrative("IX",   "Due Diligence Excerpts","due_diligence");

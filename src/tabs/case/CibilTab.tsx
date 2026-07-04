@@ -695,7 +695,7 @@ export function CibilTab({
           onDelete={handleDelete}
           onRetry={handleRetry}
           busy={busy}
-          docs={docs}
+          docs={docs as unknown as DocRow[]}
           progress={progress}
           progressLabel={label}
           defaultClass="cibil_report"
