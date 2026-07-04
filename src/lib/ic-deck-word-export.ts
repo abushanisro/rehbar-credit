@@ -854,40 +854,72 @@ export async function generateIcDeckWord(params: {
       children.push(new Paragraph({ children: [new TextRun({ text: "No promoter CIBIL reports found. Upload consumer CIBIL reports from the CIBIL tab.", color: CLR.muted, size: SZ.base, font: "Calibri", italics: true })], spacing: { before: 80, after: 80 } }));
     }
 
-    // ── Source of Income from extracted financials ──────────────────────────
+    // ── Source of Income from extracted + provisional financials ───────────
     const histRows2 = extracted.filter(r => r.statement_type !== "projections");
     const histYears2 = [...new Set(histRows2.map(r => r.fiscal_year as number))].sort().slice(-3);
     const cfUnit2 = rawUnit(extracted);
 
-    if (histYears2.length > 0) {
+    // Pick the most recent provisional period (same logic as NetWorthCard)
+    type ProvPeriodSoi = { fiscal_year: number; months_covered?: number; unit?: string; pl?: LineItem[]; bs?: LineItem[] };
+    const provPeriodsSoi = ((ic.provisional ?? []) as ProvPeriodSoi[]).sort((a, b) => b.fiscal_year - a.fiscal_year);
+    const latestProv = provPeriodsSoi[0] ?? null;
+    const provLabel2 = latestProv ? `FY${latestProv.fiscal_year}(P)` : null;
+
+    function toProvLakhs2(v: number | null, u: string | null): number | null {
+      if (v === null) return null;
+      const unit2 = (u ?? "").toLowerCase();
+      if (unit2 === "inr" || unit2 === "rupees" || unit2 === "rs") return v / 1e5;
+      if (unit2 === "crores" || unit2 === "crore") return v * 100;
+      if (unit2 === "thousands") return v / 100;
+      return v;
+    }
+    function getProvSoi(items: LineItem[] | undefined, aliases: string[], unit2: string | null): number | null {
+      for (const alias of aliases) {
+        const item = (items ?? []).find(i => i.label === alias);
+        if (item) {
+          const v = item.override_value !== undefined && item.override_value !== null ? item.override_value : item.value;
+          return v !== null ? toProvLakhs2(Number(v), unit2) : null;
+        }
+      }
+      return null;
+    }
+
+    const SOI_PL = [
+      { label: "Turnover / Net Revenue", aliases: ["Turnover","Net Sales","Revenue","Total Income","Total Revenue from Operations"], section: "pl" as const },
+      { label: "Gross Profit",           aliases: ["Gross Profit"],                                                                   section: "pl" as const },
+      { label: "EBITDA",                 aliases: ["EBITDA"],                                                                         section: "pl" as const },
+      { label: "Interest Expense",       aliases: ["Interest Expense","Finance Costs","Finance Cost"],                                section: "pl" as const },
+      { label: "PAT (Net Profit)",        aliases: ["PAT","Net Profit","Profit After Tax"],                                           section: "pl" as const },
+    ];
+    const SOI_BS = [
+      { label: "Net Worth",   aliases: ["Net Worth","Shareholders Equity","Total Equity"],                         section: "bs" as const },
+      { label: "Total Debt",  aliases: ["Total Debt","Total Borrowings"],                                          section: "bs" as const },
+      { label: "Cash & Bank", aliases: ["Cash & Bank","Cash & Cash Equivalents","Cash and Bank"],                  section: "bs" as const },
+    ];
+
+    const totalSoiCols = histYears2.length + (provLabel2 ? 1 : 0);
+    if (totalSoiCols > 0) {
       children.push(new Paragraph({ children: [new TextRun({ text: "SOURCE OF INCOME (COMPANY FINANCIALS)", bold: true, color: CLR.muted, size: SZ.sm, font: "Calibri", characterSpacing: 40 })], spacing: { before: 160, after: 60 } }));
 
-      const SOI_PL = [
-        { label: "Turnover / Net Revenue", aliases: ["Turnover","Net Sales","Revenue","Total Income","Total Revenue from Operations"] },
-        { label: "Gross Profit",           aliases: ["Gross Profit"] },
-        { label: "EBITDA",                 aliases: ["EBITDA"] },
-        { label: "Interest Expense",       aliases: ["Interest Expense","Finance Costs","Finance Cost"] },
-        { label: "PAT (Net Profit)",        aliases: ["PAT","Net Profit","Profit After Tax"] },
-      ];
-      const SOI_BS = [
-        { label: "Net Worth",   aliases: ["Net Worth","Shareholders Equity","Total Equity"] },
-        { label: "Total Debt",  aliases: ["Total Debt","Total Borrowings"] },
-        { label: "Cash & Bank", aliases: ["Cash & Bank","Cash & Cash Equivalents","Cash and Bank"] },
-      ];
-
       const soiLabelW = 2800;
-      const soiColW = Math.floor((CW - soiLabelW) / histYears2.length);
-      const soiWidths = [soiLabelW, ...histYears2.map(() => soiColW)];
-      const soiHdr = goldRow(["Item (₹ L)", ...histYears2.map(y => `FY ${y}`)], soiWidths);
+      const soiColW = Math.floor((CW - soiLabelW) / totalSoiCols);
+      const soiWidths = [soiLabelW, ...Array(totalSoiCols).fill(soiColW)];
+      const colHeaders = [...histYears2.map(y => `FY ${y}`), ...(provLabel2 ? [provLabel2] : [])];
+      const soiHdr = goldRow(["Item (₹ L)", ...colHeaders], soiWidths);
 
       const soiRows: TableRow[] = [];
       for (const cfg of [...SOI_PL, ...SOI_BS]) {
-        const vals = histYears2.map(y => liValWithAliases(histRows2, y, cfg.label, cfg.aliases, cfUnit2));
-        if (vals.every(v => v === null)) continue;
-        soiRows.push(dataRow([cfg.label, ...vals.map(fmtNum)], soiWidths, soiRows.length));
+        const histVals = histYears2.map(y => liValWithAliases(histRows2, y, cfg.label, cfg.aliases, cfUnit2));
+        const provVal  = latestProv ? getProvSoi(latestProv[cfg.section], cfg.aliases, latestProv.unit ?? null) : null;
+        const allVals  = [...histVals, ...(provLabel2 ? [provVal] : [])];
+        if (allVals.every(v => v === null)) continue;
+        soiRows.push(dataRow([cfg.label, ...allVals.map(fmtNum)], soiWidths, soiRows.length));
       }
       if (soiRows.length > 0) {
         children.push(new Table({ width: { size: CW, type: WidthType.DXA }, rows: [soiHdr, ...soiRows], borders: { insideH: BORDER_THIN, insideV: BORDER_THIN, ...BORDERS_THIN } }));
+        if (provLabel2) {
+          children.push(new Paragraph({ children: [new TextRun({ text: `${provLabel2} = Provisional/Unaudited (from Provisional tab)`, color: CLR.muted, size: SZ.sm, font: "Calibri", italics: true })], spacing: { before: 40, after: 40 } }));
+        }
       }
     }
     children.push(spacer(160));
